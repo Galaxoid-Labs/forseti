@@ -1,0 +1,13 @@
+.claude/
+.DS_Store
+btcnode
+deps/lib/
+deps/libsecp256k1/.libs/
+deps/libsecp256k1/*.o
+deps/libsecp256k1/Makefile
+deps/libsecp256k1/config.*
+deps/libsecp256k1/libtool
+deps/libsecp256k1/stamp-*
+deps/ripemd160/*.o
+*.o
+*.a
