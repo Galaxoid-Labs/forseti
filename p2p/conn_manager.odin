@@ -1,6 +1,7 @@
 package p2p
 
 import "core:fmt"
+import "core:log"
 import "core:mem"
 import tcp "core:net"
 import "core:sync/chan"
@@ -148,7 +149,9 @@ conn_manager_shutdown :: proc(cm: ^Conn_Manager) {
 
 // Main event loop. Discovers peers, connects, processes messages.
 conn_manager_run :: proc(cm: ^Conn_Manager) {
-	fmt.printf("[net] Starting connection manager (network: %s)\n", cm.params.name)
+	context.logger = log.create_console_logger(.Debug, {.Level, .Time, .Terminal_Color})
+
+	log.infof("Starting connection manager (network: %s)", cm.params.name)
 
 	// Skip DNS discovery if peers were already added (e.g. via --connect).
 	if len(cm.peers) == 0 {
@@ -163,16 +166,16 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 			err := conn_manager_add_peer(cm, addr, cm.default_port)
 			if err == .None {
 				connected += 1
-				fmt.printf("[net] Connected to %s:%d\n", addr, cm.default_port)
+				log.infof("Connected to %s:%d", addr, cm.default_port)
 			}
 		}
 
 		if connected == 0 {
-			fmt.printf("[net] No peers available. Exiting.\n")
+			log.warn("No peers available. Exiting.")
 			return
 		}
 	} else {
-		fmt.printf("[net] Using %d pre-configured peer(s)\n", len(cm.peers))
+		log.infof("Using %d pre-configured peer(s)", len(cm.peers))
 	}
 
 	// Send version to all connected peers.
@@ -210,14 +213,14 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 		}
 	}
 
-	fmt.printf("[net] Connection manager shutting down.\n")
+	log.info("Connection manager shutting down.")
 }
 
 // Dispatch inbound message by command.
 _conn_manager_process_message :: proc(cm: ^Conn_Manager, msg: Peer_Message) {
 	// Empty command = disconnect signal.
 	if msg.command == "" {
-		fmt.printf("[net] Peer %d disconnected\n", msg.peer_id)
+		log.infof("Peer %d disconnected", msg.peer_id)
 		sync_handle_disconnect(&cm.sync_mgr, msg.peer_id, &cm.peers)
 		conn_manager_remove_peer(cm, msg.peer_id)
 		return
@@ -260,7 +263,7 @@ _conn_manager_handle_version :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 	r := wire.reader_init(payload)
 	ver, err := wire.deserialize_version(&r, context.temp_allocator)
 	if err != .None {
-		fmt.printf("[net] Bad version from peer %d\n", peer_id)
+		log.warnf("Bad version from peer %d", peer_id)
 		conn_manager_remove_peer(cm, peer_id)
 		return
 	}
@@ -270,7 +273,7 @@ _conn_manager_handle_version :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 	peer.user_agent = ver.user_agent
 	peer.start_height = ver.start_height
 
-	fmt.printf("[net] Peer %d: version=%d, agent=%s, height=%d\n",
+	log.debugf("Peer %d: version=%d, agent=%s, height=%d",
 		peer_id, ver.version, ver.user_agent, ver.start_height)
 
 	// Send verack in response.
@@ -290,7 +293,7 @@ _conn_manager_handle_verack :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 
 	if peer.state == .Handshake_Complete {
 		peer.state = .Active
-		fmt.printf("[net] Peer %d handshake complete, now active\n", peer_id)
+		log.debugf("Peer %d handshake complete, now active", peer_id)
 
 		// Send sendheaders (BIP130).
 		peer_send_sendheaders(peer)
@@ -306,11 +309,11 @@ _conn_manager_handle_headers :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 	r := wire.reader_init(payload)
 	hdrs_msg, err := wire.deserialize_headers(&r, context.temp_allocator)
 	if err != .None {
-		fmt.printf("[net] Bad headers message from peer %d\n", peer_id)
+		log.warnf("Bad headers message from peer %d", peer_id)
 		return
 	}
 
-	fmt.printf("[net] Received %d headers from peer %d\n", len(hdrs_msg.headers), peer_id)
+	log.debugf("Received %d headers from peer %d", len(hdrs_msg.headers), peer_id)
 	sync_handle_headers(&cm.sync_mgr, peer_id, hdrs_msg.headers, &cm.peers)
 }
 
@@ -318,7 +321,7 @@ _conn_manager_handle_block :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload:
 	r := wire.reader_init(payload)
 	block, err := wire.deserialize_block(&r, context.temp_allocator)
 	if err != .None {
-		fmt.printf("[net] Bad block from peer %d\n", peer_id)
+		log.warnf("Bad block from peer %d", peer_id)
 		return
 	}
 

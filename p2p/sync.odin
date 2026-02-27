@@ -1,6 +1,6 @@
 package p2p
 
-import "core:fmt"
+import "core:log"
 import "core:time"
 
 import "../chain"
@@ -68,7 +68,7 @@ sync_start_header_sync :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) -> 
 
 	peer_send_getheaders(best_peer, locator, HASH_ZERO)
 
-	fmt.printf("[sync] Starting header sync with peer %d (height %d)\n", best_id, best_peer.start_height)
+	log.infof("Starting header sync with peer %d (height %d)", best_id, best_peer.start_height)
 	return best_id
 }
 
@@ -86,7 +86,7 @@ sync_handle_headers :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, headers: []wire
 	sm.headers_received += accepted
 	_, height := chain.chain_tip(sm.chain)
 
-	fmt.printf("[sync] Accepted %d/%d headers (tip height: %d)\n", accepted, len(headers), height)
+	log.debugf("Accepted %d/%d headers (tip height: %d)", accepted, len(headers), height)
 
 	if len(headers) >= MAX_HEADERS_PER_MSG {
 		// More headers available — request next batch.
@@ -98,15 +98,15 @@ sync_handle_headers :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, headers: []wire
 		}
 	} else {
 		// Header sync complete — transition to block download.
-		fmt.printf("[sync] Header sync complete. Building download queue...\n")
+		log.info("Header sync complete. Building download queue...")
 		sm.state = .Downloading_Blocks
 		_build_download_queue(sm)
 
 		if len(sm.blocks_to_download) == 0 {
-			fmt.printf("[sync] No blocks to download. Already in sync.\n")
+			log.info("No blocks to download. Already in sync.")
 			sm.state = .In_Sync
 		} else {
-			fmt.printf("[sync] %d blocks queued for download\n", len(sm.blocks_to_download))
+			log.infof("%d blocks queued for download", len(sm.blocks_to_download))
 			sync_request_blocks(sm, peers)
 		}
 	}
@@ -123,7 +123,7 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 	blk := block^
 	cerr := chain.accept_block(sm.chain, &blk)
 	if cerr != .None {
-		fmt.printf("[sync] Block validation failed: %v\n", cerr)
+		log.errorf("Block validation failed: %v", cerr)
 		return
 	}
 
@@ -131,7 +131,7 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 	sm.last_tip_update = time.to_unix_seconds(time.now())
 
 	if height % 1000 == 0 || len(sm.blocks_to_download) == 0 {
-		fmt.printf("[sync] Connected block at height %d (remaining: %d, in-flight: %d)\n",
+		log.debugf("Connected block at height %d (remaining: %d, in-flight: %d)",
 			height, len(sm.blocks_to_download), len(sm.blocks_in_flight))
 	}
 
@@ -140,7 +140,7 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 
 	// Check if we're done.
 	if len(sm.blocks_to_download) == 0 && len(sm.blocks_in_flight) == 0 {
-		fmt.printf("[sync] Block download complete. In sync at height %d\n", height)
+		log.infof("Block download complete. In sync at height %d", height)
 		sm.state = .In_Sync
 	}
 }
@@ -196,7 +196,7 @@ sync_handle_disconnect :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, peers: ^map[
 	if sm.sync_peer == peer_id {
 		sm.sync_peer = 0
 		if sm.state == .Syncing_Headers {
-			fmt.printf("[sync] Sync peer disconnected, finding new peer...\n")
+			log.warn("Sync peer disconnected, finding new peer...")
 			sync_start_header_sync(sm, peers)
 		}
 	}

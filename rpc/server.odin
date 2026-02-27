@@ -2,6 +2,7 @@ package rpc
 
 import "core:encoding/json"
 import "core:fmt"
+import "core:log"
 import "core:strconv"
 import "core:strings"
 import "core:time"
@@ -44,7 +45,7 @@ rpc_server_start :: proc(srv: ^RPC_Server) -> bool {
 
 	socket, err := tcp.listen_tcp(endpoint)
 	if err != nil {
-		fmt.eprintln("RPC: failed to listen on port", srv.port, ":", err)
+		log.errorf("Failed to listen on port %d: %v", srv.port, err)
 		return false
 	}
 

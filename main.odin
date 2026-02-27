@@ -1,7 +1,9 @@
 package main
 
 import "base:runtime"
+import ini "core:encoding/ini"
 import "core:fmt"
+import "core:log"
 import "core:os"
 import "core:strconv"
 import "core:strings"
@@ -30,6 +32,16 @@ _signal_handler :: proc "c" (sig: posix.Signal) {
 	}
 }
 
+CLI_Flag :: enum {
+	Network,
+	Data_Dir,
+	Rpc_Port,
+	Connect,
+	P2P_Port,
+	No_P2P,
+}
+CLI_Flags_Set :: bit_set[CLI_Flag]
+
 CLI_Config :: struct {
 	network:   string,
 	data_dir:  string,
@@ -39,7 +51,7 @@ CLI_Config :: struct {
 	no_p2p:    bool,
 }
 
-_parse_cli :: proc() -> (cfg: CLI_Config, ok: bool) {
+_parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 	cfg.network = "regtest"
 	cfg.data_dir = DEFAULT_DATA_DIR
 	cfg.rpc_port = 0  // 0 = use network default
@@ -49,37 +61,43 @@ _parse_cli :: proc() -> (cfg: CLI_Config, ok: bool) {
 	for arg in os.args[1:] {
 		if arg == "--help" || arg == "-h" {
 			_print_usage()
-			return cfg, false
+			return cfg, flags_set, false
 		} else if strings.has_prefix(arg, "--network=") {
 			cfg.network = arg[len("--network="):]
+			flags_set += {.Network}
 		} else if strings.has_prefix(arg, "--datadir=") {
 			cfg.data_dir = arg[len("--datadir="):]
+			flags_set += {.Data_Dir}
 		} else if strings.has_prefix(arg, "--rpcport=") {
 			val, parse_ok := strconv.parse_int(arg[len("--rpcport="):])
 			if !parse_ok {
 				fmt.eprintln("Error: invalid --rpcport value")
-				return cfg, false
+				return cfg, flags_set, false
 			}
 			cfg.rpc_port = val
+			flags_set += {.Rpc_Port}
 		} else if strings.has_prefix(arg, "--connect=") {
 			cfg.connect = arg[len("--connect="):]
+			flags_set += {.Connect}
 		} else if strings.has_prefix(arg, "--p2p-port=") {
 			val, parse_ok := strconv.parse_int(arg[len("--p2p-port="):])
 			if !parse_ok {
 				fmt.eprintln("Error: invalid --p2p-port value")
-				return cfg, false
+				return cfg, flags_set, false
 			}
 			cfg.p2p_port = val
+			flags_set += {.P2P_Port}
 		} else if arg == "--no-p2p" {
 			cfg.no_p2p = true
+			flags_set += {.No_P2P}
 		} else {
 			fmt.eprintln("Error: unknown flag:", arg)
 			_print_usage()
-			return cfg, false
+			return cfg, flags_set, false
 		}
 	}
 
-	return cfg, true
+	return cfg, flags_set, true
 }
 
 _print_usage :: proc() {
@@ -93,6 +111,80 @@ _print_usage :: proc() {
 	fmt.println("  --p2p-port=<port>     P2P listen port (default: network-appropriate)")
 	fmt.println("  --no-p2p              Disable P2P networking (RPC-only mode)")
 	fmt.println("  --help, -h            Show this help message")
+}
+
+_load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_Set) {
+	// Not an error if config file doesn't exist (first run).
+	if !os.exists(path) {
+		return
+	}
+
+	m, _, ini_ok := ini.load_map_from_path(path, context.allocator, ini.Options{comment = "#"})
+	if !ini_ok {
+		log.warnf("Failed to parse config file: %s", path)
+		return
+	}
+	defer ini.delete_map(m)
+
+	log.infof("Loaded config file: %s", path)
+
+	// Helper: look up key in network section first, then global (empty string) section.
+	_ini_get :: proc(m: ^ini.Map, network: string, key: string) -> (string, bool) {
+		// Try network-specific section first.
+		if section, has_section := m[network]; has_section {
+			if val, has_key := section[key]; has_key {
+				return val, true
+			}
+		}
+		// Fall back to global section.
+		if global, has_global := m[""]; has_global {
+			if val, has_key := global[key]; has_key {
+				return val, true
+			}
+		}
+		return "", false
+	}
+
+	// Apply config values only where CLI flags were NOT explicitly set.
+	if .Network not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "network"); found {
+			cfg.network = val
+		}
+	}
+
+	if .Data_Dir not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "datadir"); found {
+			cfg.data_dir = val
+		}
+	}
+
+	if .Rpc_Port not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "rpcport"); found {
+			if port, parse_ok := strconv.parse_int(val); parse_ok {
+				cfg.rpc_port = port
+			}
+		}
+	}
+
+	if .Connect not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "connect"); found {
+			cfg.connect = val
+		}
+	}
+
+	if .P2P_Port not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "p2p-port"); found {
+			if port, parse_ok := strconv.parse_int(val); parse_ok {
+				cfg.p2p_port = port
+			}
+		}
+	}
+
+	if .No_P2P not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "no-p2p"); found {
+			cfg.no_p2p = val == "1" || val == "true" || val == "yes"
+		}
+	}
 }
 
 _select_params :: proc(network: string) -> (params: ^consensus.Chain_Params, rpc_port: int, ok: bool) {
@@ -116,7 +208,7 @@ _select_params :: proc(network: string) -> (params: ^consensus.Chain_Params, rpc
 		return params, 18443, true
 	}
 
-	fmt.eprintln("Error: unknown network:", network)
+	log.errorf("Unknown network: %s", network)
 	free(params)
 	return nil, 0, false
 }
@@ -145,16 +237,21 @@ _parse_connect :: proc(connect: string) -> (address: string, port: int, ok: bool
 }
 
 main :: proc() {
+	context.logger = log.create_console_logger(.Debug, {.Level, .Time, .Terminal_Color})
+
 	// Parse CLI flags.
-	cfg, cli_ok := _parse_cli()
+	cfg, flags_set, cli_ok := _parse_cli()
 	if !cli_ok {
 		return
 	}
 
+	// Load config file (CLI flags take precedence).
+	_load_config_file(fmt.tprintf("%s/btcnode.conf", cfg.data_dir), &cfg, flags_set)
+
 	crypto.init_secp256k1()
 	defer crypto.destroy_secp256k1()
 
-	fmt.println("bitcoin-node-odin starting...")
+	log.info("bitcoin-node-odin starting...")
 
 	// Select network params.
 	params, default_rpc_port, params_ok := _select_params(cfg.network)
@@ -167,20 +264,20 @@ main :: proc() {
 		rpc_port = cfg.rpc_port
 	}
 
-	fmt.printf("[init] Network: %s\n", params.name)
-	fmt.printf("[init] Data directory: %s\n", cfg.data_dir)
+	log.infof("Network: %s", params.name)
+	log.infof("Data directory: %s", cfg.data_dir)
 
 	// Initialize chain state.
 	cs := new(chain.Chain_State)
 	cs_err := chain.chain_state_init(cs, cfg.data_dir, params)
 	if cs_err != .None {
-		fmt.eprintln("[init] Failed to initialize chain state:", cs_err)
+		log.errorf("Failed to initialize chain state: %v", cs_err)
 		return
 	}
 	defer chain.chain_state_destroy(cs)
 
 	tip_hash, tip_height := chain.chain_tip(cs)
-	fmt.printf("[init] Chain loaded: height=%d tip=%s\n", tip_height, rpc._hash_to_hex(tip_hash))
+	log.infof("Chain loaded: height=%d tip=%s", tip_height, rpc._hash_to_hex(tip_hash))
 
 	// Initialize mempool.
 	mp := new(mempool.Mempool)
@@ -192,12 +289,12 @@ main :: proc() {
 	rpc.rpc_server_init(srv, cs, mp, params, rpc_port)
 
 	if !rpc.rpc_server_start(srv) {
-		fmt.eprintln("[init] Failed to start RPC server on port", rpc_port)
+		log.errorf("Failed to start RPC server on port %d", rpc_port)
 		return
 	}
 	defer rpc.rpc_server_stop(srv)
 
-	fmt.printf("[rpc] Listening on 127.0.0.1:%d\n", rpc_port)
+	log.infof("RPC listening on 127.0.0.1:%d", rpc_port)
 
 	// Set global pointer for signal handler.
 	_g_rpc_server = srv
@@ -206,6 +303,7 @@ main :: proc() {
 	rpc_thread := thread.create_and_start_with_data(
 		rawptr(srv),
 		proc(data: rawptr) {
+			context.logger = log.create_console_logger(.Debug, {.Level, .Time, .Terminal_Color})
 			s := cast(^rpc.RPC_Server)data
 			rpc.rpc_server_run(s)
 		},
@@ -219,20 +317,20 @@ main :: proc() {
 		cm = new(p2p.Conn_Manager)
 		cm_err := p2p.conn_manager_init(cm, cs, params)
 		if cm_err != .None {
-			fmt.eprintln("[init] Failed to initialize connection manager:", cm_err)
+			log.errorf("Failed to initialize connection manager: %v", cm_err)
 			// Continue without P2P — RPC still works.
 		} else {
 			// If --connect was specified, add the peer before starting the run loop.
 			if len(cfg.connect) > 0 {
 				addr, port, connect_ok := _parse_connect(cfg.connect)
 				if !connect_ok {
-					fmt.eprintln("[init] Invalid --connect format, expected ip:port")
+					log.error("Invalid --connect format, expected ip:port")
 				} else {
 					peer_err := p2p.conn_manager_add_peer(cm, addr, port)
 					if peer_err != .None {
-						fmt.printf("[init] Failed to connect to %s:%d: %v\n", addr, port, peer_err)
+						log.warnf("Failed to connect to %s:%d: %v", addr, port, peer_err)
 					} else {
-						fmt.printf("[init] Connected to manual peer %s:%d\n", addr, port)
+						log.infof("Connected to manual peer %s:%d", addr, port)
 					}
 				}
 			}
@@ -265,13 +363,13 @@ main :: proc() {
 	posix.signal(.SIGTERM, _signal_handler)
 
 	if cfg.no_p2p {
-		fmt.println("[init] Node ready (RPC-only mode, P2P disabled).")
+		log.info("Node ready (RPC-only mode, P2P disabled).")
 	} else if cm != nil {
-		fmt.println("[init] Node ready. RPC and P2P running.")
+		log.info("Node ready. RPC and P2P running.")
 	} else {
-		fmt.println("[init] Node ready. RPC running (P2P init failed).")
+		log.info("Node ready. RPC running (P2P init failed).")
 	}
-	fmt.printf("[init] Use bitcoin-cli -rpcport=%d to interact.\n", rpc_port)
+	log.infof("Use bitcoin-cli -rpcport=%d to interact.", rpc_port)
 
 	// Wait for threads to finish.
 	// If P2P is running, wait for it first (signal handler will stop both).
@@ -285,5 +383,5 @@ main :: proc() {
 		thread.join(rpc_thread)
 	}
 
-	fmt.println("[init] Shutting down...")
+	log.info("Shutting down...")
 }

@@ -86,6 +86,29 @@ The binary is output as `btcnode` in the project root.
 | `--p2p-port=<port>` | P2P listen port | Network default |
 | `--no-p2p` | Disable P2P (RPC-only mode) | `false` |
 
+### Config File
+
+The node reads an optional `btcnode.conf` from the data directory (`<datadir>/btcnode.conf`). The format mirrors Bitcoin Core's `bitcoin.conf` — INI-style with `#` comments and `[section]` network overrides.
+
+**Precedence:** CLI flags > config file > defaults
+
+```ini
+# /tmp/btcnode-data/btcnode.conf
+
+network=regtest
+rpcport=18443
+connect=127.0.0.1:18444
+no-p2p=1
+
+# Network-specific sections override global values
+[regtest]
+rpcport=19443
+```
+
+Keys match CLI flag names without the `--` prefix. Boolean values accept `1`, `true`, or `yes` for on.
+
+Values in a network-specific section (e.g. `[regtest]`) take priority over global values. CLI flags always override both.
+
 ### Default Ports
 
 | Network | RPC Port | P2P Port |
@@ -166,7 +189,7 @@ odin test rpc
 
 ```
 bitcoin-node-odin/
-├── main.odin              # Entry point, CLI parsing, thread orchestration
+├── main.odin              # Entry point, CLI parsing, config file, thread orchestration
 ├── Makefile               # Build system
 ├── crypto/                # SHA-256d, RIPEMD-160, HASH160, secp256k1 bindings, Merkle root
 ├── wire/                  # Protocol types, CompactSize, tx/block serialization, message framing
