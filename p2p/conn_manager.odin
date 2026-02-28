@@ -104,6 +104,7 @@ conn_manager_remove_peer :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 }
 
 // Discover peers via DNS seed resolution.
+// Resolves ALL A records from each seed to maximize peer diversity.
 conn_manager_discover_peers :: proc(cm: ^Conn_Manager) -> [dynamic]string {
 	addresses := make([dynamic]string, 0, 32)
 
@@ -123,18 +124,27 @@ conn_manager_discover_peers :: proc(cm: ^Conn_Manager) -> [dynamic]string {
 	}
 
 	for seed in seeds {
-		ep4, _, dns_err := tcp.resolve(seed)
+		records, dns_err := tcp.get_dns_records_from_os(seed, .IP4, context.temp_allocator)
 		if dns_err != nil {
-			continue
-		}
-		if ep4.address == nil {
+			log.debugf("DNS lookup failed for %s", seed)
 			continue
 		}
 
-		// Format the IP address as a string.
-		addr := ep4.address.(tcp.IP4_Address)
-		addr_str := fmt.tprintf("%d.%d.%d.%d", addr[0], addr[1], addr[2], addr[3])
-		append(&addresses, addr_str)
+		log.debugf("DNS seed %s returned %d addresses", seed, len(records))
+
+		for record in records {
+			rec, ok := record.(tcp.DNS_Record_IP4)
+			if !ok {
+				continue
+			}
+			addr := rec.address
+			addr_str := fmt.tprintf("%d.%d.%d.%d", addr[0], addr[1], addr[2], addr[3])
+			append(&addresses, addr_str)
+
+			if len(addresses) >= MAX_OUTBOUND_PEERS * 2 {
+				break
+			}
+		}
 
 		if len(addresses) >= MAX_OUTBOUND_PEERS * 2 {
 			break
@@ -204,6 +214,9 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 		if msg.payload != nil {
 			delete(msg.payload)
 		}
+
+		// Check for stalled block/header requests.
+		sync_check_stalls(&cm.sync_mgr, &cm.peers)
 
 		// Periodic ping check.
 		now := time.to_unix_seconds(time.now())
@@ -302,9 +315,20 @@ _conn_manager_handle_verack :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 		// Send sendheaders (BIP130).
 		peer_send_sendheaders(peer)
 
-		// If no sync in progress, start it.
-		if cm.sync_mgr.state == .Idle {
+		// Register peer for sync tracking.
+		sync_add_peer(&cm.sync_mgr, peer_id)
+
+		switch cm.sync_mgr.state {
+		case .Idle:
 			sync_start_header_sync(&cm.sync_mgr, &cm.peers)
+		case .Syncing_Headers:
+			// Late-joining peer stays idle until dispatched by sync_handle_headers
+			// from the current best header tip. This avoids duplicate header downloads.
+		case .Downloading_Blocks:
+			// Fill new peer's available block slots.
+			sync_request_blocks(&cm.sync_mgr, &cm.peers)
+		case .In_Sync:
+			// Nothing to do.
 		}
 	}
 }

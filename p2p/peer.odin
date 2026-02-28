@@ -44,13 +44,6 @@ peer_connect :: proc(
 		return nil, .Connection_Failed
 	}
 
-	// Set a receive timeout so the reader thread doesn't block forever.
-	timeout_err := tcp.set_option(socket, .Receive_Timeout, time.Duration(30) * time.Second)
-	if timeout_err != nil {
-		tcp.close(socket)
-		return nil, .Connection_Failed
-	}
-
 	peer = new(Peer)
 	peer.id = peer_id
 	peer.socket = socket
