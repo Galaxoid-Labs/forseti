@@ -1,6 +1,9 @@
 package p2p
 
+import "core:fmt"
 import "core:log"
+import "core:math"
+import "core:strings"
 import "core:time"
 
 import "../chain"
@@ -21,6 +24,8 @@ Peer_Sync_State :: struct {
 	getheaders_sent_at:  i64,
 	blocks_in_flight:    int,
 	last_block_received: i64,
+	blocks_delivered:    int,
+	tracking_since:      i64,
 }
 
 Sync_Manager :: struct {
@@ -72,6 +77,7 @@ sync_add_peer :: proc(sm: ^Sync_Manager, peer_id: Peer_Id) {
 	now := time.to_unix_seconds(time.now())
 	sm.peer_sync[peer_id] = Peer_Sync_State{
 		last_block_received = now,
+		tracking_since      = now,
 	}
 	append(&sm.peer_rr_list, peer_id)
 }
@@ -215,6 +221,7 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 	if ps_found {
 		ps.blocks_in_flight = max(0, ps.blocks_in_flight - 1)
 		ps.last_block_received = time.to_unix_seconds(time.now())
+		ps.blocks_delivered += 1
 		sm.peer_sync[peer_id] = ps
 	}
 
@@ -251,6 +258,11 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 		if height / 1000 > prev_height / 1000 || remaining == 0 {
 			log.debugf("Connected block at height %d (remaining: %d, in-flight: %d)",
 				height, remaining, len(sm.blocks_in_flight))
+
+			// Log per-peer throughput stats at 5000-block intervals.
+			if height / 5000 > prev_height / 5000 {
+				_log_peer_throughput(sm)
+			}
 		}
 	}
 
@@ -266,7 +278,26 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 	}
 }
 
-// Fill in-flight window from download queue using per-peer round-robin.
+// Compute the dynamic block limit for a peer based on throughput scoring.
+_peer_block_limit :: proc(ps: Peer_Sync_State, now: i64, total_rate: f64, num_scored: int) -> int {
+	elapsed := now - ps.tracking_since
+	if elapsed < PEER_TRIAL_SECS {
+		return PEER_TRIAL_BLOCKS
+	}
+
+	if total_rate <= 0 || num_scored <= 0 {
+		return PEER_TRIAL_BLOCKS
+	}
+
+	peer_rate := f64(ps.blocks_delivered) / f64(elapsed)
+	share := peer_rate / total_rate
+	budget := f64(MAX_BLOCKS_PER_PEER * num_scored)
+	limit := int(budget * share)
+
+	return clamp(limit, MIN_BLOCKS_PER_PEER, MAX_BLOCKS_PER_PEER)
+}
+
+// Fill in-flight window from download queue using bandwidth-weighted round-robin.
 sync_request_blocks :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
 	remaining := len(sm.blocks_to_download) - sm.download_cursor
 	if remaining == 0 || len(sm.peer_rr_list) == 0 {
@@ -275,7 +306,22 @@ sync_request_blocks :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
 
 	now := time.to_unix_seconds(time.now())
 
-	// Try each peer in round-robin order.
+	// First pass: compute total throughput across scored peers.
+	total_rate: f64 = 0
+	num_scored := 0
+	for pid in sm.peer_rr_list {
+		ps, found := sm.peer_sync[pid]
+		if !found {
+			continue
+		}
+		elapsed := now - ps.tracking_since
+		if elapsed >= PEER_TRIAL_SECS && ps.blocks_delivered > 0 {
+			total_rate += f64(ps.blocks_delivered) / f64(elapsed)
+			num_scored += 1
+		}
+	}
+
+	// Second pass: allocate blocks using dynamic per-peer limits.
 	peers_tried := 0
 	for peers_tried < len(sm.peer_rr_list) && remaining > 0 {
 		// Wrap cursor.
@@ -293,7 +339,8 @@ sync_request_blocks :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
 		}
 
 		ps := sm.peer_sync[pid]
-		available := MAX_BLOCKS_PER_PEER - ps.blocks_in_flight
+		peer_limit := _peer_block_limit(ps, now, total_rate, num_scored)
+		available := peer_limit - ps.blocks_in_flight
 		if available <= 0 {
 			continue
 		}
@@ -474,6 +521,38 @@ sync_check_stalls :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
 			delete(locator)
 		}
 	}
+}
+
+// Log per-peer throughput stats.
+_log_peer_throughput :: proc(sm: ^Sync_Manager) {
+	now := time.to_unix_seconds(time.now())
+	total_rate: f64 = 0
+	num_scored := 0
+
+	// Compute total rate for scoring context.
+	for _, ps in sm.peer_sync {
+		elapsed := now - ps.tracking_since
+		if elapsed >= PEER_TRIAL_SECS && ps.blocks_delivered > 0 {
+			total_rate += f64(ps.blocks_delivered) / f64(elapsed)
+			num_scored += 1
+		}
+	}
+
+	buf: [512]byte
+	b := strings.builder_from_bytes(buf[:])
+	strings.write_string(&b, "Peer throughput:")
+
+	for id, ps in sm.peer_sync {
+		elapsed := now - ps.tracking_since
+		rate: f64 = 0
+		if elapsed > 0 {
+			rate = f64(ps.blocks_delivered) / f64(elapsed)
+		}
+		limit := _peer_block_limit(ps, now, total_rate, num_scored)
+		fmt.sbprintf(&b, " [%d: %d blks, %.1f/s, lim=%d]", id, ps.blocks_delivered, rate, limit)
+	}
+
+	log.info(strings.to_string(b))
 }
 
 // Build a block locator for getheaders. Walks from best known header
