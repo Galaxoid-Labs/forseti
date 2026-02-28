@@ -1,6 +1,6 @@
 package storage
 
-import "core:os"
+import "core:c"
 
 Block_Status_Flag :: enum u8 {
 	Has_Data,
@@ -33,64 +33,73 @@ Block_Index_Record :: struct {
 BLOCK_INDEX_RECORD_SIZE :: 101
 
 Index_DB :: struct {
-	file_path: string,
-	fd:        os.Handle,
-	records:   map[Hash256]Block_Index_Record,
+	lmdb:    ^LMDB_Store,
+	records: map[Hash256]Block_Index_Record,
 }
 
-// Open the index database, loading all records into memory.
-index_db_open :: proc(data_dir: string, allocator := context.allocator) -> (db: Index_DB, err: Storage_Error) {
-	path_buf: [512]byte
-	path_len := _bprint_path(path_buf[:], data_dir, "/index.dat")
-	db.file_path = string(path_buf[:path_len])
-
+// Initialize index database, loading all records from LMDB into memory.
+index_db_init :: proc(lmdb: ^LMDB_Store, allocator := context.allocator) -> (db: Index_DB, err: Storage_Error) {
+	db.lmdb = lmdb
 	db.records = make(map[Hash256]Block_Index_Record, 1024, allocator)
 
-	// Open or create file
-	fd, open_err := os.open(db.file_path, os.O_RDWR | os.O_CREATE, 0o644)
-	if open_err != nil {
+	// Load all records via cursor scan
+	txn: MDB_txn
+	rc := mdb_txn_begin(lmdb.env, nil, MDB_RDONLY, &txn)
+	if rc != MDB_SUCCESS {
 		return db, .IO_Error
 	}
-	db.fd = fd
+	defer mdb_txn_abort(txn)
 
-	// Read all existing records
-	load_err := _index_load_all(&db, allocator)
-	if load_err != .None {
-		os.close(db.fd)
-		return db, load_err
+	cursor: MDB_cursor
+	rc = mdb_cursor_open(txn, lmdb.index_dbi, &cursor)
+	if rc != MDB_SUCCESS {
+		return db, .IO_Error
+	}
+	defer mdb_cursor_close(cursor)
+
+	key: MDB_val
+	val: MDB_val
+	rc = mdb_cursor_get(cursor, &key, &val, MDB_FIRST)
+	for rc == MDB_SUCCESS {
+		if val.mv_size >= c.size_t(BLOCK_INDEX_RECORD_SIZE) {
+			data := ([^]byte)(val.mv_data)[:val.mv_size]
+			rec, ok := _deserialize_index_record(data)
+			if ok {
+				db.records[rec.hash] = rec
+			}
+		}
+		rc = mdb_cursor_get(cursor, &key, &val, MDB_NEXT)
 	}
 
 	return db, .None
 }
 
-// Close the index database.
+// Free the in-memory records map.
 index_db_close :: proc(db: ^Index_DB) {
-	if db.fd != os.INVALID_HANDLE {
-		os.close(db.fd)
-		db.fd = os.INVALID_HANDLE
-	}
+	delete(db.records)
 }
 
-// Append a record to the file and insert/overwrite in the in-memory map.
+// Write a record to LMDB and update the in-memory map.
 index_db_put :: proc(db: ^Index_DB, record: Block_Index_Record) -> Storage_Error {
 	// Serialize to fixed-size buffer
 	buf: [BLOCK_INDEX_RECORD_SIZE]byte
 	_serialize_index_record(&buf, record)
 
-	// Seek to end
-	_, serr := os.seek(db.fd, 0, os.SEEK_END)
-	if serr != nil {
-		return .IO_Error
+	txn, terr := lmdb_begin_write(db.lmdb)
+	if terr != .None {
+		return terr
 	}
 
-	// Write
-	written := 0
-	for written < BLOCK_INDEX_RECORD_SIZE {
-		n, werr := os.write(db.fd, buf[written:])
-		if werr != nil {
-			return .IO_Error
-		}
-		written += n
+	hash := record.hash
+	perr := lmdb_put(txn, db.lmdb.index_dbi, hash[:], buf[:])
+	if perr != .None {
+		lmdb_abort(txn)
+		return perr
+	}
+
+	cerr := lmdb_commit(txn)
+	if cerr != .None {
+		return cerr
 	}
 
 	// Update in-memory map
@@ -98,7 +107,7 @@ index_db_put :: proc(db: ^Index_DB, record: Block_Index_Record) -> Storage_Error
 	return .None
 }
 
-// Lookup a record by block hash.
+// Lookup a record by block hash (from in-memory map).
 index_db_get :: proc(db: ^Index_DB, hash: Hash256) -> (^Block_Index_Record, bool) {
 	rec, ok := &db.records[hash]
 	if !ok {
@@ -263,40 +272,4 @@ _deserialize_index_record :: proc(data: []byte) -> (rec: Block_Index_Record, ok:
 	rec.status = transmute(Block_Status)data[off]
 
 	return rec, true
-}
-
-_index_load_all :: proc(db: ^Index_DB, allocator := context.allocator) -> Storage_Error {
-	// Get file size
-	file_sz, serr := os.file_size(db.fd)
-	if serr != nil {
-		return .IO_Error
-	}
-
-	if file_sz == 0 {
-		return .None
-	}
-
-	// Read entire file
-	file_data := make([]byte, int(file_sz), context.temp_allocator)
-	total_read := 0
-	for total_read < int(file_sz) {
-		n, rerr := os.read_at(db.fd, file_data[total_read:], i64(total_read))
-		if rerr != nil || n == 0 {
-			return .IO_Error
-		}
-		total_read += n
-	}
-
-	// Parse records
-	offset := 0
-	for offset + BLOCK_INDEX_RECORD_SIZE <= len(file_data) {
-		rec, ok := _deserialize_index_record(file_data[offset:])
-		if !ok {
-			break
-		}
-		db.records[rec.hash] = rec
-		offset += BLOCK_INDEX_RECORD_SIZE
-	}
-
-	return .None
 }

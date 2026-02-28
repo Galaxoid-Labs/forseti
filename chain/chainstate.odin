@@ -1,5 +1,6 @@
 package chain
 
+import "core:log"
 import "core:os"
 import "../consensus"
 import "../crypto"
@@ -9,6 +10,7 @@ import "../wire"
 
 Chain_State :: struct {
 	block_index:  Block_Index,
+	lmdb:         storage.LMDB_Store,
 	index_db:     storage.Index_DB,
 	block_db:     storage.Block_DB,
 	utxo_db:      storage.UTXO_DB,
@@ -25,29 +27,32 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	// Ensure data_dir exists
 	os.make_directory(data_dir)
 
-	// Open index DB
-	idx_db, idx_err := storage.index_db_open(data_dir)
+	// Open shared LMDB environment
+	lmdb, lmdb_err := storage.lmdb_open(data_dir)
+	if lmdb_err != .None {
+		return .Storage_Error
+	}
+	cs.lmdb = lmdb
+
+	// Init Index DB (backed by LMDB)
+	idx_db, idx_err := storage.index_db_init(&cs.lmdb)
 	if idx_err != .None {
+		storage.lmdb_close(&cs.lmdb)
 		return .Storage_Error
 	}
 	cs.index_db = idx_db
 
-	// Open block DB
+	// Open block DB (flat files — unchanged)
 	blk_db, blk_err := storage.block_db_open(data_dir, params.network_magic)
 	if blk_err != .None {
 		storage.index_db_close(&cs.index_db)
+		storage.lmdb_close(&cs.lmdb)
 		return .Storage_Error
 	}
 	cs.block_db = blk_db
 
-	// Open UTXO DB
-	utxo_db, utxo_err := storage.utxo_db_open(data_dir)
-	if utxo_err != .None {
-		storage.index_db_close(&cs.index_db)
-		storage.block_db_close(&cs.block_db)
-		return .Storage_Error
-	}
-	cs.utxo_db = utxo_db
+	// Init UTXO DB (backed by LMDB)
+	cs.utxo_db = storage.utxo_db_init(&cs.lmdb)
 
 	// Initialize coins cache (pointer to cs.utxo_db stays valid)
 	cs.coins = coins_cache_init(&cs.utxo_db)
@@ -57,7 +62,7 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	if undo_err != .None {
 		storage.index_db_close(&cs.index_db)
 		storage.block_db_close(&cs.block_db)
-		storage.utxo_db_close(&cs.utxo_db)
+		storage.lmdb_close(&cs.lmdb)
 		return .Storage_Error
 	}
 	cs.undo_files = undo_files
@@ -76,18 +81,31 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 
 	// Rebuild active chain from genesis to tip
 	cs.active_chain = make([dynamic]Hash256, 0, 1024)
+
+	// Crash recovery: read meta tip from LMDB and truncate active chain if needed
+	_recover_from_meta(cs)
+
 	_rebuild_active_chain(cs)
+
+	// Connect any stored-but-not-connected blocks from a previous session.
+	pending_connected, _ := connect_pending_blocks(cs)
+	if pending_connected > 0 {
+		_, tip_height := chain_tip(cs)
+		log.infof("Connected %d pending blocks on startup (tip now at height %d)", pending_connected, tip_height)
+	}
 
 	return .None
 }
 
 // Destroy chain state, flushing everything to disk.
 chain_state_destroy :: proc(cs: ^Chain_State) {
-	coins_cache_flush(&cs.coins)
+	tip_hash, tip_height := chain_tip(cs)
+	coins_cache_flush(&cs.coins, tip_hash, tip_height)
 	coins_cache_destroy(&cs.coins)
 	storage.utxo_db_close(&cs.utxo_db)
 	storage.block_db_close(&cs.block_db)
 	storage.index_db_close(&cs.index_db)
+	storage.lmdb_close(&cs.lmdb)
 	storage.flat_file_close(&cs.undo_files)
 	block_index_destroy(&cs.block_index)
 	delete(cs.active_chain)
@@ -452,12 +470,100 @@ connect_pending_blocks :: proc(cs: ^Chain_State) -> (connected: int, err: Chain_
 
 		cerr := connect_block(cs, &block, next_entry)
 		if cerr != .None {
-			return connected, cerr
+			// Block failed validation — strip Has_Data so it gets re-downloaded.
+			// This handles corrupt blocks from partial flat file writes during crashes.
+			log.warnf("Pending block at height %d failed: %v — marking for re-download", next_entry.height, cerr)
+			next_entry.status -= {.Has_Data}
+			rec := block_index_to_record(next_entry)
+			storage.index_db_put(&cs.index_db, rec)
+			return connected, .None
 		}
 
 		delete_key(&pending, tip_hash)
 		connected += 1
 	}
+}
+
+// Read the meta tip (hash + height) from LMDB. On crash recovery, if the
+// block index has entries marked Valid_Chain beyond the meta tip, strip
+// those flags so connect_pending_blocks can replay them.
+_recover_from_meta :: proc(cs: ^Chain_State) {
+	meta_hash, meta_height, ok := _read_meta_tip(&cs.lmdb)
+	if !ok {
+		// No meta tip yet (fresh DB) — nothing to recover.
+		return
+	}
+
+	// Find the highest Valid_Chain entry in the block index.
+	best_valid: ^Block_Index_Entry = nil
+	for _, entry in cs.block_index.entries {
+		if .Valid_Chain in entry.status {
+			if best_valid == nil || entry.height > best_valid.height {
+				best_valid = entry
+			}
+		}
+	}
+
+	if best_valid == nil {
+		return
+	}
+
+	// If the block index extends beyond the meta tip, strip Valid_Chain
+	// from entries above meta_height so they get replayed.
+	if best_valid.height > meta_height {
+		log.infof("Crash recovery: index tip %d > meta tip %d, rolling back %d blocks",
+			best_valid.height, meta_height, best_valid.height - meta_height)
+
+		for _, entry in cs.block_index.entries {
+			if .Valid_Chain in entry.status && entry.height > meta_height {
+				entry.status -= {.Valid_Chain}
+			}
+		}
+	}
+}
+
+// Read chain tip metadata from LMDB meta database.
+// Returns (hash, height, ok).
+_read_meta_tip :: proc(lmdb: ^storage.LMDB_Store) -> (Hash256, int, bool) {
+	txn, terr := storage.lmdb_begin_read(lmdb)
+	if terr != .None {
+		return HASH_ZERO, -1, false
+	}
+	defer storage.lmdb_abort(txn)
+
+	key_str := "tip"
+	key := transmute([]byte)key_str
+	data, found := storage.lmdb_get(txn, lmdb.meta_dbi, key)
+	if !found || len(data) < 36 {
+		return HASH_ZERO, -1, false
+	}
+
+	hash: Hash256
+	for i in 0 ..< 32 {
+		hash[i] = data[i]
+	}
+	height := int(u32(data[32]) | u32(data[33]) << 8 | u32(data[34]) << 16 | u32(data[35]) << 24)
+	return hash, height, true
+}
+
+// Write chain tip metadata within an existing LMDB write transaction.
+write_meta_tip :: proc(lmdb: ^storage.LMDB_Store, txn: storage.MDB_txn, tip_hash: Hash256, tip_height: int) -> storage.Storage_Error {
+	key_str := "tip"
+	key := transmute([]byte)key_str
+
+	// Value: hash[32] + height[4 LE] = 36 bytes
+	val: [36]byte
+	h := tip_hash
+	for i in 0 ..< 32 {
+		val[i] = h[i]
+	}
+	ht := u32(tip_height)
+	val[32] = byte(ht)
+	val[33] = byte(ht >> 8)
+	val[34] = byte(ht >> 16)
+	val[35] = byte(ht >> 24)
+
+	return storage.lmdb_put(txn, lmdb.meta_dbi, key, val[:])
 }
 
 // Rebuild active chain by walking from genesis through prev pointers.

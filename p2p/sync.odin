@@ -35,6 +35,11 @@ sync_manager_init :: proc(sm: ^Sync_Manager, cs: ^chain.Chain_State, params: ^co
 	sm.blocks_in_flight = make(map[Hash256]Peer_Id, 64)
 	sm.blocks_to_download = make([dynamic]Hash256, 0, 1024)
 	sm.last_tip_update = time.to_unix_seconds(time.now())
+
+	// Initialize best_header_height from loaded block index
+	if cs.block_index.best_header != nil {
+		sm.best_header_height = cs.block_index.best_header.height
+	}
 }
 
 sync_manager_destroy :: proc(sm: ^Sync_Manager) {
@@ -59,6 +64,21 @@ sync_start_header_sync :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) -> 
 
 	if best_peer == nil {
 		return 0
+	}
+
+	// If we already have headers up to or beyond the peer's height, skip to block download.
+	if sm.best_header_height >= int(best_peer.start_height) {
+		log.infof("Headers already up to date (height %d). Building download queue...", sm.best_header_height)
+		sm.sync_peer = best_id
+		sm.state = .Downloading_Blocks
+		_build_download_queue(sm)
+		if len(sm.blocks_to_download) == 0 {
+			sm.state = .In_Sync
+		} else {
+			log.infof("%d blocks queued for download", len(sm.blocks_to_download))
+			sync_request_blocks(sm, peers)
+		}
+		return best_id
 	}
 
 	sm.sync_peer = best_id
@@ -151,7 +171,8 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 		// Periodic UTXO flush to prevent unbounded memory growth during sync.
 		// Check if we crossed a 5000-block boundary.
 		if height / 5000 > prev_height / 5000 {
-			chain.coins_cache_flush(&sm.chain.coins)
+			tip_hash, tip_h := chain.chain_tip(sm.chain)
+			chain.coins_cache_flush(&sm.chain.coins, tip_hash, tip_h)
 		}
 
 		remaining := len(sm.blocks_to_download) - sm.download_cursor
@@ -232,11 +253,11 @@ sync_handle_disconnect :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, peers: ^map[
 	}
 }
 
-// Build a block locator for getheaders. Exponential step-back from tip.
+// Build a block locator for getheaders. Walks from best known header
+// via prev pointers with exponential step-back.
 build_block_locator :: proc(cs: ^chain.Chain_State) -> []Hash256 {
-	_, height := chain.chain_tip(cs)
-	if height < 0 {
-		// Empty chain — send genesis hash so peer knows where to start.
+	best := cs.block_index.best_header
+	if best == nil {
 		result := make([]Hash256, 1)
 		result[0] = cs.params.genesis_hash
 		return result
@@ -244,23 +265,17 @@ build_block_locator :: proc(cs: ^chain.Chain_State) -> []Hash256 {
 
 	locator := make([dynamic]Hash256, 0, 32)
 	step := 1
-	h := height
+	current := best
 
-	for h >= 0 {
-		if h < len(cs.active_chain) {
-			append(&locator, cs.active_chain[h])
+	for current != nil {
+		append(&locator, current.hash)
+		if current.height == 0 { break }
+		// Walk back 'step' entries via prev pointers
+		for _ in 0 ..< step {
+			if current.prev == nil { break }
+			current = current.prev
 		}
-		if h == 0 {
-			break
-		}
-		h -= step
-		if h < 0 {
-			h = 0
-		}
-		// After first 10 entries, double the step.
-		if len(locator) >= 10 {
-			step *= 2
-		}
+		if len(locator) >= 10 { step *= 2 }
 	}
 
 	result := make([]Hash256, len(locator))

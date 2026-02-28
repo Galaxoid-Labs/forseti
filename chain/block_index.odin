@@ -26,9 +26,10 @@ Block_Index_Entry :: struct {
 }
 
 Block_Index :: struct {
-	entries:   map[Hash256]^Block_Index_Entry,
-	genesis:   ^Block_Index_Entry,
-	allocator: mem.Allocator,
+	entries:     map[Hash256]^Block_Index_Entry,
+	genesis:     ^Block_Index_Entry,
+	best_header: ^Block_Index_Entry,
+	allocator:   mem.Allocator,
 }
 
 block_index_init :: proc(allocator := context.allocator) -> Block_Index {
@@ -80,6 +81,15 @@ block_index_load :: proc(idx: ^Block_Index, db: ^storage.Index_DB) {
 	for _, entry in idx.entries {
 		_build_skip_list(entry)
 	}
+
+	// Fourth pass: find best header
+	for _, entry in idx.entries {
+		if .Valid_Header in entry.status {
+			if idx.best_header == nil || entry.height > idx.best_header.height {
+				idx.best_header = entry
+			}
+		}
+	}
 }
 
 // Add a new block header to the index.
@@ -116,6 +126,14 @@ block_index_add :: proc(idx: ^Block_Index, header: ^wire.Block_Header, height: i
 	}
 
 	_build_skip_list(entry)
+
+	// Update best header tracking
+	if .Valid_Header in status {
+		if idx.best_header == nil || height > idx.best_header.height {
+			idx.best_header = entry
+		}
+	}
+
 	return entry
 }
 

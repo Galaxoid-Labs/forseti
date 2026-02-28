@@ -12,6 +12,13 @@ ar rcs "$LIB_DIR/libripemd160.a" "$SCRIPT_DIR/ripemd160/ripemd160.o"
 rm "$SCRIPT_DIR/ripemd160/ripemd160.o"
 echo "Built libripemd160.a"
 
+echo "=== Building LMDB ==="
+cc -c -O2 -o "$SCRIPT_DIR/lmdb/mdb.o" "$SCRIPT_DIR/lmdb/mdb.c"
+cc -c -O2 -o "$SCRIPT_DIR/lmdb/midl.o" "$SCRIPT_DIR/lmdb/midl.c"
+ar rcs "$LIB_DIR/liblmdb.a" "$SCRIPT_DIR/lmdb/mdb.o" "$SCRIPT_DIR/lmdb/midl.o"
+rm -f "$SCRIPT_DIR/lmdb/mdb.o" "$SCRIPT_DIR/lmdb/midl.o"
+echo "Built liblmdb.a"
+
 echo "=== Building libsecp256k1 ==="
 cd "$SCRIPT_DIR/libsecp256k1"
 

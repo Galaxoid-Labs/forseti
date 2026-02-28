@@ -155,31 +155,44 @@ coins_cache_restore :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: sto
 	}
 }
 
-// Flush dirty entries to DB. Deletes spent sentinels from DB.
-coins_cache_flush :: proc(cc: ^Coins_Cache) -> Chain_Error {
+// Flush dirty entries to DB atomically. All UTXO changes + metadata are
+// committed in a single LMDB write transaction for crash consistency.
+coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) -> Chain_Error {
+	txn, terr := storage.lmdb_begin_write(cc.db.lmdb)
+	if terr != .None {
+		return .Storage_Error
+	}
+
 	for outpoint, entry in cc.cache {
 		if .Dirty not_in entry.flags {
 			continue
 		}
 
 		if _is_spent_sentinel_val(entry) {
-			// Delete from DB
-			serr := storage.utxo_db_delete(cc.db, outpoint)
+			serr := storage.utxo_db_batch_delete(cc.db, txn, outpoint)
 			if serr != .None {
+				storage.lmdb_abort(txn)
 				return .Storage_Error
 			}
 		} else {
-			// Write to DB
-			serr := storage.utxo_db_put(cc.db, outpoint, entry.coin)
+			serr := storage.utxo_db_batch_put(cc.db, txn, outpoint, entry.coin)
 			if serr != .None {
+				storage.lmdb_abort(txn)
 				return .Storage_Error
 			}
 		}
 	}
 
-	// Flush DB to disk
-	serr := storage.utxo_db_flush(cc.db)
-	if serr != .None {
+	// Write chain tip metadata in the same transaction
+	merr := write_meta_tip(cc.db.lmdb, txn, tip_hash, tip_height)
+	if merr != .None {
+		storage.lmdb_abort(txn)
+		return .Storage_Error
+	}
+
+	// ATOMIC: UTXOs + metadata committed together
+	cerr := storage.lmdb_commit(txn)
+	if cerr != .None {
 		return .Storage_Error
 	}
 

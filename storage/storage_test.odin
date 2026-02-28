@@ -18,7 +18,6 @@ make_test_dir :: proc(name: string) -> string {
 }
 
 remove_test_dir :: proc(dir: string) {
-	// Remove files inside
 	_remove_dir_contents(dir)
 	os.remove(dir)
 }
@@ -197,6 +196,114 @@ test_block_db_multiple_blocks :: proc(t: ^testing.T) {
 	}
 }
 
+// --- LMDB tests ---
+
+@(test)
+test_lmdb_open_close :: proc(t: ^testing.T) {
+	dir := make_test_dir("lmdb_oc")
+	defer remove_test_dir(dir)
+
+	store, err := lmdb_open(dir)
+	testing.expect_value(t, err, Storage_Error.None)
+	testing.expect(t, store.env != nil, "env should not be nil")
+	lmdb_close(&store)
+}
+
+@(test)
+test_lmdb_put_get_del :: proc(t: ^testing.T) {
+	dir := make_test_dir("lmdb_pgd")
+	defer remove_test_dir(dir)
+
+	store, err := lmdb_open(dir)
+	testing.expect_value(t, err, Storage_Error.None)
+	defer lmdb_close(&store)
+
+	key := []byte{0x01, 0x02, 0x03, 0x04}
+	value := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+
+	// Put
+	{
+		txn, terr := lmdb_begin_write(&store)
+		testing.expect_value(t, terr, Storage_Error.None)
+		perr := lmdb_put(txn, store.utxo_dbi, key, value)
+		testing.expect_value(t, perr, Storage_Error.None)
+		cerr := lmdb_commit(txn)
+		testing.expect_value(t, cerr, Storage_Error.None)
+	}
+
+	// Get
+	{
+		txn, terr := lmdb_begin_read(&store)
+		testing.expect_value(t, terr, Storage_Error.None)
+		defer lmdb_abort(txn)
+
+		got, found := lmdb_get(txn, store.utxo_dbi, key)
+		testing.expect(t, found, "key should be found")
+		testing.expect_value(t, len(got), 4)
+		for i in 0 ..< 4 {
+			testing.expect(t, got[i] == value[i], fmt.tprintf("value byte %d", i))
+		}
+	}
+
+	// Delete
+	{
+		txn, terr := lmdb_begin_write(&store)
+		testing.expect_value(t, terr, Storage_Error.None)
+		derr := lmdb_del(txn, store.utxo_dbi, key)
+		testing.expect_value(t, derr, Storage_Error.None)
+		cerr := lmdb_commit(txn)
+		testing.expect_value(t, cerr, Storage_Error.None)
+	}
+
+	// Verify gone
+	{
+		txn, terr := lmdb_begin_read(&store)
+		testing.expect_value(t, terr, Storage_Error.None)
+		defer lmdb_abort(txn)
+
+		_, found := lmdb_get(txn, store.utxo_dbi, key)
+		testing.expect(t, !found, "key should be gone after delete")
+	}
+}
+
+@(test)
+test_lmdb_persistence :: proc(t: ^testing.T) {
+	dir := make_test_dir("lmdb_persist")
+	defer remove_test_dir(dir)
+
+	key := []byte{0xAA, 0xBB}
+	value := []byte{0x11, 0x22, 0x33}
+
+	// Write and close
+	{
+		store, err := lmdb_open(dir)
+		testing.expect_value(t, err, Storage_Error.None)
+
+		txn, terr := lmdb_begin_write(&store)
+		testing.expect_value(t, terr, Storage_Error.None)
+		lmdb_put(txn, store.utxo_dbi, key, value)
+		lmdb_commit(txn)
+
+		lmdb_close(&store)
+	}
+
+	// Reopen and verify
+	{
+		store, err := lmdb_open(dir)
+		testing.expect_value(t, err, Storage_Error.None)
+		defer lmdb_close(&store)
+
+		txn, terr := lmdb_begin_read(&store)
+		testing.expect_value(t, terr, Storage_Error.None)
+		defer lmdb_abort(txn)
+
+		got, found := lmdb_get(txn, store.utxo_dbi, key)
+		testing.expect(t, found, "key should persist after reopen")
+		testing.expect_value(t, len(got), 3)
+		testing.expect(t, got[0] == 0x11 && got[1] == 0x22 && got[2] == 0x33, "value mismatch")
+	}
+}
+
 // --- Index DB tests ---
 
 @(test)
@@ -204,7 +311,11 @@ test_index_db_put_get :: proc(t: ^testing.T) {
 	dir := make_test_dir("indexdb_pg")
 	defer remove_test_dir(dir)
 
-	db, err := index_db_open(dir)
+	store, serr := lmdb_open(dir)
+	testing.expect_value(t, serr, Storage_Error.None)
+	defer lmdb_close(&store)
+
+	db, err := index_db_init(&store)
 	testing.expect_value(t, err, Storage_Error.None)
 	defer index_db_close(&db)
 
@@ -249,9 +360,12 @@ test_index_db_persistence :: proc(t: ^testing.T) {
 	hash2: Hash256
 	hash2[0] = 0x02
 
+	store, serr := lmdb_open(dir)
+	testing.expect_value(t, serr, Storage_Error.None)
+
 	// Open, write, close
 	{
-		db, err := index_db_open(dir)
+		db, err := index_db_init(&store)
 		testing.expect_value(t, err, Storage_Error.None)
 
 		index_db_put(&db, Block_Index_Record{hash = hash1, height = 1, timestamp = 100})
@@ -261,9 +375,15 @@ test_index_db_persistence :: proc(t: ^testing.T) {
 		index_db_close(&db)
 	}
 
+	lmdb_close(&store)
+
 	// Reopen and verify
+	store2, serr2 := lmdb_open(dir)
+	testing.expect_value(t, serr2, Storage_Error.None)
+	defer lmdb_close(&store2)
+
 	{
-		db, err := index_db_open(dir)
+		db, err := index_db_init(&store2)
 		testing.expect_value(t, err, Storage_Error.None)
 		defer index_db_close(&db)
 
@@ -285,7 +405,11 @@ test_index_db_overwrite :: proc(t: ^testing.T) {
 	dir := make_test_dir("indexdb_ow")
 	defer remove_test_dir(dir)
 
-	db, err := index_db_open(dir)
+	store, serr := lmdb_open(dir)
+	testing.expect_value(t, serr, Storage_Error.None)
+	defer lmdb_close(&store)
+
+	db, err := index_db_init(&store)
 	testing.expect_value(t, err, Storage_Error.None)
 	defer index_db_close(&db)
 
@@ -307,186 +431,6 @@ test_index_db_overwrite :: proc(t: ^testing.T) {
 	testing.expect(t, .Valid_Transactions in rec.status, "should have Valid_Transactions after overwrite")
 }
 
-// --- KV Store tests ---
-
-@(test)
-test_kv_put_get :: proc(t: ^testing.T) {
-	dir := make_test_dir("kv_pg")
-	defer remove_test_dir(dir)
-
-	path_buf: [256]byte
-	path := fmt.bprintf(path_buf[:], "%s/test.kv", dir)
-
-	store, err := kv_open(path, 64) // small bucket count for testing
-	testing.expect_value(t, err, Storage_Error.None)
-	defer kv_close(&store)
-
-	key := []byte{0x01, 0x02, 0x03, 0x04}
-	value := []byte{0xDE, 0xAD, 0xBE, 0xEF}
-
-	perr := kv_put(&store, key, value)
-	testing.expect_value(t, perr, Storage_Error.None)
-
-	got, found := kv_get(&store, key)
-	testing.expect(t, found, "key should be found")
-	testing.expect_value(t, len(got), 4)
-	for i in 0 ..< 4 {
-		testing.expect(t, got[i] == value[i], fmt.tprintf("value byte %d", i))
-	}
-}
-
-@(test)
-test_kv_delete :: proc(t: ^testing.T) {
-	dir := make_test_dir("kv_del")
-	defer remove_test_dir(dir)
-
-	path_buf: [256]byte
-	path := fmt.bprintf(path_buf[:], "%s/test.kv", dir)
-
-	store, err := kv_open(path, 64)
-	testing.expect_value(t, err, Storage_Error.None)
-	defer kv_close(&store)
-
-	key := []byte{0x01, 0x02, 0x03}
-	value := []byte{0xCA, 0xFE}
-
-	kv_put(&store, key, value)
-
-	// Delete
-	derr := kv_delete(&store, key)
-	testing.expect_value(t, derr, Storage_Error.None)
-
-	// Should not be found
-	_, found := kv_get(&store, key)
-	testing.expect(t, !found, "deleted key should not be found")
-}
-
-@(test)
-test_kv_overwrite :: proc(t: ^testing.T) {
-	dir := make_test_dir("kv_ow")
-	defer remove_test_dir(dir)
-
-	path_buf: [256]byte
-	path := fmt.bprintf(path_buf[:], "%s/test.kv", dir)
-
-	store, err := kv_open(path, 64)
-	testing.expect_value(t, err, Storage_Error.None)
-	defer kv_close(&store)
-
-	key := []byte{0x01, 0x02, 0x03}
-
-	kv_put(&store, key, []byte{0x01})
-	kv_put(&store, key, []byte{0x02, 0x03})
-
-	got, found := kv_get(&store, key)
-	testing.expect(t, found, "overwritten key should be found")
-	testing.expect_value(t, len(got), 2)
-	testing.expect(t, got[0] == 0x02, "first value byte")
-	testing.expect(t, got[1] == 0x03, "second value byte")
-
-	// Entry count should be 1 (not 2)
-	testing.expect_value(t, store.entry_count, u32(1))
-}
-
-@(test)
-test_kv_many_entries :: proc(t: ^testing.T) {
-	dir := make_test_dir("kv_many")
-	defer remove_test_dir(dir)
-
-	path_buf: [256]byte
-	path := fmt.bprintf(path_buf[:], "%s/test.kv", dir)
-
-	store, err := kv_open(path, 64) // 64 buckets, will force multiple rehashes
-	testing.expect_value(t, err, Storage_Error.None)
-	defer kv_close(&store)
-
-	NUM_ENTRIES :: 1000
-
-	for i in 0 ..< NUM_ENTRIES {
-		key: [4]byte
-		key[0] = byte(i)
-		key[1] = byte(i >> 8)
-		key[2] = byte(i >> 16)
-		key[3] = byte(i >> 24)
-
-		val: [4]byte
-		v := u32(i) * 7 + 13
-		val[0] = byte(v)
-		val[1] = byte(v >> 8)
-		val[2] = byte(v >> 16)
-		val[3] = byte(v >> 24)
-
-		perr := kv_put(&store, key[:], val[:])
-		testing.expect_value(t, perr, Storage_Error.None)
-	}
-
-	testing.expect_value(t, store.entry_count, u32(NUM_ENTRIES))
-
-	// Verify all entries
-	for i in 0 ..< NUM_ENTRIES {
-		key: [4]byte
-		key[0] = byte(i)
-		key[1] = byte(i >> 8)
-		key[2] = byte(i >> 16)
-		key[3] = byte(i >> 24)
-
-		got, found := kv_get(&store, key[:])
-		testing.expect(t, found, fmt.tprintf("entry %d not found", i))
-		if found {
-			v := u32(i) * 7 + 13
-			expected: [4]byte
-			expected[0] = byte(v)
-			expected[1] = byte(v >> 8)
-			expected[2] = byte(v >> 16)
-			expected[3] = byte(v >> 24)
-			for j in 0 ..< 4 {
-				testing.expect(t, got[j] == expected[j], fmt.tprintf("entry %d byte %d", i, j))
-			}
-		}
-	}
-}
-
-@(test)
-test_kv_persistence :: proc(t: ^testing.T) {
-	dir := make_test_dir("kv_persist")
-	defer remove_test_dir(dir)
-
-	path_buf: [256]byte
-	path := fmt.bprintf(path_buf[:], "%s/test.kv", dir)
-
-	// Write and close
-	{
-		store, err := kv_open(path, 128)
-		testing.expect_value(t, err, Storage_Error.None)
-
-		kv_put(&store, []byte{1, 2, 3}, []byte{10, 20, 30})
-		kv_put(&store, []byte{4, 5, 6}, []byte{40, 50, 60})
-
-		kv_close(&store)
-	}
-
-	// Reopen and verify
-	{
-		store, err := kv_open(path)
-		testing.expect_value(t, err, Storage_Error.None)
-		defer kv_close(&store)
-
-		testing.expect_value(t, store.entry_count, u32(2))
-
-		got1, found1 := kv_get(&store, []byte{1, 2, 3})
-		testing.expect(t, found1, "key1 should persist")
-		if found1 {
-			testing.expect(t, got1[0] == 10 && got1[1] == 20 && got1[2] == 30, "value1 mismatch")
-		}
-
-		got2, found2 := kv_get(&store, []byte{4, 5, 6})
-		testing.expect(t, found2, "key2 should persist")
-		if found2 {
-			testing.expect(t, got2[0] == 40 && got2[1] == 50 && got2[2] == 60, "value2 mismatch")
-		}
-	}
-}
-
 // --- UTXO DB tests ---
 
 @(test)
@@ -494,8 +438,11 @@ test_utxo_db_put_get :: proc(t: ^testing.T) {
 	dir := make_test_dir("utxodb_pg")
 	defer remove_test_dir(dir)
 
-	db, err := utxo_db_open(dir)
-	testing.expect_value(t, err, Storage_Error.None)
+	store, serr := lmdb_open(dir)
+	testing.expect_value(t, serr, Storage_Error.None)
+	defer lmdb_close(&store)
+
+	db := utxo_db_init(&store)
 	defer utxo_db_close(&db)
 
 	outpoint := wire.Outpoint{index = 0}
@@ -529,8 +476,11 @@ test_utxo_db_delete :: proc(t: ^testing.T) {
 	dir := make_test_dir("utxodb_del")
 	defer remove_test_dir(dir)
 
-	db, err := utxo_db_open(dir)
-	testing.expect_value(t, err, Storage_Error.None)
+	store, serr := lmdb_open(dir)
+	testing.expect_value(t, serr, Storage_Error.None)
+	defer lmdb_close(&store)
+
+	db := utxo_db_init(&store)
 	defer utxo_db_close(&db)
 
 	outpoint := wire.Outpoint{index = 1}
@@ -553,8 +503,11 @@ test_utxo_db_bulk :: proc(t: ^testing.T) {
 	dir := make_test_dir("utxodb_bulk")
 	defer remove_test_dir(dir)
 
-	db, err := utxo_db_open(dir)
-	testing.expect_value(t, err, Storage_Error.None)
+	store, serr := lmdb_open(dir)
+	testing.expect_value(t, serr, Storage_Error.None)
+	defer lmdb_close(&store)
+
+	db := utxo_db_init(&store)
 	defer utxo_db_close(&db)
 
 	// Insert 500 UTXOs

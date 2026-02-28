@@ -1,12 +1,12 @@
 # bitcoin-node-odin
 
-A Bitcoin full node implementation written in [Odin](https://odin-lang.org/). Built from scratch with no Bitcoin library dependencies — only libsecp256k1 for elliptic curve cryptography and a vendored RIPEMD-160 C implementation.
+A Bitcoin full node implementation written in [Odin](https://odin-lang.org/). Built from scratch with no Bitcoin library dependencies — only libsecp256k1 for elliptic curve cryptography, vendored RIPEMD-160, and vendored LMDB for storage.
 
-This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage, UTXO management, P2P networking, mempool, and a JSON-RPC interface.
+This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, ACID-compliant persistent storage (LMDB), UTXO management, P2P networking with headers-first sync, mempool, and a JSON-RPC interface.
 
 ## Status
 
-**157 tests passing** across 9 packages.
+**155 tests passing** across 9 packages. Successfully syncs the signet blockchain.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
@@ -16,12 +16,14 @@ This is an educational/experimental project. It implements the core components o
 | 2b | Taproot (BIP341/342) | Complete |
 | 3 | Consensus Rules + Block Validation | Complete |
 | 4 | UTXO Set + Chain State | Complete |
-| 5 | Persistent Storage | Complete |
+| 5 | Persistent Storage (LMDB) | Complete |
 | 6 | P2P Networking | Complete |
 | 7 | Mempool | Complete |
 | 8 | RPC Interface (10 methods) | Complete |
 | 9 | P2P Integration + CLI + Shutdown | Complete |
 | 10 | Additional RPC Methods (+13 methods) | Complete |
+| 11 | Signet Sync (BIP325) | Complete |
+| 12 | LMDB Storage Migration | Complete |
 
 ## Dependencies
 
@@ -33,6 +35,7 @@ This is an educational/experimental project. It implements the core components o
 
 **C libraries (built automatically):**
 - [libsecp256k1](https://github.com/bitcoin-core/secp256k1) — included as a git submodule, built with schnorrsig + recovery + extrakeys modules
+- [LMDB](https://github.com/LMDB/lmdb) — vendored C source in `deps/lmdb/` (Lightning Memory-Mapped Database)
 - RIPEMD-160 — vendored C implementation in `deps/ripemd160/`
 
 ## Building
@@ -59,6 +62,9 @@ The binary is output as `btcnode` in the project root.
 ## Running
 
 ```bash
+# Sync the signet network
+./btcnode --network=signet --datadir=/tmp/btcnode-signet
+
 # Start in regtest mode (default, no peers needed)
 ./btcnode --network=regtest --no-p2p
 
@@ -116,7 +122,7 @@ Values in a network-specific section (e.g. `[regtest]`) take priority over globa
 | mainnet | 8332 | 8333 |
 | testnet3 | 18332 | 18333 |
 | testnet4 | 48332 | — |
-| signet | 38332 | — |
+| signet | 38332 | 38333 |
 | regtest | 18443 | 18444 |
 
 ## RPC Interface
@@ -194,26 +200,38 @@ bitcoin-node-odin/
 ├── crypto/                # SHA-256d, RIPEMD-160, HASH160, secp256k1 bindings, Merkle root
 ├── wire/                  # Protocol types, CompactSize, tx/block serialization, message framing
 ├── script/                # Script interpreter, opcodes, standard types, Taproot
-├── consensus/             # Chain params, PoW, difficulty, block/tx validation
-├── storage/               # Flat files, block DB, index DB, mmap'd UTXO KV store
+├── consensus/             # Chain params, PoW, difficulty, block/tx validation, BIP325 signet
+├── storage/               # LMDB store, flat files, block DB, index DB, UTXO DB
 ├── chain/                 # UTXO cache, block index (skip list), undo data, chain state
 ├── p2p/                   # Peer connections, sync manager, connection manager
 ├── mempool/               # Fee rates, relay policy, validation pipeline
 ├── rpc/                   # JSON-RPC server, handlers, types
 └── deps/                  # C dependencies
     ├── libsecp256k1/      # Git submodule (bitcoin-core/secp256k1)
+    ├── lmdb/              # Vendored LMDB source (lmdb.h, mdb.c, midl.h, midl.c)
     ├── ripemd160/         # Vendored C implementation
     └── lib/               # Built static libraries (generated)
 ```
+
+## Storage Architecture
+
+The node uses [LMDB](http://www.lmdb.tech/doc/) (Lightning Memory-Mapped Database) for crash-consistent persistent storage.
+
+**Single LMDB environment** (`<datadir>/chainstate/`) with 3 named databases:
+- `utxo` — Key: outpoint (txid + vout, 36 bytes), Value: encoded UTXO coin (height, coinbase flag, amount, script)
+- `index` — Key: block hash (32 bytes), Value: block index record (101 bytes)
+- `meta` — Key: `"tip"`, Value: chain tip hash + height (36 bytes)
+
+**Crash consistency**: The UTXO set, block index, and chain tip metadata are committed in a single atomic LMDB write transaction. On unclean shutdown, the node recovers to the last consistent flush point and replays stored-but-not-connected blocks from flat files.
+
+**Block storage** uses flat files (`blk00000.dat`, `rev00000.dat`) with 128MB auto-rollover, matching Bitcoin Core's format. Flat files are ideal for large block blobs; LMDB handles the structured key-value data.
 
 ## What's Left to Build
 
 ### Needed for Real Network Sync
 
 - **Testnet3 20-min difficulty rule** — When block timestamp >20min after previous, difficulty resets to `pow_limit`
-- **Signet challenge validation** — Currently stubbed; needs coinbase signature extraction + challenge script verification
-- **Assumevalid / checkpoints** — Skip script verification for blocks below a known-good hash (massive speedup)
-- **UTXO store scaling** — The mmap'd hash table may need tuning for millions of entries
+- **Multi-peer header download** — Currently uses a single sync peer for headers; parallelizing would speed up initial sync
 
 ### Protocol Enhancements
 
@@ -227,16 +245,17 @@ bitcoin-node-odin/
 
 - **`core:nbio` migration** — Replace thread-per-peer with async I/O event loop (waiting for Odin's nbio package to mature)
 - **Mempool persistence** — Currently in-memory only, lost on restart
-- **Structured logging** — Replace `fmt.printf` with `core:log`
 - **Parallel script verification** — Currently single-threaded
 - **Sighash caching** — Performance optimization for repeated signature checks
 
 ## Architecture Notes
 
 - **Thread model**: Main thread (setup + wait), RPC thread, P2P thread, one reader thread per peer
-- **Headers-first sync**: Downloads headers via `getheaders`, then fetches blocks via `getdata`
-- **Write-back UTXO cache**: In-memory cache with dirty/fresh flags, flushed to mmap'd KV store on disk
-- **Block index**: In-memory tree with skip list pointers for O(log n) ancestor lookup
+- **Graceful shutdown**: SIGINT/SIGTERM triggers atomic UTXO + metadata flush to LMDB, then clean exit
+- **Headers-first sync**: Downloads headers via `getheaders`, then fetches blocks via `getdata` with a sliding window (16 blocks in flight)
+- **Write-back UTXO cache**: In-memory cache with dirty/fresh flags, flushed atomically to LMDB every 5000 blocks during sync
+- **Block index**: In-memory tree with skip list pointers for O(log n) ancestor lookup, persisted to LMDB
+- **Assumevalid**: Skips script verification for blocks below a configured height (200K for signet) for faster initial sync
 - **No external Odin dependencies**: Only `core:` and `base:` standard library packages
 
 ## License
