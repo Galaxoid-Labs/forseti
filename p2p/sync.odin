@@ -24,6 +24,7 @@ Sync_Manager :: struct {
 	best_header_height: int,
 	blocks_in_flight:   map[Hash256]Peer_Id,
 	blocks_to_download: [dynamic]Hash256,
+	download_cursor:    int, // index into blocks_to_download for next request
 	last_tip_update:    i64,
 }
 
@@ -125,35 +126,48 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 	// Remove from in-flight.
 	delete_key(&sm.blocks_in_flight, block_hash)
 
-	// Accept and connect the block.
+	// Store block to disk (doesn't connect yet).
 	blk := block^
-	cerr := chain.accept_block(sm.chain, &blk)
-	if cerr != .None {
-		_, tip_height := chain.chain_tip(sm.chain)
-		log.errorf("Block validation failed at height %d (tip=%d): %v",
-			sm.chain.block_index.entries[block_hash].height if block_hash in sm.chain.block_index.entries else -1,
-			tip_height, cerr)
+	serr := chain.store_block(sm.chain, &blk)
+	if serr != .None {
+		log.errorf("Failed to store block: %v", serr)
 		return
 	}
 
-	_, height := chain.chain_tip(sm.chain)
-	sm.last_tip_update = time.to_unix_seconds(time.now())
+	// Try to connect as many consecutive blocks as possible from tip.
+	prev_height: int
+	_, prev_height = chain.chain_tip(sm.chain)
 
-	// Periodic UTXO flush to prevent unbounded memory growth during sync.
-	if height > 0 && height % 5000 == 0 {
-		chain.coins_cache_flush(&sm.chain.coins)
+	connected, cerr := chain.connect_pending_blocks(sm.chain)
+	if cerr != .None {
+		_, tip_height := chain.chain_tip(sm.chain)
+		log.errorf("Block validation failed at height %d: %v", tip_height + 1, cerr)
 	}
 
-	if height % 1000 == 0 || len(sm.blocks_to_download) == 0 {
-		log.debugf("Connected block at height %d (remaining: %d, in-flight: %d)",
-			height, len(sm.blocks_to_download), len(sm.blocks_in_flight))
+	if connected > 0 {
+		_, height := chain.chain_tip(sm.chain)
+		sm.last_tip_update = time.to_unix_seconds(time.now())
+
+		// Periodic UTXO flush to prevent unbounded memory growth during sync.
+		// Check if we crossed a 5000-block boundary.
+		if height / 5000 > prev_height / 5000 {
+			chain.coins_cache_flush(&sm.chain.coins)
+		}
+
+		remaining := len(sm.blocks_to_download) - sm.download_cursor
+		if height / 1000 > prev_height / 1000 || remaining == 0 {
+			log.debugf("Connected block at height %d (remaining: %d, in-flight: %d)",
+				height, remaining, len(sm.blocks_in_flight))
+		}
 	}
 
 	// Request more blocks.
 	sync_request_blocks(sm, peers)
 
 	// Check if we're done.
-	if len(sm.blocks_to_download) == 0 && len(sm.blocks_in_flight) == 0 {
+	remaining := len(sm.blocks_to_download) - sm.download_cursor
+	if remaining == 0 && len(sm.blocks_in_flight) == 0 {
+		_, height := chain.chain_tip(sm.chain)
 		log.infof("Block download complete. In sync at height %d", height)
 		sm.state = .In_Sync
 	}
@@ -161,7 +175,8 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 
 // Fill in-flight window from download queue.
 sync_request_blocks :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
-	for len(sm.blocks_in_flight) < MAX_BLOCKS_IN_FLIGHT && len(sm.blocks_to_download) > 0 {
+	remaining := len(sm.blocks_to_download) - sm.download_cursor
+	for len(sm.blocks_in_flight) < MAX_BLOCKS_IN_FLIGHT && remaining > 0 {
 		// Pick a peer to request from — round-robin through active peers.
 		peer := _pick_download_peer(peers)
 		if peer == nil {
@@ -171,15 +186,15 @@ sync_request_blocks :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
 		// Batch up to 16 inventory items per getdata.
 		batch_size := min(
 			MAX_BLOCKS_IN_FLIGHT - len(sm.blocks_in_flight),
-			len(sm.blocks_to_download),
+			remaining,
 			16,
 		)
 
 		inv := make([]wire.Inv_Vector, batch_size, context.temp_allocator)
 
 		for i in 0 ..< batch_size {
-			hash := sm.blocks_to_download[0]
-			ordered_remove(&sm.blocks_to_download, 0)
+			hash := sm.blocks_to_download[sm.download_cursor]
+			sm.download_cursor += 1
 			sm.blocks_in_flight[hash] = peer.id
 			inv[i] = wire.Inv_Vector{
 				type = .Witness_Block,
@@ -188,6 +203,7 @@ sync_request_blocks :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
 		}
 
 		peer_send_getdata(peer, inv)
+		remaining = len(sm.blocks_to_download) - sm.download_cursor
 	}
 }
 
@@ -202,8 +218,8 @@ sync_handle_disconnect :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, peers: ^map[
 	}
 	for hash in to_requeue {
 		delete_key(&sm.blocks_in_flight, hash)
-		// Re-insert at front of download queue.
-		inject_at(&sm.blocks_to_download, 0, hash)
+		// Append to end of download queue — will be re-requested.
+		append(&sm.blocks_to_download, hash)
 	}
 
 	// If this was our sync peer, restart header sync.
@@ -256,6 +272,7 @@ build_block_locator :: proc(cs: ^chain.Chain_State) -> []Hash256 {
 // Build the download queue: all block index entries that have Valid_Header but not Has_Data.
 _build_download_queue :: proc(sm: ^Sync_Manager) {
 	clear(&sm.blocks_to_download)
+	sm.download_cursor = 0
 
 	if sm.best_header_height < 0 {
 		return

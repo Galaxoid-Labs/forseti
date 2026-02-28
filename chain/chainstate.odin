@@ -145,7 +145,9 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 		}
 	}
 
-	// 4. Validate non-coinbase transactions
+	// 4. Process non-coinbase transactions: validate, spend inputs, add outputs.
+	//    Each tx is processed atomically so later transactions in the same block
+	//    can spend outputs created by earlier ones (intra-block spending).
 	total_fees: i64 = 0
 	script_flags := consensus.get_script_flags(height, cs.params)
 	skip_scripts := cs.params.assumevalid_height > 0 && height <= cs.params.assumevalid_height
@@ -159,7 +161,7 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 			continue
 		}
 
-		// Build spent_outputs slice for this tx (needed for Taproot sighash)
+		// 4a. Look up inputs
 		spent_outputs := make([]wire.Tx_Out, len(tx.inputs), context.temp_allocator)
 		input_sum: i64 = 0
 
@@ -170,7 +172,6 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 				return .Inputs_Unavailable
 			}
 
-			// Check coinbase maturity
 			if coin.is_coinbase {
 				if height - int(coin.height) < consensus.COINBASE_MATURITY {
 					return .Coinbase_Not_Mature
@@ -184,7 +185,7 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 			input_sum += coin.amount
 		}
 
-		// Run script verification for each input (skipped under assumevalid)
+		// 4b. Script verification (skipped under assumevalid)
 		if !skip_scripts {
 			for in_idx in 0 ..< len(tx.inputs) {
 				verifier := script.Script_Verifier {
@@ -212,12 +213,35 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 			}
 		}
 
-		// Calculate fees
+		// 4c. Fees
 		output_sum: i64 = 0
 		for out_idx in 0 ..< len(tx.outputs) {
 			output_sum += tx.outputs[out_idx].value
 		}
 		total_fees += input_sum - output_sum
+
+		// 4d. Spend inputs and collect undo coins
+		for in_idx in 0 ..< len(tx.inputs) {
+			prev_out := tx.inputs[in_idx].previous_output
+			spent_coin, ok := coins_cache_spend(&cs.coins, prev_out)
+			if !ok {
+				return .Invalid_State
+			}
+			append(&undo_coins, Undo_Coin{outpoint = prev_out, coin = spent_coin})
+		}
+
+		// 4e. Add outputs (available for later txs in same block)
+		txid := wire.tx_id(&tx)
+		for out_idx in 0 ..< len(tx.outputs) {
+			op := wire.Outpoint{hash = txid, index = u32(out_idx)}
+			coin := storage.UTXO_Coin {
+				height      = u32(height),
+				is_coinbase = false,
+				amount      = tx.outputs[out_idx].value,
+				script      = tx.outputs[out_idx].script_pubkey,
+			}
+			coins_cache_add(&cs.coins, op, coin)
+		}
 	}
 
 	// 5. Verify coinbase value <= subsidy + total_fees
@@ -233,47 +257,30 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 		}
 	}
 
-	// 6. Spend all inputs and collect undo coins
-	for tx_idx in 0 ..< len(block.txs) {
-		tx := block.txs[tx_idx]
-		if consensus.is_coinbase_tx(&tx) {
-			continue
-		}
-		for in_idx in 0 ..< len(tx.inputs) {
-			prev_out := tx.inputs[in_idx].previous_output
-			spent_coin, ok := coins_cache_spend(&cs.coins, prev_out)
-			if !ok {
-				return .Invalid_State
-			}
-			append(&undo_coins, Undo_Coin{outpoint = prev_out, coin = spent_coin})
-		}
-	}
-
-	// 7. Add all outputs
-	for tx_idx in 0 ..< len(block.txs) {
-		tx := block.txs[tx_idx]
-		txid := wire.tx_id(&tx)
-		is_cb := consensus.is_coinbase_tx(&tx)
-		for out_idx in 0 ..< len(tx.outputs) {
-			op := wire.Outpoint{hash = txid, index = u32(out_idx)}
+	// 6. Add coinbase outputs
+	{
+		coinbase := block.txs[0]
+		coinbase_txid := wire.tx_id(&coinbase)
+		for out_idx in 0 ..< len(coinbase.outputs) {
+			op := wire.Outpoint{hash = coinbase_txid, index = u32(out_idx)}
 			coin := storage.UTXO_Coin {
 				height      = u32(height),
-				is_coinbase = is_cb,
-				amount      = tx.outputs[out_idx].value,
-				script      = tx.outputs[out_idx].script_pubkey,
+				is_coinbase = true,
+				amount      = coinbase.outputs[out_idx].value,
+				script      = coinbase.outputs[out_idx].script_pubkey,
 			}
 			coins_cache_add(&cs.coins, op, coin)
 		}
 	}
 
-	// 8. Write undo data
+	// 7. Write undo data
 	undo := Block_Undo{spent_coins = undo_coins[:]}
 	uerr := write_block_undo(&cs.undo_files, entry, undo)
 	if uerr != .None {
 		return uerr
 	}
 
-	// 9. Update entry status and append to active chain
+	// 8. Update entry status and append to active chain
 	entry.status += {.Valid_Transactions, .Valid_Chain}
 
 	// Persist updated index record
@@ -379,6 +386,78 @@ accept_block :: proc(cs: ^Chain_State, block: ^wire.Block) -> Chain_Error {
 
 	// Connect block
 	return connect_block(cs, block, entry)
+}
+
+// Store a block to disk without connecting it to the active chain.
+// Used during sync to buffer out-of-order blocks.
+store_block :: proc(cs: ^Chain_State, block: ^wire.Block) -> Chain_Error {
+	header := block.header
+	entry, herr := accept_block_header(cs, &header)
+	if herr != .None {
+		return herr
+	}
+
+	// Already stored — skip.
+	if .Has_Data in entry.status {
+		return .None
+	}
+
+	blk := block^
+	loc, serr := storage.block_db_store(&cs.block_db, &blk)
+	if serr != .None {
+		return .Storage_Error
+	}
+
+	entry.file_num = loc.file_num
+	entry.data_offset = loc.data_offset
+	entry.data_size = loc.data_size
+	entry.status += {.Has_Data}
+
+	// Persist updated index record.
+	rec := block_index_to_record(entry)
+	storage.index_db_put(&cs.index_db, rec)
+
+	return .None
+}
+
+// Try to connect the next block(s) at tip+1. Reads stored blocks from disk.
+// Returns the number of blocks connected.
+connect_pending_blocks :: proc(cs: ^Chain_State) -> (connected: int, err: Chain_Error) {
+	// Build index: prev_hash -> entry for blocks stored but not yet connected.
+	// This gives O(1) lookup per block instead of scanning the full index.
+	pending := make(map[Hash256]^Block_Index_Entry, 1024, context.temp_allocator)
+	for _, entry in cs.block_index.entries {
+		if .Has_Data in entry.status && .Valid_Chain not_in entry.status {
+			pending[entry.prev_hash] = entry
+		}
+	}
+
+	for {
+		tip_hash, _ := chain_tip(cs)
+		next_entry, found := pending[tip_hash]
+		if !found {
+			return connected, .None
+		}
+
+		// Read block from disk.
+		loc := storage.Block_Location{
+			file_num    = next_entry.file_num,
+			data_offset = next_entry.data_offset,
+			data_size   = next_entry.data_size,
+		}
+		block, rerr := storage.block_db_read(&cs.block_db, loc, context.temp_allocator)
+		if rerr != .None {
+			return connected, .Storage_Error
+		}
+
+		cerr := connect_block(cs, &block, next_entry)
+		if cerr != .None {
+			return connected, cerr
+		}
+
+		delete_key(&pending, tip_hash)
+		connected += 1
+	}
 }
 
 // Rebuild active chain by walking from genesis through prev pointers.
