@@ -25,6 +25,7 @@ Consensus_Error :: enum {
 	Bad_Tx_Too_Large_Value,
 	Bad_Witness_Commitment,
 	Bad_Witness_Nonce,
+	Bad_Signet_Signature,
 	// Phase 4 contextual errors (defined now, used later)
 	Duplicate_Tx,
 	Bad_Coinbase_Value,
@@ -66,6 +67,14 @@ check_block :: proc(block: ^wire.Block, height: int, params: ^Chain_Params) -> C
 		tx := block.txs[i]
 		if is_coinbase_tx(&tx) {
 			return .Coinbase_In_Non_First
+		}
+	}
+
+	// 4b. Signet challenge validation (BIP325)
+	if params.signet_challenge_len > 0 && height > 0 {
+		signet_err := check_signet_block(block, params)
+		if signet_err != .None {
+			return signet_err
 		}
 	}
 

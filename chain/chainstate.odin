@@ -1,6 +1,5 @@
 package chain
 
-import "core:fmt"
 import "core:os"
 import "../consensus"
 import "../crypto"
@@ -66,6 +65,14 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	// Build in-memory block index
 	cs.block_index = block_index_init()
 	block_index_load(&cs.block_index, &cs.index_db)
+
+	// Seed genesis block header if not already in index
+	if cs.block_index.genesis == nil {
+		genesis_hdr := params.genesis_header
+		entry := block_index_add(&cs.block_index, &genesis_hdr, 0, {.Valid_Header})
+		rec := block_index_to_record(entry)
+		storage.index_db_put(&cs.index_db, rec)
+	}
 
 	// Rebuild active chain from genesis to tip
 	cs.active_chain = make([dynamic]Hash256, 0, 1024)
@@ -141,6 +148,7 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 	// 4. Validate non-coinbase transactions
 	total_fees: i64 = 0
 	script_flags := consensus.get_script_flags(height, cs.params)
+	skip_scripts := cs.params.assumevalid_height > 0 && height <= cs.params.assumevalid_height
 
 	undo_coins := make([dynamic]Undo_Coin, 0, 64, context.temp_allocator)
 
@@ -176,29 +184,31 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 			input_sum += coin.amount
 		}
 
-		// Run script verification for each input
-		for in_idx in 0 ..< len(tx.inputs) {
-			verifier := script.Script_Verifier {
-				tx            = &block.txs[tx_idx],
-				input_idx     = in_idx,
-				amount        = spent_outputs[in_idx].value,
-				flags         = script_flags,
-				spent_outputs = spent_outputs,
-			}
+		// Run script verification for each input (skipped under assumevalid)
+		if !skip_scripts {
+			for in_idx in 0 ..< len(tx.inputs) {
+				verifier := script.Script_Verifier {
+					tx            = &block.txs[tx_idx],
+					input_idx     = in_idx,
+					amount        = spent_outputs[in_idx].value,
+					flags         = script_flags,
+					spent_outputs = spent_outputs,
+				}
 
-			witness: [][]byte
-			if len(tx.witness) > in_idx {
-				witness = tx.witness[in_idx]
-			}
+				witness: [][]byte
+				if len(tx.witness) > in_idx {
+					witness = tx.witness[in_idx]
+				}
 
-			serr := script.verify_script(
-				&verifier,
-				tx.inputs[in_idx].script_sig,
-				spent_outputs[in_idx].script_pubkey,
-				witness,
-			)
-			if serr != .None {
-				return .Bad_Script
+				serr := script.verify_script(
+					&verifier,
+					tx.inputs[in_idx].script_sig,
+					spent_outputs[in_idx].script_pubkey,
+					witness,
+				)
+				if serr != .None {
+					return .Bad_Script
+				}
 			}
 		}
 

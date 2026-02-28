@@ -48,10 +48,15 @@ TESTNET3_SEEDS :: [3]string {
 	"seed.testnet.bitcoin.sprovoost.nl",
 }
 REGTEST_SEEDS :: [0]string{}
+SIGNET_SEEDS :: [2]string{
+	"seed.signet.bitcoin.sprovoost.nl",
+	"seed.dlsouza.lol",
+}
 
 DEFAULT_PORT_MAINNET  :: 8333
 DEFAULT_PORT_TESTNET3 :: 18333
 DEFAULT_PORT_REGTEST  :: 18444
+DEFAULT_PORT_SIGNET   :: 38333
 
 MAX_OUTBOUND_PEERS    :: 8
 MAX_HEADERS_PER_MSG   :: 2000

@@ -21,6 +21,7 @@ Sync_Manager :: struct {
 	state:              Sync_State,
 	sync_peer:          Peer_Id,
 	headers_received:   int,
+	best_header_height: int,
 	blocks_in_flight:   map[Hash256]Peer_Id,
 	blocks_to_download: [dynamic]Hash256,
 	last_tip_update:    i64,
@@ -77,24 +78,29 @@ sync_handle_headers :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, headers: []wire
 	accepted := 0
 	for i in 0 ..< len(headers) {
 		hdr := headers[i]
-		_, cerr := chain.accept_block_header(sm.chain, &hdr)
+		entry, cerr := chain.accept_block_header(sm.chain, &hdr)
 		if cerr == .None {
 			accepted += 1
+			if entry != nil && entry.height > sm.best_header_height {
+				sm.best_header_height = entry.height
+			}
 		}
 	}
 
 	sm.headers_received += accepted
-	_, height := chain.chain_tip(sm.chain)
 
-	log.debugf("Accepted %d/%d headers (tip height: %d)", accepted, len(headers), height)
+	if sm.headers_received % 10000 < 2000 || len(headers) < MAX_HEADERS_PER_MSG {
+		log.infof("Headers: %d (best header height: %d)", sm.headers_received, sm.best_header_height)
+	}
 
 	if len(headers) >= MAX_HEADERS_PER_MSG {
-		// More headers available — request next batch.
+		// More headers available — use last accepted header as locator.
 		peer, found := peers[peer_id]
 		if found {
-			locator := build_block_locator(sm.chain)
-			defer delete(locator)
-			peer_send_getheaders(peer, locator, HASH_ZERO)
+			last_hdr := headers[len(headers) - 1]
+			last_hash := wire.block_header_hash(&last_hdr)
+			locator := [1]Hash256{last_hash}
+			peer_send_getheaders(peer, locator[:], HASH_ZERO)
 		}
 	} else {
 		// Header sync complete — transition to block download.
@@ -123,12 +129,20 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 	blk := block^
 	cerr := chain.accept_block(sm.chain, &blk)
 	if cerr != .None {
-		log.errorf("Block validation failed: %v", cerr)
+		_, tip_height := chain.chain_tip(sm.chain)
+		log.errorf("Block validation failed at height %d (tip=%d): %v",
+			sm.chain.block_index.entries[block_hash].height if block_hash in sm.chain.block_index.entries else -1,
+			tip_height, cerr)
 		return
 	}
 
 	_, height := chain.chain_tip(sm.chain)
 	sm.last_tip_update = time.to_unix_seconds(time.now())
+
+	// Periodic UTXO flush to prevent unbounded memory growth during sync.
+	if height > 0 && height % 5000 == 0 {
+		chain.coins_cache_flush(&sm.chain.coins)
+	}
 
 	if height % 1000 == 0 || len(sm.blocks_to_download) == 0 {
 		log.debugf("Connected block at height %d (remaining: %d, in-flight: %d)",
@@ -206,7 +220,10 @@ sync_handle_disconnect :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, peers: ^map[
 build_block_locator :: proc(cs: ^chain.Chain_State) -> []Hash256 {
 	_, height := chain.chain_tip(cs)
 	if height < 0 {
-		return nil
+		// Empty chain — send genesis hash so peer knows where to start.
+		result := make([]Hash256, 1)
+		result[0] = cs.params.genesis_hash
+		return result
 	}
 
 	locator := make([dynamic]Hash256, 0, 32)
@@ -240,34 +257,27 @@ build_block_locator :: proc(cs: ^chain.Chain_State) -> []Hash256 {
 _build_download_queue :: proc(sm: ^Sync_Manager) {
 	clear(&sm.blocks_to_download)
 
-	// Walk the block index to find headers without block data.
-	// We need blocks in height order, so collect and sort.
-	Entry_Info :: struct {
-		hash:   Hash256,
-		height: int,
+	if sm.best_header_height < 0 {
+		return
 	}
 
-	entries := make([dynamic]Entry_Info, 0, 1024, context.temp_allocator)
+	// Use height-indexed array for O(n) ordering (heights are contiguous 0..N).
+	max_h := sm.best_header_height
+	by_height := make([]Hash256, max_h + 1, context.temp_allocator)
 
 	for hash, entry in sm.chain.block_index.entries {
 		if .Valid_Header in entry.status && .Has_Data not_in entry.status {
-			append(&entries, Entry_Info{hash = hash, height = entry.height})
+			if entry.height >= 0 && entry.height <= max_h {
+				by_height[entry.height] = hash
+			}
 		}
 	}
 
-	// Simple insertion sort by height (block count is usually sequential).
-	for i in 1 ..< len(entries) {
-		key := entries[i]
-		j := i - 1
-		for j >= 0 && entries[j].height > key.height {
-			entries[j + 1] = entries[j]
-			j -= 1
+	reserve(&sm.blocks_to_download, max_h + 1)
+	for h in 0 ..= max_h {
+		if by_height[h] != HASH_ZERO {
+			append(&sm.blocks_to_download, by_height[h])
 		}
-		entries[j + 1] = key
-	}
-
-	for e in entries {
-		append(&sm.blocks_to_download, e.hash)
 	}
 }
 
