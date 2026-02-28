@@ -36,13 +36,14 @@ flat_file_open :: proc(data_dir: string, prefix: string) -> (mgr: Flat_File_Mana
 
 	// Scan existing files to find the last one
 	path_buf: [512]byte
+	next_buf: [512]byte
 	for {
 		path := flat_file_path(&mgr, mgr.current_file, path_buf[:])
 		if !os.exists(path) {
 			break
 		}
 		// Check next file
-		next_path := flat_file_path(&mgr, mgr.current_file + 1, path_buf[:])
+		next_path := flat_file_path(&mgr, mgr.current_file + 1, next_buf[:])
 		if !os.exists(next_path) {
 			// This is the last file — get its size
 			size, size_err := _file_size(path)
