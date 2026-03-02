@@ -26,14 +26,14 @@ Chain_State :: struct {
 }
 
 // Initialize chain state. Caller allocates Chain_State and passes pointer.
-chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.Chain_Params) -> Chain_Error {
+chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.Chain_Params, db_cache_mb: int = 450) -> Chain_Error {
 	cs.params = params
 
 	// Ensure data_dir exists
 	os.make_directory(data_dir)
 
 	// Open shared LevelDB store (chainstate + block index)
-	store, store_err := storage.ldb_open(data_dir)
+	store, store_err := storage.ldb_open(data_dir, db_cache_mb)
 	if store_err != .None {
 		return .Storage_Error
 	}
@@ -59,8 +59,8 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	// Init UTXO DB (backed by LevelDB)
 	cs.utxo_db = storage.utxo_db_init(&cs.store)
 
-	// Initialize coins cache (pointer to cs.utxo_db stays valid)
-	cs.coins = coins_cache_init(&cs.utxo_db)
+	// Initialize coins cache with budget from LevelDB store's cache split
+	cs.coins = coins_cache_init(&cs.utxo_db, cs.store.coins_cache_budget)
 
 	// Open undo flat files
 	undo_files, undo_err := storage.flat_file_open(data_dir, "rev")

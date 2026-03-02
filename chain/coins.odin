@@ -15,17 +15,24 @@ Cache_Entry :: struct {
 	flags: bit_set[Cache_Entry_Flag; u8],
 }
 
+// Estimated per-entry overhead: map bucket (64) + Outpoint key (36) + Cache_Entry value (64) + pointer/padding (~16)
+CACHE_ENTRY_OVERHEAD :: 180
+
 Coins_Cache :: struct {
 	db:        ^storage.UTXO_DB,
 	cache:     map[wire.Outpoint]Cache_Entry,
 	allocator: mem.Allocator,
+	mem_usage: int,   // estimated bytes used by cache
+	budget:    int,   // max bytes before flush (from dbcache split)
 }
 
-coins_cache_init :: proc(db: ^storage.UTXO_DB, allocator := context.allocator) -> Coins_Cache {
+coins_cache_init :: proc(db: ^storage.UTXO_DB, budget: int = 440 * 1024 * 1024, allocator := context.allocator) -> Coins_Cache {
 	cc: Coins_Cache
 	cc.db = db
 	cc.cache = make(map[wire.Outpoint]Cache_Entry, 1024, allocator)
 	cc.allocator = allocator
+	cc.budget = budget
+	cc.mem_usage = 0
 	return cc
 }
 
@@ -57,6 +64,7 @@ coins_cache_get :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage.U
 
 	// Cache it (not dirty, not fresh — it's in DB)
 	cc.cache[outpoint] = Cache_Entry{coin = coin, flags = {}}
+	cc.mem_usage += CACHE_ENTRY_OVERHEAD + len(coin.script)
 	return coin, true
 }
 
@@ -92,6 +100,7 @@ coins_cache_add :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: storage
 		coin  = cached_coin,
 		flags = {.Dirty, .Fresh},
 	}
+	cc.mem_usage += CACHE_ENTRY_OVERHEAD + len(new_script)
 }
 
 // Spend a UTXO. Returns the spent coin for undo data.
@@ -118,11 +127,13 @@ coins_cache_spend :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage
 
 		if .Fresh in entry.flags {
 			// Never reached DB — just remove from cache entirely
+			cc.mem_usage -= CACHE_ENTRY_OVERHEAD + len(spent_coin.script)
 			delete_key(&cc.cache, outpoint)
 		} else {
 			// Was in DB — leave a spent sentinel so flush deletes it
 			entry.coin = storage.UTXO_Coin{}
 			entry.flags = {.Dirty}
+			// Sentinel is smaller (no script), but we keep overhead for the map entry
 		}
 
 		return spent_coin, true
@@ -169,9 +180,15 @@ coins_cache_restore :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: sto
 	existing, exists := cc.cache[outpoint]
 	if exists && _is_spent_sentinel(&existing) {
 		// Was in DB, now restoring — Dirty but not Fresh
+		// Sentinel had no script, add script size back
 		cc.cache[outpoint] = Cache_Entry{coin = cached_coin, flags = {.Dirty}}
-	} else {
+		cc.mem_usage += len(new_script)
+	} else if !exists {
 		// Not in cache at all — mark as Dirty+Fresh
+		cc.cache[outpoint] = Cache_Entry{coin = cached_coin, flags = {.Dirty, .Fresh}}
+		cc.mem_usage += CACHE_ENTRY_OVERHEAD + len(new_script)
+	} else {
+		// Existing non-sentinel entry — just replace (shouldn't happen normally)
 		cc.cache[outpoint] = Cache_Entry{coin = cached_coin, flags = {.Dirty, .Fresh}}
 	}
 }
@@ -180,7 +197,10 @@ coins_cache_restore :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: sto
 // committed in a single WriteBatch for crash consistency.
 coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) -> Chain_Error {
 	cache_size := len(cc.cache)
-	log.infof("UTXO flush at height %d: %d cache entries", tip_height, cache_size)
+	log.infof("UTXO flush at height %d: %d entries (%d MB / budget %d MB)",
+		tip_height, cache_size,
+		cc.mem_usage / (1024 * 1024),
+		cc.budget / (1024 * 1024))
 
 	batch := storage.ldb_batch_create()
 	defer storage.ldb_batch_destroy(batch)
@@ -220,8 +240,14 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 	}
 	delete(cc.cache)
 	cc.cache = make(map[wire.Outpoint]Cache_Entry, 1024, cc.allocator)
+	cc.mem_usage = 0
 
 	return .None
+}
+
+// Returns true when the coins cache memory usage exceeds its budget.
+coins_cache_should_flush :: proc(cc: ^Coins_Cache) -> bool {
+	return cc.mem_usage >= cc.budget
 }
 
 // A spent sentinel is a zeroed coin marked Dirty (but not Fresh).

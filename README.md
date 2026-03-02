@@ -28,6 +28,7 @@ This is an educational/experimental project. It implements the core components o
 | 15 | RBF (BIP125) | Complete |
 | 16 | Address Encoding (Base58Check + Bech32/Bech32m) | Complete |
 | 17 | RPC Enrichment (getpeerinfo, mining, network, validation) | Complete |
+| 18 | Configurable `--dbcache` (Bitcoin Core style) | Complete |
 
 ## Dependencies
 
@@ -78,6 +79,9 @@ The binary is output as `btcnode` in the project root.
           --rpcport=18443 \
           --no-p2p
 
+# Sync with reduced memory (64 MiB DB cache)
+./btcnode --network=signet --dbcache=64
+
 # Connect to a specific peer
 ./btcnode --network=mainnet --connect=127.0.0.1:8333
 
@@ -96,6 +100,7 @@ The binary is output as `btcnode` in the project root.
 | `--p2p-port=<port>` | P2P listen port | Network default |
 | `--no-p2p` | Disable P2P (RPC-only mode) | `false` |
 | `--mempoolfullrbf=<0\|1>` | Allow full RBF replacement | `1` |
+| `--dbcache=<MB>` | Database cache size in MiB | `450` |
 
 ### Config File
 
@@ -111,6 +116,7 @@ rpcport=18443
 connect=127.0.0.1:18444
 no-p2p=1
 mempoolfullrbf=1
+dbcache=450
 
 # Network-specific sections override global values
 [regtest]
@@ -241,7 +247,7 @@ The node uses two [LevelDB](https://github.com/google/leveldb) instances for cra
 **Block index database** (`<datadir>/blocks/index/`):
 - Block index entries — Key: block hash, Value: block index record (height, status, file location, header fields)
 
-Both databases use 256MB LRU caches and 10-bit bloom filters, with no compression. UTXO changes and chain tip metadata are committed atomically via LevelDB WriteBatch.
+Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split following Bitcoin Core's algorithm: block index DB gets min(total/8, 2 MiB), chainstate DB gets min(remaining/2, 8 MiB), and the remainder goes to the in-memory UTXO coins cache. Both databases use 10-bit bloom filters, 2 MiB write buffers, and no compression. UTXO changes and chain tip metadata are committed atomically via LevelDB WriteBatch. The coins cache flushes when its memory usage exceeds the budget (or every 5000 blocks as a safety net).
 
 **Block storage** uses flat files (`blk00000.dat`, `rev00000.dat`) with 128MB auto-rollover, matching Bitcoin Core's format. Flat files store the raw block blobs; LevelDB handles the structured key-value data.
 
@@ -276,7 +282,7 @@ Both databases use 256MB LRU caches and 10-bit bloom filters, with no compressio
 - **Steady-state sync**: BIP130 `sendheaders` for header announcements, periodic `getheaders` polling (120s), and `inv`-triggered header requests keep the node up-to-date after IBD
 - **Stall detection**: Blocks stalled >30s are requeued to other peers; header requests timeout after 60s with lead peer failover
 - **DNS peer discovery**: Resolves all A records from DNS seeds (typically 20+ addresses per seed)
-- **Write-back UTXO cache**: In-memory cache with dirty/fresh flags, flushed atomically to LevelDB every 1000 blocks during sync. Rollback support for failed block validation
+- **Write-back UTXO cache**: In-memory cache with dirty/fresh flags, flushed atomically to LevelDB when memory usage exceeds the configurable budget (`--dbcache`, default 450 MiB). Rollback support for failed block validation
 - **Block index**: In-memory tree with skip list pointers for O(log n) ancestor lookup, persisted to LevelDB
 - **Sighash caching**: BIP143 (SegWit v0) and BIP341 (Taproot) intermediate hashes are cached per-transaction, avoiding O(n^2) re-computation for transactions with many inputs
 - **Per-input verification arena**: A 2MB heap-allocated scratch arena is reset between each input's script verification, preventing sighash writer accumulation from exhausting the 64MB block arena on large transactions
@@ -284,6 +290,7 @@ Both databases use 256MB LRU caches and 10-bit bloom filters, with no compressio
 - **Transaction relay**: P2P `inv`/`tx`/`getdata` handling for propagating mempool transactions to peers
 - **RBF (BIP125)**: Full replace-by-fee support — signaling check (opt-in or fullrbf), no new unconfirmed parents, higher absolute fee, bandwidth fee, max 100 evictions
 - **Address encoding**: Base58Check (P2PKH, P2SH) and Bech32/Bech32m (P2WPKH, P2WSH, P2TR) for both encoding and decoding, with network-aware validation
+- **Configurable DB cache**: `--dbcache` controls total database memory (default 450 MiB), split following Bitcoin Core's algorithm — small LevelDB caches (2-8 MiB), large in-memory coins cache (~440 MiB). Lower values reduce RAM usage at the cost of more frequent UTXO flushes during sync
 - **Assumevalid**: Skips script verification for blocks below a configured height (250,050 for signet) for faster initial sync
 - **No external Odin dependencies**: Only `core:` and `base:` standard library packages
 

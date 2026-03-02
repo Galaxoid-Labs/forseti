@@ -5,29 +5,36 @@ import "core:log"
 import "core:os"
 
 LDB_Store :: struct {
-	chainstate_db: LDB,           // UTXOs + meta tip
-	index_db:      LDB,           // block index records
-	cache:         LDB_Cache,
-	bloom:         LDB_FilterPolicy,
-	read_opts:     LDB_ReadOptions,
-	write_opts:    LDB_WriteOptions,  // non-sync (normal writes)
-	sync_opts:     LDB_WriteOptions,  // sync (flush/critical)
+	chainstate_db:      LDB,              // UTXOs + meta tip
+	index_db:           LDB,              // block index records
+	index_cache:        LDB_Cache,        // LRU cache for index DB
+	coins_db_cache:     LDB_Cache,        // LRU cache for chainstate DB
+	bloom:              LDB_FilterPolicy,
+	read_opts:          LDB_ReadOptions,
+	write_opts:         LDB_WriteOptions,  // non-sync (normal writes)
+	sync_opts:          LDB_WriteOptions,  // sync (flush/critical)
+	coins_cache_budget: int,               // bytes available for in-memory coins cache
 }
 
-ldb_open :: proc(data_dir: string) -> (store: LDB_Store, err: Storage_Error) {
-	// Create shared options
-	opts := leveldb_options_create()
-	leveldb_options_set_create_if_missing(opts, 1)
-	leveldb_options_set_compression(opts, 0) // no compression (no Snappy)
-	leveldb_options_set_write_buffer_size(opts, 64 * 1024 * 1024) // 64 MB write buffer
+ldb_open :: proc(data_dir: string, db_cache_mb: int = 450) -> (store: LDB_Store, err: Storage_Error) {
+	// Split cache budget following Bitcoin Core's algorithm (src/kernel/caches.h):
+	//   1. Block index DB cache = min(total / 8, 2 MiB)
+	//   2. Chainstate DB cache  = min(remaining / 2, 8 MiB)
+	//   3. Coins cache (in-memory) = everything else
+	total_bytes := db_cache_mb * 1024 * 1024
+	index_cache_bytes := min(total_bytes / 8, 2 * 1024 * 1024)
+	remaining := total_bytes - index_cache_bytes
+	coins_db_cache_bytes := min(remaining / 2, 8 * 1024 * 1024)
+	store.coins_cache_budget = total_bytes - index_cache_bytes - coins_db_cache_bytes
 
-	// 256 MB LRU cache shared across reads
-	store.cache = leveldb_cache_create_lru(256 * 1024 * 1024)
-	leveldb_options_set_cache(opts, store.cache)
+	log.infof("DB cache budget: total=%d MiB, index_db=%d KiB, chainstate_db=%d KiB, coins_cache=%d MiB",
+		db_cache_mb,
+		index_cache_bytes / 1024,
+		coins_db_cache_bytes / 1024,
+		store.coins_cache_budget / (1024 * 1024))
 
-	// 10-bit bloom filter
+	// 10-bit bloom filter (shared across both DBs)
 	store.bloom = leveldb_filterpolicy_create_bloom(10)
-	leveldb_options_set_filter_policy(opts, store.bloom)
 
 	// Read/write options
 	store.read_opts = leveldb_readoptions_create()
@@ -35,22 +42,40 @@ ldb_open :: proc(data_dir: string) -> (store: LDB_Store, err: Storage_Error) {
 	store.sync_opts = leveldb_writeoptions_create()
 	leveldb_writeoptions_set_sync(store.sync_opts, 1)
 
-	// Open chainstate DB: <datadir>/chainstate/
+	// --- Open chainstate DB: <datadir>/chainstate/ ---
+	cs_opts := leveldb_options_create()
+	leveldb_options_set_create_if_missing(cs_opts, 1)
+	leveldb_options_set_compression(cs_opts, 0)
+	leveldb_options_set_write_buffer_size(cs_opts, 2 * 1024 * 1024) // 2 MB (Core default)
+	store.coins_db_cache = leveldb_cache_create_lru(c.size_t(coins_db_cache_bytes))
+	leveldb_options_set_cache(cs_opts, store.coins_db_cache)
+	leveldb_options_set_filter_policy(cs_opts, store.bloom)
+
 	cs_path_buf: [512]byte
 	cs_path_len := _bprint_path(cs_path_buf[:], data_dir, "/chainstate")
 	cs_path_buf[cs_path_len] = 0
 	os.make_directory(string(cs_path_buf[:cs_path_len]))
 
 	errptr: cstring = nil
-	store.chainstate_db = leveldb_open(opts, cstring(&cs_path_buf[0]), &errptr)
+	store.chainstate_db = leveldb_open(cs_opts, cstring(&cs_path_buf[0]), &errptr)
 	if store.chainstate_db == nil {
 		log.errorf("Failed to open chainstate LevelDB: %s", errptr)
 		if errptr != nil { leveldb_free(rawptr(errptr)) }
-		_ldb_cleanup_options(&store, opts)
+		leveldb_options_destroy(cs_opts)
+		_ldb_cleanup_options(&store, nil)
 		return store, .IO_Error
 	}
+	leveldb_options_destroy(cs_opts)
 
-	// Open block index DB: <datadir>/blocks/index/
+	// --- Open block index DB: <datadir>/blocks/index/ ---
+	idx_opts := leveldb_options_create()
+	leveldb_options_set_create_if_missing(idx_opts, 1)
+	leveldb_options_set_compression(idx_opts, 0)
+	leveldb_options_set_write_buffer_size(idx_opts, 2 * 1024 * 1024) // 2 MB (Core default)
+	store.index_cache = leveldb_cache_create_lru(c.size_t(index_cache_bytes))
+	leveldb_options_set_cache(idx_opts, store.index_cache)
+	leveldb_options_set_filter_policy(idx_opts, store.bloom)
+
 	idx_dir_buf: [512]byte
 	idx_dir_len := _bprint_path(idx_dir_buf[:], data_dir, "/blocks")
 	os.make_directory(string(idx_dir_buf[:idx_dir_len]))
@@ -61,16 +86,17 @@ ldb_open :: proc(data_dir: string) -> (store: LDB_Store, err: Storage_Error) {
 	os.make_directory(string(idx_path_buf[:idx_path_len]))
 
 	errptr = nil
-	store.index_db = leveldb_open(opts, cstring(&idx_path_buf[0]), &errptr)
+	store.index_db = leveldb_open(idx_opts, cstring(&idx_path_buf[0]), &errptr)
 	if store.index_db == nil {
 		log.errorf("Failed to open index LevelDB: %s", errptr)
 		if errptr != nil { leveldb_free(rawptr(errptr)) }
 		leveldb_close(store.chainstate_db)
-		_ldb_cleanup_options(&store, opts)
+		leveldb_options_destroy(idx_opts)
+		_ldb_cleanup_options(&store, nil)
 		return store, .IO_Error
 	}
+	leveldb_options_destroy(idx_opts)
 
-	leveldb_options_destroy(opts)
 	return store, .None
 }
 
@@ -99,9 +125,13 @@ ldb_close :: proc(store: ^LDB_Store) {
 		leveldb_filterpolicy_destroy(store.bloom)
 		store.bloom = nil
 	}
-	if store.cache != nil {
-		leveldb_cache_destroy(store.cache)
-		store.cache = nil
+	if store.index_cache != nil {
+		leveldb_cache_destroy(store.index_cache)
+		store.index_cache = nil
+	}
+	if store.coins_db_cache != nil {
+		leveldb_cache_destroy(store.coins_db_cache)
+		store.coins_db_cache = nil
 	}
 }
 
@@ -188,7 +218,9 @@ ldb_batch_destroy :: proc(batch: LDB_WriteBatch) {
 
 // Helper to clean up options on open failure.
 _ldb_cleanup_options :: proc(store: ^LDB_Store, opts: LDB_Options) {
-	leveldb_options_destroy(opts)
+	if opts != nil {
+		leveldb_options_destroy(opts)
+	}
 	if store.read_opts != nil {
 		leveldb_readoptions_destroy(store.read_opts)
 		store.read_opts = nil
@@ -205,8 +237,12 @@ _ldb_cleanup_options :: proc(store: ^LDB_Store, opts: LDB_Options) {
 		leveldb_filterpolicy_destroy(store.bloom)
 		store.bloom = nil
 	}
-	if store.cache != nil {
-		leveldb_cache_destroy(store.cache)
-		store.cache = nil
+	if store.index_cache != nil {
+		leveldb_cache_destroy(store.index_cache)
+		store.index_cache = nil
+	}
+	if store.coins_db_cache != nil {
+		leveldb_cache_destroy(store.coins_db_cache)
+		store.coins_db_cache = nil
 	}
 }

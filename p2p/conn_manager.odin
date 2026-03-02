@@ -588,13 +588,15 @@ _conn_manager_connect_pending :: proc(cm: ^Conn_Manager) {
 		_, new_height := chain.chain_tip(cm.chain)
 		cm.sync_mgr.last_tip_update = time.to_unix_seconds(time.now())
 
-		// Periodic UTXO flush during catch-up.
-		if new_height / 1000 > prev_height / 1000 {
+		// Budget-based UTXO flush during catch-up.
+		should_flush := chain.coins_cache_should_flush(&cm.chain.coins)
+		safety_flush := new_height / 5000 > prev_height / 5000
+		if should_flush || safety_flush {
 			tip_hash, tip_h := chain.chain_tip(cm.chain)
 			chain.coins_cache_flush(&cm.chain.coins, tip_hash, tip_h)
 		}
 
-		if new_height / 1000 > prev_height / 1000 || new_height >= best_header {
+		if should_flush || safety_flush || new_height >= best_header {
 			log.infof("Recovery catch-up: height %d / %d", new_height, best_header)
 		}
 	}

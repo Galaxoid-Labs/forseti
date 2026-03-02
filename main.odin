@@ -40,6 +40,7 @@ CLI_Flag :: enum {
 	P2P_Port,
 	No_P2P,
 	Mempool_Full_RBF,
+	DbCache,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
 
@@ -51,6 +52,7 @@ CLI_Config :: struct {
 	p2p_port:        int,
 	no_p2p:          bool,
 	mempool_fullrbf: bool,
+	db_cache_mb:     int,
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -60,6 +62,7 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 	cfg.p2p_port = 0  // 0 = use network default
 	cfg.no_p2p = false
 	cfg.mempool_fullrbf = true
+	cfg.db_cache_mb = 450
 
 	for arg in os.args[1:] {
 		if arg == "--help" || arg == "-h" {
@@ -97,6 +100,14 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 			val := arg[len("--mempoolfullrbf="):]
 			cfg.mempool_fullrbf = val == "1" || val == "true"
 			flags_set += {.Mempool_Full_RBF}
+		} else if strings.has_prefix(arg, "--dbcache=") {
+			val, parse_ok := strconv.parse_int(arg[len("--dbcache="):])
+			if !parse_ok {
+				fmt.eprintln("Error: invalid --dbcache value")
+				return cfg, flags_set, false
+			}
+			cfg.db_cache_mb = max(val, 4)
+			flags_set += {.DbCache}
 		} else {
 			fmt.eprintln("Error: unknown flag:", arg)
 			_print_usage()
@@ -118,6 +129,7 @@ _print_usage :: proc() {
 	fmt.println("  --p2p-port=<port>     P2P listen port (default: network-appropriate)")
 	fmt.println("  --no-p2p              Disable P2P networking (RPC-only mode)")
 	fmt.println("  --mempoolfullrbf=<0|1> Allow full RBF replacement (default: 1)")
+	fmt.println("  --dbcache=<MB>        Database cache size in MiB (default: 450, min: 4)")
 	fmt.println("  --help, -h            Show this help message")
 }
 
@@ -197,6 +209,14 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 	if .Mempool_Full_RBF not_in flags_set {
 		if val, found := _ini_get(&m, cfg.network, "mempoolfullrbf"); found {
 			cfg.mempool_fullrbf = val == "1" || val == "true" || val == "yes"
+		}
+	}
+
+	if .DbCache not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "dbcache"); found {
+			if mb, parse_ok := strconv.parse_int(val); parse_ok {
+				cfg.db_cache_mb = max(mb, 4)
+			}
 		}
 	}
 }
@@ -280,10 +300,11 @@ main :: proc() {
 
 	log.infof("Network: %s", params.name)
 	log.infof("Data directory: %s", cfg.data_dir)
+	log.infof("DB cache: %d MiB", cfg.db_cache_mb)
 
 	// Initialize chain state.
 	cs := new(chain.Chain_State)
-	cs_err := chain.chain_state_init(cs, cfg.data_dir, params)
+	cs_err := chain.chain_state_init(cs, cfg.data_dir, params, cfg.db_cache_mb)
 	if cs_err != .None {
 		log.errorf("Failed to initialize chain state: %v", cs_err)
 		return

@@ -304,10 +304,11 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 		_, height := chain.chain_tip(sm.chain)
 		sm.last_tip_update = time.to_unix_seconds(time.now())
 
-		// Periodic UTXO flush to prevent unbounded memory growth during sync.
-		// Flush every 1000 blocks to keep flushes fast and avoid blocking
-		// the P2P thread long enough for peers to disconnect.
-		if height / 1000 > prev_height / 1000 {
+		// Budget-based UTXO flush: flush when coins cache exceeds its memory budget,
+		// or every 5000 blocks as a durability safety net.
+		should_flush := chain.coins_cache_should_flush(&sm.chain.coins)
+		safety_flush := height / 5000 > prev_height / 5000
+		if should_flush || safety_flush {
 			tip_hash, tip_h := chain.chain_tip(sm.chain)
 			chain.coins_cache_flush(&sm.chain.coins, tip_hash, tip_h)
 		}
@@ -318,7 +319,7 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 		}
 
 		remaining := len(sm.blocks_to_download) - sm.download_cursor
-		if height / 1000 > prev_height / 1000 || remaining == 0 {
+		if should_flush || safety_flush || remaining == 0 {
 			log.debugf("Connected block at height %d (remaining: %d, in-flight: %d)",
 				height, remaining, len(sm.blocks_in_flight))
 

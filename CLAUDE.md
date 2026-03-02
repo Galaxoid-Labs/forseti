@@ -35,9 +35,9 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 
 ## Key Architecture
 
-- **Storage**: Two LevelDB instances — `<datadir>/chainstate/` (UTXOs + meta tip) and `<datadir>/blocks/index/` (block index). 256MB LRU cache, bloom filter, no Snappy. Blocks stored in flat files (`blk*.dat`, `rev*.dat`).
+- **Storage**: Two LevelDB instances — `<datadir>/chainstate/` (UTXOs + meta tip) and `<datadir>/blocks/index/` (block index). Cache budget configurable via `--dbcache=<MB>` (default 450), split per Bitcoin Core's algorithm: index_db=min(total/8, 2MB), chainstate_db=min(remaining/2, 8MB), coins_cache=rest. 2MB write buffers, bloom filter, no Snappy. Blocks stored in flat files (`blk*.dat`, `rev*.dat`).
 - **Crash consistency**: Atomic WriteBatch commits UTXO changes + chain tip metadata together. Recovery strips Valid_Chain from blocks above the last flush point and replays from flat files.
-- **UTXO cache**: Write-back with Dirty/Fresh flags. Flushed every 1000 blocks during sync and at shutdown. Rollback on block validation failure.
+- **UTXO cache**: Write-back with Dirty/Fresh flags. Budget-based flushing (flush when mem_usage >= coins_cache_budget, or every 5000 blocks as safety net). Rollback on block validation failure.
 - **Sync**: Headers-first with batched WriteBatch, then multi-peer block download (getdata with Witness_Block, up to 64 blocks per peer). Bandwidth-based scoring allocates more slots to faster peers. Stall detection requeues blocks after 30s. Steady-state via BIP130 sendheaders + periodic getheaders.
 - **Sighash cache**: BIP143 + BIP341 intermediate hashes cached per-tx. Per-input 2MB verification arena prevents arena exhaustion for large txs.
 - **Thread model**: Main (setup+wait), RPC thread, P2P thread, one reader thread per peer.
