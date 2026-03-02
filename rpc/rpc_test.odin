@@ -481,6 +481,57 @@ test_sendrawtransaction_invalid :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_getrawtransaction :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "getrawtx", 101)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	// Add a tx to the mempool
+	subsidy := consensus.get_block_subsidy(0, &consensus.REGTEST_PARAMS)
+	cb_txid := _get_coinbase_txid(0)
+	outpoint := wire.Outpoint{hash = cb_txid, index = 0}
+	tx := _make_spend_tx(outpoint, subsidy, subsidy - 1000)
+	merr := mempool.mempool_add(mp, &tx)
+	testing.expect(t, merr == .None, fmt.tprintf("mempool add: %v", merr))
+
+	txid := wire.tx_id(&tx)
+	txid_hex := _hash_to_hex(txid)
+
+	// Non-verbose: returns hex string
+	p := _make_params(json.Value(json.String(txid_hex)), json.Value(json.Boolean(false)))
+	resp := _handle_getrawtransaction(srv, p)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	hex_result, hex_ok := resp.result.(json.String)
+	testing.expect(t, hex_ok, "result should be hex string")
+	testing.expect(t, len(hex_result) > 0, "hex should not be empty")
+
+	// Verbose: returns object with txid field
+	p2 := _make_params(json.Value(json.String(txid_hex)), json.Value(json.Boolean(true)))
+	resp2 := _handle_getrawtransaction(srv, p2)
+
+	_, has_err2 := resp2.error.?
+	testing.expect(t, !has_err2, "verbose should not error")
+
+	obj, obj_ok := resp2.result.(json.Object)
+	testing.expect(t, obj_ok, "verbose result should be object")
+	if obj_ok {
+		result_txid, tid_ok := obj["txid"].(json.String)
+		testing.expect(t, tid_ok, "should have txid field")
+		testing.expect(t, result_txid == txid_hex, "txid should match")
+	}
+
+	// Not found: returns error
+	p3 := _make_params(json.Value(json.String("0000000000000000000000000000000000000000000000000000000000000099")))
+	resp3 := _handle_getrawtransaction(srv, p3)
+	_, has_err3 := resp3.error.?
+	testing.expect(t, has_err3, "should error for missing tx")
+}
+
+@(test)
 test_getmempoolinfo :: proc(t: ^testing.T) {
 	srv, cs, mp, params, dir := _make_test_rpc_server(t, "mpinfo", 103)
 	defer _cleanup_test(srv, cs, mp, params, dir)
@@ -1315,4 +1366,414 @@ test_ping :: proc(t: ^testing.T) {
 
 	_, is_null := resp.result.(json.Null)
 	testing.expect(t, is_null, "result should be null")
+}
+
+// --- New RPC method tests (Phase 20) ---
+
+@(test)
+test_rpc_getmemoryinfo :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "meminfo", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+	resp := _handle_getmemoryinfo(srv, nil)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	obj, ok := resp.result.(json.Object)
+	testing.expect(t, ok, "result should be object")
+	if !ok { return }
+
+	locked, l_ok := obj["locked"].(json.Object)
+	testing.expect(t, l_ok, "locked should be object")
+	if !l_ok { return }
+
+	used, u_ok := locked["used"].(json.Integer)
+	testing.expect(t, u_ok, "used should be integer")
+	testing.expect(t, used >= 0, "used should be non-negative")
+
+	total, t_ok := locked["total"].(json.Integer)
+	testing.expect(t, t_ok, "total should be integer")
+	testing.expect(t, total > 0, "total should be positive")
+
+	free_mem, f_ok := locked["free"].(json.Integer)
+	testing.expect(t, f_ok, "free should be integer")
+	testing.expect(t, free_mem >= 0, "free should be non-negative")
+}
+
+@(test)
+test_rpc_getrpcinfo :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "rpcinfo", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+	resp := _handle_getrpcinfo(srv, nil)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	obj, ok := resp.result.(json.Object)
+	testing.expect(t, ok, "result should be object")
+	if !ok { return }
+
+	cmds, c_ok := obj["active_commands"].(json.Array)
+	testing.expect(t, c_ok, "active_commands should be array")
+	testing.expect(t, len(cmds) == 1, "should have 1 active command")
+
+	if len(cmds) >= 1 {
+		cmd, cmd_ok := cmds[0].(json.Object)
+		testing.expect(t, cmd_ok, "command should be object")
+		if cmd_ok {
+			method, m_ok := cmd["method"].(json.String)
+			testing.expect(t, m_ok, "method should be string")
+			testing.expect(t, method == "getrpcinfo", "method should be getrpcinfo")
+		}
+	}
+}
+
+@(test)
+test_rpc_logging :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "logging", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+	resp := _handle_logging(srv, nil)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	obj, ok := resp.result.(json.Object)
+	testing.expect(t, ok, "result should be object")
+	if !ok { return }
+
+	net_val, n_ok := obj["net"].(json.Boolean)
+	testing.expect(t, n_ok, "net should be boolean")
+	testing.expect(t, net_val, "net should be true")
+
+	rpc_val, r_ok := obj["rpc"].(json.Boolean)
+	testing.expect(t, r_ok, "rpc should be boolean")
+	testing.expect(t, rpc_val, "rpc should be true")
+}
+
+@(test)
+test_rpc_createrawtransaction :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "createtx", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	// Build inputs array
+	in_obj := make(json.Object, 4, context.temp_allocator)
+	in_obj["txid"] = json.Value(json.String("0000000000000000000000000000000000000000000000000000000000000001"))
+	in_obj["vout"] = json.Value(json.Integer(0))
+	inputs := make(json.Array, 1, context.temp_allocator)
+	inputs[0] = json.Value(in_obj)
+
+	// Build outputs array — use a regtest P2PKH address
+	// regtest p2pkh prefix is 0x6F, use a dummy 20-byte hash
+	addr := crypto.base58check_encode(0x6F, []byte{
+		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+		0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14,
+	})
+	out_obj := make(json.Object, 2, context.temp_allocator)
+	out_obj[addr] = json.Value(json.Float(0.01))
+	outputs := make(json.Array, 1, context.temp_allocator)
+	outputs[0] = json.Value(out_obj)
+
+	p := _make_params(json.Value(inputs), json.Value(outputs))
+	resp := _handle_createrawtransaction(srv, p)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, fmt.tprintf("should not error: %v", resp.error))
+
+	hex_str, ok := resp.result.(json.String)
+	testing.expect(t, ok, "result should be hex string")
+	if !ok { return }
+
+	// Deserialize and verify structure
+	raw, dec_ok := _hex_decode(hex_str)
+	testing.expect(t, dec_ok, "should decode hex")
+	if !dec_ok { return }
+
+	r := wire.reader_init(raw)
+	tx, err := wire.deserialize_tx(&r, context.temp_allocator)
+	testing.expect(t, err == nil, "should deserialize tx")
+
+	testing.expect_value(t, tx.version, i32(2))
+	testing.expect_value(t, len(tx.inputs), 1)
+	testing.expect_value(t, len(tx.outputs), 1)
+	testing.expect_value(t, tx.outputs[0].value, i64(1000000)) // 0.01 BTC
+	testing.expect_value(t, len(tx.outputs[0].script_pubkey), 25) // P2PKH script
+}
+
+@(test)
+test_rpc_createrawtransaction_bech32 :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "createtx_b", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	in_obj := make(json.Object, 4, context.temp_allocator)
+	in_obj["txid"] = json.Value(json.String("0000000000000000000000000000000000000000000000000000000000000001"))
+	in_obj["vout"] = json.Value(json.Integer(0))
+	inputs := make(json.Array, 1, context.temp_allocator)
+	inputs[0] = json.Value(in_obj)
+
+	// Build bech32 regtest address (P2WPKH, 20 bytes)
+	program: [20]byte = {
+		0x75, 0x1e, 0x76, 0xe8, 0x19, 0x91, 0x96, 0xd4,
+		0x54, 0x94, 0x1c, 0x45, 0xd1, 0xb3, 0xa3, 0x23,
+		0xf1, 0x43, 0x3b, 0xd6,
+	}
+	addr := crypto.bech32_encode("bcrt", 0, program[:])
+
+	out_obj := make(json.Object, 2, context.temp_allocator)
+	out_obj[addr] = json.Value(json.Float(0.005))
+	outputs := make(json.Array, 1, context.temp_allocator)
+	outputs[0] = json.Value(out_obj)
+
+	p := _make_params(json.Value(inputs), json.Value(outputs))
+	resp := _handle_createrawtransaction(srv, p)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	hex_str, ok := resp.result.(json.String)
+	testing.expect(t, ok, "result should be hex string")
+	if !ok { return }
+
+	raw, dec_ok := _hex_decode(hex_str)
+	testing.expect(t, dec_ok, "should decode hex")
+	if !dec_ok { return }
+
+	r := wire.reader_init(raw)
+	tx, err := wire.deserialize_tx(&r, context.temp_allocator)
+	testing.expect(t, err == nil, "should deserialize tx")
+
+	testing.expect_value(t, len(tx.outputs), 1)
+	testing.expect_value(t, tx.outputs[0].value, i64(500000)) // 0.005 BTC
+	testing.expect_value(t, len(tx.outputs[0].script_pubkey), 22) // P2WPKH: OP_0 <20>
+}
+
+@(test)
+test_rpc_combinerawtransaction :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "combinetx", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	// Create a base unsigned tx
+	in_obj := make(json.Object, 4, context.temp_allocator)
+	in_obj["txid"] = json.Value(json.String("0000000000000000000000000000000000000000000000000000000000000001"))
+	in_obj["vout"] = json.Value(json.Integer(0))
+	inputs := make(json.Array, 1, context.temp_allocator)
+	inputs[0] = json.Value(in_obj)
+
+	addr := crypto.base58check_encode(0x6F, []byte{
+		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+		0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14,
+	})
+	out_obj := make(json.Object, 2, context.temp_allocator)
+	out_obj[addr] = json.Value(json.Float(0.01))
+	outputs := make(json.Array, 1, context.temp_allocator)
+	outputs[0] = json.Value(out_obj)
+
+	create_p := _make_params(json.Value(inputs), json.Value(outputs))
+	create_resp := _handle_createrawtransaction(srv, create_p)
+	hex1, _ := create_resp.result.(json.String)
+
+	// Combine two copies (same tx)
+	hex_arr := make(json.Array, 2, context.temp_allocator)
+	hex_arr[0] = json.Value(json.String(hex1))
+	hex_arr[1] = json.Value(json.String(hex1))
+
+	p := _make_params(json.Value(hex_arr))
+	resp := _handle_combinerawtransaction(srv, p)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	result, ok := resp.result.(json.String)
+	testing.expect(t, ok, "result should be hex string")
+	testing.expect(t, len(result) > 0, "result should not be empty")
+}
+
+@(test)
+test_rpc_signrawtransactionwithkey :: proc(t: ^testing.T) {
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "signtx", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	// Known test WIF key (regtest/testnet compressed)
+	// This is a well-known test key: private key = 0x0000...0001
+	// WIF (testnet, compressed): cMahea7zqjxrtgAbB7LSGbcQUr1uX1ojuat9jZodMN8rFTv2sfUK
+	// We'll use a real test vector:
+	// seckey = cb28e600b1b13795c3b17e67fb0a8edd7fd609d08e0251e215039e8e35a7eb01
+	// WIF (testnet compressed) = cUEfRtvyVBqFMm2NxV3pRdqeb21CUkBCRK8VsuYSmgcpE6d8bVhR
+	// Let's just build a P2PKH tx and try to sign, checking the output format
+
+	// Create unsigned tx
+	in_obj := make(json.Object, 4, context.temp_allocator)
+	in_obj["txid"] = json.Value(json.String("0000000000000000000000000000000000000000000000000000000000000001"))
+	in_obj["vout"] = json.Value(json.Integer(0))
+	inputs := make(json.Array, 1, context.temp_allocator)
+	inputs[0] = json.Value(in_obj)
+
+	addr := crypto.base58check_encode(0x6F, []byte{
+		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+		0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14,
+	})
+	out_obj := make(json.Object, 2, context.temp_allocator)
+	out_obj[addr] = json.Value(json.Float(0.01))
+	outputs := make(json.Array, 1, context.temp_allocator)
+	outputs[0] = json.Value(out_obj)
+
+	create_p := _make_params(json.Value(inputs), json.Value(outputs))
+	create_resp := _handle_createrawtransaction(srv, create_p)
+	unsigned_hex, _ := create_resp.result.(json.String)
+
+	// Generate a real key pair for testing
+	seckey_bytes := [32]u8{
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+	}
+	pubkey, pub_ok := crypto.pubkey_from_seckey(seckey_bytes[:])
+	testing.expect(t, pub_ok, "should derive pubkey")
+	if !pub_ok { return }
+
+	// Compute the pubkey hash and build the scriptPubKey
+	pkh := crypto.hash160(pubkey[:])
+	spk := make([]byte, 25, context.temp_allocator)
+	spk[0] = 0x76; spk[1] = 0xa9; spk[2] = 0x14
+	copy(spk[3:23], pkh[:])
+	spk[23] = 0x88; spk[24] = 0xac
+	spk_hex := _bytes_to_hex(spk)
+
+	// WIF encode the secret key (testnet, compressed: 0xEF + key + 0x01 + checksum)
+	wif_payload: [34]byte
+	wif_payload[0] = 0xEF
+	copy(wif_payload[1:33], seckey_bytes[:])
+	wif_payload[33] = 0x01
+	wif_checksum := crypto.sha256d(wif_payload[:34])
+	wif_full: [38]byte
+	copy(wif_full[:34], wif_payload[:])
+	wif_full[34] = wif_checksum[0]
+	wif_full[35] = wif_checksum[1]
+	wif_full[36] = wif_checksum[2]
+	wif_full[37] = wif_checksum[3]
+	wif_str := _base58_encode_test(wif_full[:])
+
+	keys := make(json.Array, 1, context.temp_allocator)
+	keys[0] = json.Value(json.String(wif_str))
+
+	// Build prevtxs
+	pt_obj := make(json.Object, 8, context.temp_allocator)
+	pt_obj["txid"] = json.Value(json.String("0000000000000000000000000000000000000000000000000000000000000001"))
+	pt_obj["vout"] = json.Value(json.Integer(0))
+	pt_obj["scriptPubKey"] = json.Value(json.String(spk_hex))
+	pt_obj["amount"] = json.Value(json.Float(0.05))
+	prevtxs := make(json.Array, 1, context.temp_allocator)
+	prevtxs[0] = json.Value(pt_obj)
+
+	p := _make_params(
+		json.Value(json.String(unsigned_hex)),
+		json.Value(keys),
+		json.Value(prevtxs),
+	)
+	resp := _handle_signrawtransactionwithkey(srv, p)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, fmt.tprintf("should not error: %v", resp.error))
+
+	obj, ok := resp.result.(json.Object)
+	testing.expect(t, ok, "result should be object")
+	if !ok { return }
+
+	complete, c_ok := obj["complete"].(json.Boolean)
+	testing.expect(t, c_ok, "complete should be boolean")
+	testing.expect(t, complete, "should be complete")
+
+	signed_hex, sh_ok := obj["hex"].(json.String)
+	testing.expect(t, sh_ok, "hex should be string")
+	testing.expect(t, len(signed_hex) > len(unsigned_hex), "signed tx should be longer than unsigned")
+}
+
+// Base58 encode helper for test (no version/checksum, raw bytes)
+_base58_encode_test :: proc(data: []byte) -> string {
+	alpha := [58]byte{
+		'1', '2', '3', '4', '5', '6', '7', '8', '9',
+		'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J',
+		'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T',
+		'U', 'V', 'W', 'X', 'Y', 'Z',
+		'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i',
+		'j', 'k', 'm', 'n', 'o', 'p', 'q', 'r', 's',
+		't', 'u', 'v', 'w', 'x', 'y', 'z',
+	}
+
+	// Count leading zeros
+	leading_zeros := 0
+	for i in 0 ..< len(data) {
+		if data[i] != 0 { break }
+		leading_zeros += 1
+	}
+
+	work := make([]byte, len(data), context.temp_allocator)
+	copy(work, data)
+
+	buf: [64]byte
+	buf_pos := len(buf)
+
+	for {
+		all_zero := true
+		for i in 0 ..< len(work) {
+			if work[i] != 0 { all_zero = false; break }
+		}
+		if all_zero { break }
+
+		remainder: u32 = 0
+		for i in 0 ..< len(work) {
+			acc := remainder * 256 + u32(work[i])
+			work[i] = u8(acc / 58)
+			remainder = acc % 58
+		}
+		buf_pos -= 1
+		buf[buf_pos] = alpha[remainder]
+	}
+
+	for _ in 0 ..< leading_zeros {
+		buf_pos -= 1
+		buf[buf_pos] = '1'
+	}
+
+	return fmt.tprintf("%s", string(buf[buf_pos:]))
+}
+
+@(test)
+test_rpc_help_includes_new :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "help_new", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+	resp := _handle_help(srv, nil)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	result, ok := resp.result.(json.String)
+	testing.expect(t, ok, "result should be string")
+	if !ok { return }
+
+	testing.expect(t, _str_contains(result, "getmemoryinfo"), "should contain getmemoryinfo")
+	testing.expect(t, _str_contains(result, "getrpcinfo"), "should contain getrpcinfo")
+	testing.expect(t, _str_contains(result, "logging"), "should contain logging")
+	testing.expect(t, _str_contains(result, "createrawtransaction"), "should contain createrawtransaction")
+	testing.expect(t, _str_contains(result, "combinerawtransaction"), "should contain combinerawtransaction")
+	testing.expect(t, _str_contains(result, "signrawtransactionwithkey"), "should contain signrawtransactionwithkey")
 }

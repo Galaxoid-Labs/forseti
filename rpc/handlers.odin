@@ -13,6 +13,51 @@ import "../script"
 import "../storage"
 import "../wire"
 
+// --- address to scriptPubKey ---
+
+// Convert a Bitcoin address string to its scriptPubKey bytes.
+_address_to_script_pubkey :: proc(addr: string, params: ^consensus.Chain_Params) -> ([]byte, bool) {
+	// Try bech32 first
+	hrp, ver, prog, prog_len, bech_ok := crypto.bech32_decode(addr)
+	if bech_ok && hrp == params.bech32_hrp {
+		spk := make([]byte, 2 + prog_len, context.temp_allocator)
+		if ver == 0 {
+			spk[0] = 0x00 // OP_0
+		} else {
+			spk[0] = u8(0x50 + ver) // OP_1..OP_16
+		}
+		spk[1] = u8(prog_len)
+		copy(spk[2:], prog[:prog_len])
+		return spk, true
+	}
+
+	// Try base58check
+	version, payload, b58_ok := crypto.base58check_decode(addr)
+	if b58_ok {
+		if version == params.p2pkh_prefix {
+			// P2PKH: OP_DUP OP_HASH160 <20> <hash> OP_EQUALVERIFY OP_CHECKSIG
+			spk := make([]byte, 25, context.temp_allocator)
+			spk[0] = 0x76  // OP_DUP
+			spk[1] = 0xa9  // OP_HASH160
+			spk[2] = 0x14  // push 20
+			copy(spk[3:23], payload[:])
+			spk[23] = 0x88 // OP_EQUALVERIFY
+			spk[24] = 0xac // OP_CHECKSIG
+			return spk, true
+		} else if version == params.p2sh_prefix {
+			// P2SH: OP_HASH160 <20> <hash> OP_EQUAL
+			spk := make([]byte, 23, context.temp_allocator)
+			spk[0] = 0xa9  // OP_HASH160
+			spk[1] = 0x14  // push 20
+			copy(spk[2:22], payload[:])
+			spk[22] = 0x87 // OP_EQUAL
+			return spk, true
+		}
+	}
+
+	return nil, false
+}
+
 // --- getblockchaininfo ---
 
 _handle_getblockchaininfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
@@ -1209,6 +1254,8 @@ _script_to_address :: proc(spk: []byte, params: ^consensus.Chain_Params) -> (str
 // --- help ---
 
 RPC_METHODS := [?]string{
+	"combinerawtransaction",
+	"createrawtransaction",
 	"decoderawtransaction",
 	"decodescript",
 	"getbestblockhash",
@@ -1223,6 +1270,7 @@ RPC_METHODS := [?]string{
 	"getdifficulty",
 	"getmempoolentry",
 	"getmempoolinfo",
+	"getmemoryinfo",
 	"getmininginfo",
 	"getnettotals",
 	"getnetworkhashps",
@@ -1230,11 +1278,14 @@ RPC_METHODS := [?]string{
 	"getpeerinfo",
 	"getrawmempool",
 	"getrawtransaction",
+	"getrpcinfo",
 	"gettxout",
 	"help",
+	"logging",
 	"ping",
 	"savemempool",
 	"sendrawtransaction",
+	"signrawtransactionwithkey",
 	"stop",
 	"testmempoolaccept",
 	"uptime",
@@ -1301,7 +1352,13 @@ _get_method_help :: proc(method: string) -> string {
 	case "getnettotals":         return "getnettotals\nReturns information about network traffic."
 	case "validateaddress":      return "validateaddress \"address\"\nReturn information about the given bitcoin address."
 	case "savemempool":          return "savemempool\nDumps the mempool to disk."
-	case "ping":                 return "ping\nRequests that a ping be sent to all other nodes."
+	case "ping":                        return "ping\nRequests that a ping be sent to all other nodes."
+	case "getmemoryinfo":               return "getmemoryinfo ( \"mode\" )\nReturns an object containing information about memory usage."
+	case "getrpcinfo":                  return "getrpcinfo\nReturns details about the RPC server."
+	case "logging":                     return "logging\nGets the logging configuration categories."
+	case "createrawtransaction":        return "createrawtransaction [{\"txid\":\"hex\",\"vout\":n},...] [{\"address\":amount},...] ( locktime replaceable )\nCreate a transaction spending the given inputs and creating new outputs."
+	case "combinerawtransaction":       return "combinerawtransaction [\"hex\",...]\nCombine multiple partially signed transactions into one transaction."
+	case "signrawtransactionwithkey":   return "signrawtransactionwithkey \"hex\" [\"privatekey\",...] ( [{\"txid\":\"hex\",\"vout\":n,\"scriptPubKey\":\"hex\",\"amount\":n},...] \"sighashtype\" )\nSign inputs for raw transaction with provided private keys."
 	}
 	return fmt.tprintf("%s\nNo detailed help available.", method)
 }
@@ -1507,4 +1564,555 @@ _handle_ping :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 		}
 	}
 	return _make_result(json.Value(json.Null(nil)), srv._current_id)
+}
+
+// --- getmemoryinfo ---
+
+_handle_getmemoryinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	// Optional mode param (default "stats", only "stats" supported)
+	mode, has_mode := _get_string_param(params, 0)
+	if has_mode && mode != "stats" {
+		return _make_error(.Invalid_Params, "Only \"stats\" mode is supported", srv._current_id)
+	}
+
+	used := i64(srv.chain.coins.mem_usage)
+	total := i64(srv.chain.coins.budget)
+	free_mem := total - used
+	if free_mem < 0 { free_mem = 0 }
+	chunks_used := i64(len(srv.chain.coins.cache))
+
+	locked := make(json.Object, 8, context.temp_allocator)
+	locked["used"] = json.Value(json.Integer(used))
+	locked["free"] = json.Value(json.Integer(free_mem))
+	locked["total"] = json.Value(json.Integer(total))
+	locked["chunks_used"] = json.Value(json.Integer(chunks_used))
+	locked["chunks_free"] = json.Value(json.Integer(0))
+
+	obj := make(json.Object, 2, context.temp_allocator)
+	obj["locked"] = json.Value(locked)
+
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// --- getrpcinfo ---
+
+_handle_getrpcinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	cmd := make(json.Object, 4, context.temp_allocator)
+	cmd["method"] = json.Value(json.String("getrpcinfo"))
+	cmd["duration"] = json.Value(json.Integer(0))
+
+	cmds := make(json.Array, 1, context.temp_allocator)
+	cmds[0] = json.Value(cmd)
+
+	obj := make(json.Object, 2, context.temp_allocator)
+	obj["active_commands"] = json.Value(cmds)
+
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// --- logging ---
+
+_handle_logging :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	obj := make(json.Object, 8, context.temp_allocator)
+	obj["net"] = json.Value(json.Boolean(true))
+	obj["mempool"] = json.Value(json.Boolean(true))
+	obj["validation"] = json.Value(json.Boolean(true))
+	obj["rpc"] = json.Value(json.Boolean(true))
+
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// --- createrawtransaction ---
+
+_handle_createrawtransaction :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	// Params: [inputs_array, outputs_array, locktime?, replaceable?]
+	inputs_val, inputs_ok := _get_param(params, 0)
+	if !inputs_ok {
+		return _make_error(.Invalid_Params, "Missing inputs parameter", srv._current_id)
+	}
+	inputs_arr, is_inputs_arr := inputs_val.(json.Array)
+	if !is_inputs_arr {
+		return _make_error(.Invalid_Params, "inputs must be an array", srv._current_id)
+	}
+
+	outputs_val, outputs_ok := _get_param(params, 1)
+	if !outputs_ok {
+		return _make_error(.Invalid_Params, "Missing outputs parameter", srv._current_id)
+	}
+	outputs_arr, is_outputs_arr := outputs_val.(json.Array)
+	if !is_outputs_arr {
+		return _make_error(.Invalid_Params, "outputs must be an array", srv._current_id)
+	}
+
+	// Optional locktime
+	locktime: u32 = 0
+	lt, lt_ok := _get_int_param(params, 2)
+	if lt_ok { locktime = u32(lt) }
+
+	// Optional replaceable
+	replaceable := _get_bool_param(params, 3, false)
+	default_sequence: u32 = replaceable ? 0xFFFFFFFD : 0xFFFFFFFE
+
+	// Build inputs
+	tx_inputs := make([]wire.Tx_In, len(inputs_arr), context.temp_allocator)
+	for i in 0 ..< len(inputs_arr) {
+		in_obj, in_ok := inputs_arr[i].(json.Object)
+		if !in_ok {
+			return _make_error(.Invalid_Params, fmt.tprintf("input %d: must be an object", i), srv._current_id)
+		}
+
+		txid_str, txid_ok := in_obj["txid"].(json.String)
+		if !txid_ok {
+			return _make_error(.Invalid_Params, fmt.tprintf("input %d: missing txid", i), srv._current_id)
+		}
+		txid_hash, hash_ok := _hex_to_hash(txid_str)
+		if !hash_ok {
+			return _make_error(.Invalid_Params, fmt.tprintf("input %d: invalid txid", i), srv._current_id)
+		}
+
+		vout: u32 = 0
+		vout_val, vout_found := in_obj["vout"]
+		if vout_found {
+			#partial switch v in vout_val {
+			case json.Integer: vout = u32(v)
+			case json.Float:   vout = u32(v)
+			}
+		}
+
+		seq := default_sequence
+		seq_val, seq_found := in_obj["sequence"]
+		if seq_found {
+			#partial switch v in seq_val {
+			case json.Integer: seq = u32(v)
+			case json.Float:   seq = u32(v)
+			}
+		}
+
+		tx_inputs[i] = wire.Tx_In {
+			previous_output = wire.Outpoint{hash = txid_hash, index = vout},
+			script_sig      = make([]byte, 0, context.temp_allocator),
+			sequence        = seq,
+		}
+	}
+
+	// Build outputs
+	tx_outputs := make([dynamic]wire.Tx_Out, 0, len(outputs_arr), context.temp_allocator)
+	for i in 0 ..< len(outputs_arr) {
+		out_obj, out_ok := outputs_arr[i].(json.Object)
+		if !out_ok {
+			return _make_error(.Invalid_Params, fmt.tprintf("output %d: must be an object", i), srv._current_id)
+		}
+
+		for key, val in out_obj {
+			if key == "data" {
+				// OP_RETURN output
+				data_hex, d_ok := val.(json.String)
+				if !d_ok {
+					return _make_error(.Invalid_Params, "data must be a string", srv._current_id)
+				}
+				data_bytes, dec_ok := _hex_decode(data_hex)
+				if !dec_ok {
+					return _make_error(.Invalid_Params, "invalid data hex", srv._current_id)
+				}
+				// Build OP_RETURN script: OP_RETURN <push data>
+				script_len := 1 + 1 + len(data_bytes) // OP_RETURN + push_len + data
+				spk := make([]byte, script_len, context.temp_allocator)
+				spk[0] = 0x6a // OP_RETURN
+				spk[1] = u8(len(data_bytes))
+				copy(spk[2:], data_bytes)
+				append(&tx_outputs, wire.Tx_Out{value = 0, script_pubkey = spk})
+			} else {
+				// Address output
+				amount_f64: f64 = 0
+				#partial switch v in val {
+				case json.Float:   amount_f64 = v
+				case json.Integer: amount_f64 = f64(v)
+				case:
+					return _make_error(.Invalid_Params, fmt.tprintf("output %d: amount must be numeric", i), srv._current_id)
+				}
+				amount_sat := i64(amount_f64 * 1e8 + 0.5)
+
+				spk, spk_ok := _address_to_script_pubkey(key, srv.params)
+				if !spk_ok {
+					return _make_error(.Invalid_Params, fmt.tprintf("Invalid address: %s", key), srv._current_id)
+				}
+				append(&tx_outputs, wire.Tx_Out{value = amount_sat, script_pubkey = spk})
+			}
+		}
+	}
+
+	tx := wire.Tx {
+		version  = 2,
+		inputs   = tx_inputs,
+		outputs  = tx_outputs[:],
+		locktime = locktime,
+	}
+
+	w := wire.writer_init(context.temp_allocator)
+	wire.serialize_tx(&w, &tx)
+	raw := wire.writer_bytes(&w)
+
+	return _make_result(json.Value(json.String(_bytes_to_hex(raw))), srv._current_id)
+}
+
+// --- combinerawtransaction ---
+
+_handle_combinerawtransaction :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	// Params: [["hex1", "hex2", ...]]
+	hex_arr_val, arr_ok := _get_param(params, 0)
+	if !arr_ok {
+		return _make_error(.Invalid_Params, "Missing hex array parameter", srv._current_id)
+	}
+	hex_arr, is_arr := hex_arr_val.(json.Array)
+	if !is_arr || len(hex_arr) < 1 {
+		return _make_error(.Invalid_Params, "Must provide at least one transaction", srv._current_id)
+	}
+
+	// Deserialize all transactions
+	txs := make([dynamic]wire.Tx, 0, len(hex_arr), context.temp_allocator)
+	for i in 0 ..< len(hex_arr) {
+		hex_str, h_ok := hex_arr[i].(json.String)
+		if !h_ok {
+			return _make_error(.Invalid_Params, fmt.tprintf("tx %d: must be hex string", i), srv._current_id)
+		}
+		raw, dec_ok := _hex_decode(hex_str)
+		if !dec_ok {
+			return _make_error(.Tx_Deser_Error, fmt.tprintf("tx %d: invalid hex", i), srv._current_id)
+		}
+		r := wire.reader_init(raw)
+		tx, err := wire.deserialize_tx(&r, context.temp_allocator)
+		if err != nil {
+			return _make_error(.Tx_Deser_Error, fmt.tprintf("tx %d: deserialization failed", i), srv._current_id)
+		}
+		append(&txs, tx)
+	}
+
+	// Verify all have same structure
+	base := &txs[0]
+	for i in 1 ..< len(txs) {
+		tx := &txs[i]
+		if len(tx.inputs) != len(base.inputs) || len(tx.outputs) != len(base.outputs) {
+			return _make_error(.Invalid_Params, "Transactions do not have the same structure", srv._current_id)
+		}
+		// Verify same prevouts
+		for j in 0 ..< len(tx.inputs) {
+			if tx.inputs[j].previous_output.hash != base.inputs[j].previous_output.hash ||
+			   tx.inputs[j].previous_output.index != base.inputs[j].previous_output.index {
+				return _make_error(.Invalid_Params, "Transactions do not spend the same inputs", srv._current_id)
+			}
+		}
+	}
+
+	// Merge: for each input, pick the best scriptSig/witness
+	merged := txs[0]
+	has_any_witness := false
+
+	for i in 0 ..< len(merged.inputs) {
+		for j in 1 ..< len(txs) {
+			tx := &txs[j]
+			// Prefer longer scriptSig
+			if len(tx.inputs[i].script_sig) > len(merged.inputs[i].script_sig) {
+				merged.inputs[i].script_sig = tx.inputs[i].script_sig
+			}
+			// Prefer non-empty witness
+			if tx.witness != nil && i < len(tx.witness) && len(tx.witness[i]) > 0 {
+				if merged.witness == nil || i >= len(merged.witness) || len(merged.witness[i]) == 0 {
+					// Need to ensure merged.witness is big enough
+					if merged.witness == nil {
+						merged.witness = make([][][]byte, len(merged.inputs), context.temp_allocator)
+					}
+					merged.witness[i] = tx.witness[i]
+				}
+			}
+		}
+		if merged.witness != nil && i < len(merged.witness) && len(merged.witness[i]) > 0 {
+			has_any_witness = true
+		}
+	}
+
+	if !has_any_witness {
+		merged.witness = nil
+	}
+
+	w := wire.writer_init(context.temp_allocator)
+	wire.serialize_tx(&w, &merged)
+	raw := wire.writer_bytes(&w)
+
+	return _make_result(json.Value(json.String(_bytes_to_hex(raw))), srv._current_id)
+}
+
+// --- signrawtransactionwithkey ---
+
+_handle_signrawtransactionwithkey :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	// Params: [hex_tx, [privkey_wif, ...], [prevtxs?], sighash_type?]
+	hex_str, hex_ok := _get_string_param(params, 0)
+	if !hex_ok {
+		return _make_error(.Invalid_Params, "Missing transaction hex", srv._current_id)
+	}
+
+	raw, dec_ok := _hex_decode(hex_str)
+	if !dec_ok {
+		return _make_error(.Tx_Deser_Error, "Invalid transaction hex", srv._current_id)
+	}
+	r := wire.reader_init(raw)
+	tx, tx_err := wire.deserialize_tx(&r, context.temp_allocator)
+	if tx_err != nil {
+		return _make_error(.Tx_Deser_Error, "Failed to deserialize transaction", srv._current_id)
+	}
+
+	// Parse private keys
+	keys_val, keys_ok := _get_param(params, 1)
+	if !keys_ok {
+		return _make_error(.Invalid_Params, "Missing private keys array", srv._current_id)
+	}
+	keys_arr, is_keys_arr := keys_val.(json.Array)
+	if !is_keys_arr {
+		return _make_error(.Invalid_Params, "Private keys must be an array", srv._current_id)
+	}
+
+	// Decode all WIF keys and derive pubkeys
+	Key_Info :: struct {
+		seckey:     [32]u8,
+		pubkey:     [33]u8,
+		compressed: bool,
+	}
+	key_infos := make([dynamic]Key_Info, 0, len(keys_arr), context.temp_allocator)
+	for i in 0 ..< len(keys_arr) {
+		wif_str, w_ok := keys_arr[i].(json.String)
+		if !w_ok {
+			return _make_error(.Invalid_Params, fmt.tprintf("key %d: must be string", i), srv._current_id)
+		}
+		seckey, compressed, wif_ok := crypto.wif_decode(wif_str)
+		if !wif_ok {
+			return _make_error(.Invalid_Params, fmt.tprintf("key %d: invalid WIF", i), srv._current_id)
+		}
+		pubkey, pub_ok := crypto.pubkey_from_seckey(seckey[:])
+		if !pub_ok {
+			return _make_error(.Invalid_Params, fmt.tprintf("key %d: failed to derive pubkey", i), srv._current_id)
+		}
+		append(&key_infos, Key_Info{seckey = seckey, pubkey = pubkey, compressed = compressed})
+	}
+
+	// Parse prevtxs
+	Prevtx_Info :: struct {
+		txid:           Hash256,
+		vout:           u32,
+		script_pubkey:  []byte,
+		amount:         i64,
+		redeem_script:  []byte,
+	}
+	prevtxs := make([dynamic]Prevtx_Info, 0, 8, context.temp_allocator)
+	prevtxs_val, prevtxs_ok := _get_param(params, 2)
+	if prevtxs_ok {
+		prevtxs_arr, is_pt_arr := prevtxs_val.(json.Array)
+		if is_pt_arr {
+			for i in 0 ..< len(prevtxs_arr) {
+				pt_obj, pt_ok := prevtxs_arr[i].(json.Object)
+				if !pt_ok { continue }
+
+				ptxid_str, ptxid_ok := pt_obj["txid"].(json.String)
+				if !ptxid_ok { continue }
+				ptxid, ptxid_hash_ok := _hex_to_hash(ptxid_str)
+				if !ptxid_hash_ok { continue }
+
+				pvout: u32 = 0
+				pvout_val, pvout_found := pt_obj["vout"]
+				if pvout_found {
+					#partial switch v in pvout_val {
+					case json.Integer: pvout = u32(v)
+					case json.Float:   pvout = u32(v)
+					}
+				}
+
+				spk_hex, spk_ok := pt_obj["scriptPubKey"].(json.String)
+				if !spk_ok { continue }
+				spk_bytes, spk_dec_ok := _hex_decode(spk_hex)
+				if !spk_dec_ok { continue }
+
+				amt: i64 = 0
+				amt_val, amt_found := pt_obj["amount"]
+				if amt_found {
+					#partial switch v in amt_val {
+					case json.Float:   amt = i64(v * 1e8 + 0.5)
+					case json.Integer: amt = i64(v)
+					}
+				}
+
+				rs: []byte = nil
+				rs_hex, rs_ok := pt_obj["redeemScript"].(json.String)
+				if rs_ok {
+					rs, _ = _hex_decode(rs_hex)
+				}
+
+				append(&prevtxs, Prevtx_Info{
+					txid = ptxid, vout = pvout,
+					script_pubkey = spk_bytes, amount = amt,
+					redeem_script = rs,
+				})
+			}
+		}
+	}
+
+	// Sign each input
+	errors := make(json.Array, 0, len(tx.inputs), context.temp_allocator)
+	complete := true
+
+	// Ensure witness array exists
+	if tx.witness == nil {
+		tx.witness = make([][][]byte, len(tx.inputs), context.temp_allocator)
+	}
+
+	for i in 0 ..< len(tx.inputs) {
+		inp := &tx.inputs[i]
+
+		// Find matching prevtx info
+		pt_found := false
+		pt_info: Prevtx_Info
+		for pt in prevtxs[:] {
+			if pt.txid == inp.previous_output.hash && pt.vout == inp.previous_output.index {
+				pt_info = pt
+				pt_found = true
+				break
+			}
+		}
+		if !pt_found {
+			complete = false
+			continue
+		}
+
+		// Determine script type and sign
+		spk := pt_info.script_pubkey
+		signed := false
+
+		if len(spk) == 25 && spk[0] == 0x76 && spk[1] == 0xa9 && spk[2] == 0x14 && spk[23] == 0x88 && spk[24] == 0xac {
+			// P2PKH: OP_DUP OP_HASH160 <20 hash> OP_EQUALVERIFY OP_CHECKSIG
+			pkh := spk[3:23]
+			for &ki in key_infos {
+				pub_hash := crypto.hash160(ki.pubkey[:])
+				if _bytes_equal(pub_hash[:], pkh) {
+					// Compute legacy sighash
+					sighash := script.compute_sighash_legacy(&tx, i, spk, 0x01) // SIGHASH_ALL
+					sig_der, sig_len, sig_ok := crypto.sign_ecdsa(ki.seckey[:], sighash)
+					if sig_ok {
+						// Build scriptSig: <sig + hashtype> <pubkey>
+						ss := make([]byte, 1 + sig_len + 1 + 1 + 33, context.temp_allocator)
+						ss[0] = u8(sig_len + 1) // push (sig + hashtype byte)
+						copy(ss[1:], sig_der[:sig_len])
+						ss[1 + sig_len] = 0x01 // SIGHASH_ALL
+						ss[2 + sig_len] = 0x21 // push 33 (compressed pubkey)
+						copy(ss[3 + sig_len:], ki.pubkey[:])
+						inp.script_sig = ss
+						signed = true
+					}
+					break
+				}
+			}
+		} else if len(spk) == 22 && spk[0] == 0x00 && spk[1] == 0x14 {
+			// P2WPKH: OP_0 <20-byte hash>
+			pkh := spk[2:22]
+			for &ki in key_infos {
+				pub_hash := crypto.hash160(ki.pubkey[:])
+				if _bytes_equal(pub_hash[:], pkh) {
+					// Build script code for P2WPKH: OP_DUP OP_HASH160 <20> <hash> OP_EQUALVERIFY OP_CHECKSIG
+					script_code := make([]byte, 25, context.temp_allocator)
+					script_code[0] = 0x76
+					script_code[1] = 0xa9
+					script_code[2] = 0x14
+					copy(script_code[3:23], pkh)
+					script_code[23] = 0x88
+					script_code[24] = 0xac
+
+					sighash := script.compute_sighash_witness_v0(&tx, i, script_code, pt_info.amount, 0x01)
+					sig_der, sig_len, sig_ok := crypto.sign_ecdsa(ki.seckey[:], sighash)
+					if sig_ok {
+						// Build witness: [sig+hashtype, pubkey]
+						wit := make([][]byte, 2, context.temp_allocator)
+						sig_with_ht := make([]byte, sig_len + 1, context.temp_allocator)
+						copy(sig_with_ht, sig_der[:sig_len])
+						sig_with_ht[sig_len] = 0x01
+						wit[0] = sig_with_ht
+						pk_copy := make([]byte, 33, context.temp_allocator)
+						copy(pk_copy, ki.pubkey[:])
+						wit[1] = pk_copy
+						tx.witness[i] = wit
+						signed = true
+					}
+					break
+				}
+			}
+		} else if len(spk) == 23 && spk[0] == 0xa9 && spk[1] == 0x14 && spk[22] == 0x87 {
+			// P2SH — check if it's P2SH-P2WPKH using redeemScript
+			if pt_info.redeem_script != nil && len(pt_info.redeem_script) == 22 &&
+			   pt_info.redeem_script[0] == 0x00 && pt_info.redeem_script[1] == 0x14 {
+				// P2SH-P2WPKH
+				pkh := pt_info.redeem_script[2:22]
+				for &ki in key_infos {
+					pub_hash := crypto.hash160(ki.pubkey[:])
+					if _bytes_equal(pub_hash[:], pkh) {
+						script_code := make([]byte, 25, context.temp_allocator)
+						script_code[0] = 0x76
+						script_code[1] = 0xa9
+						script_code[2] = 0x14
+						copy(script_code[3:23], pkh)
+						script_code[23] = 0x88
+						script_code[24] = 0xac
+
+						sighash := script.compute_sighash_witness_v0(&tx, i, script_code, pt_info.amount, 0x01)
+						sig_der, sig_len, sig_ok := crypto.sign_ecdsa(ki.seckey[:], sighash)
+						if sig_ok {
+							// scriptSig: push redeemScript
+							rs_len := len(pt_info.redeem_script)
+							ss := make([]byte, 1 + rs_len, context.temp_allocator)
+							ss[0] = u8(rs_len)
+							copy(ss[1:], pt_info.redeem_script)
+							inp.script_sig = ss
+
+							// witness: [sig+hashtype, pubkey]
+							wit := make([][]byte, 2, context.temp_allocator)
+							sig_with_ht := make([]byte, sig_len + 1, context.temp_allocator)
+							copy(sig_with_ht, sig_der[:sig_len])
+							sig_with_ht[sig_len] = 0x01
+							wit[0] = sig_with_ht
+							pk_copy := make([]byte, 33, context.temp_allocator)
+							copy(pk_copy, ki.pubkey[:])
+							wit[1] = pk_copy
+							tx.witness[i] = wit
+							signed = true
+						}
+						break
+					}
+				}
+			}
+		}
+
+		if !signed {
+			complete = false
+			err_obj := make(json.Object, 4, context.temp_allocator)
+			err_obj["txid"] = json.Value(json.String(_hash_to_hex(inp.previous_output.hash)))
+			err_obj["vout"] = json.Value(json.Integer(i64(inp.previous_output.index)))
+			err_obj["error"] = json.Value(json.String("Unable to sign input"))
+			append(&errors, json.Value(err_obj))
+		}
+	}
+
+	// Serialize signed tx
+	w := wire.writer_init(context.temp_allocator)
+	wire.serialize_tx(&w, &tx)
+	signed_raw := wire.writer_bytes(&w)
+
+	obj := make(json.Object, 4, context.temp_allocator)
+	obj["hex"] = json.Value(json.String(_bytes_to_hex(signed_raw)))
+	obj["complete"] = json.Value(json.Boolean(complete))
+	obj["errors"] = json.Value(errors)
+
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// Helper: compare two byte slices for equality.
+_bytes_equal :: proc(a: []byte, b: []byte) -> bool {
+	if len(a) != len(b) { return false }
+	for i in 0 ..< len(a) {
+		if a[i] != b[i] { return false }
+	}
+	return true
 }

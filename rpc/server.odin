@@ -239,6 +239,18 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_savemempool(srv, req.params)
 	case "ping":
 		return _handle_ping(srv, req.params)
+	case "getmemoryinfo":
+		return _handle_getmemoryinfo(srv, req.params)
+	case "getrpcinfo":
+		return _handle_getrpcinfo(srv, req.params)
+	case "logging":
+		return _handle_logging(srv, req.params)
+	case "createrawtransaction":
+		return _handle_createrawtransaction(srv, req.params)
+	case "combinerawtransaction":
+		return _handle_combinerawtransaction(srv, req.params)
+	case "signrawtransactionwithkey":
+		return _handle_signrawtransactionwithkey(srv, req.params)
 	}
 
 	return _make_error(.Method_Not_Found, fmt.tprintf("Method not found: %s", req.method), srv._current_id)

@@ -25,6 +25,10 @@ Secp256k1_XOnly_Pubkey :: struct {
 // Context flags
 SECP256K1_CONTEXT_NONE :: 1 // SECP256K1_FLAGS_TYPE_CONTEXT
 
+// Serialization flags
+SECP256K1_EC_COMPRESSED   :: 258  // SECP256K1_FLAGS_TYPE_COMPRESSION | SECP256K1_FLAGS_BIT_COMPRESSION
+SECP256K1_EC_UNCOMPRESSED :: 2    // SECP256K1_FLAGS_TYPE_COMPRESSION
+
 @(default_calling_convention = "c")
 foreign secp256k1_lib {
 	secp256k1_context_create :: proc(flags: c.uint) -> Secp256k1_Context ---
@@ -90,6 +94,41 @@ foreign secp256k1_lib {
 		output32: [^]u8,
 		pubkey: ^Secp256k1_XOnly_Pubkey,
 	) -> c.int ---
+
+	secp256k1_ecdsa_sign :: proc(
+		ctx: Secp256k1_Context,
+		sig: ^Secp256k1_ECDSA_Signature,
+		msghash32: [^]u8,
+		seckey: [^]u8,
+		noncefp: rawptr,
+		ndata: rawptr,
+	) -> c.int ---
+
+	secp256k1_ecdsa_signature_serialize_der :: proc(
+		ctx: Secp256k1_Context,
+		output: [^]u8,
+		outputlen: ^c.size_t,
+		sig: ^Secp256k1_ECDSA_Signature,
+	) -> c.int ---
+
+	secp256k1_ec_pubkey_create :: proc(
+		ctx: Secp256k1_Context,
+		pubkey: ^Secp256k1_Pubkey,
+		seckey: [^]u8,
+	) -> c.int ---
+
+	secp256k1_ec_pubkey_serialize :: proc(
+		ctx: Secp256k1_Context,
+		output: [^]u8,
+		outputlen: ^c.size_t,
+		pubkey: ^Secp256k1_Pubkey,
+		flags: c.uint,
+	) -> c.int ---
+
+	secp256k1_ec_seckey_verify :: proc(
+		ctx: Secp256k1_Context,
+		seckey: [^]u8,
+	) -> c.int ---
 }
 
 // Global secp256k1 context — created once at startup.
@@ -104,6 +143,53 @@ destroy_secp256k1 :: proc() {
 		secp256k1_context_destroy(_global_secp256k1_ctx)
 		_global_secp256k1_ctx = nil
 	}
+}
+
+// Sign a message hash with ECDSA and return the DER-encoded signature.
+sign_ecdsa :: proc(seckey: []u8, msg_hash: Hash256) -> (sig_der: [72]u8, sig_len: int, ok: bool) {
+	ctx := _global_secp256k1_ctx
+	if ctx == nil || len(seckey) != 32 { return {}, 0, false }
+
+	hash := msg_hash
+	sig: Secp256k1_ECDSA_Signature
+	if secp256k1_ecdsa_sign(ctx, &sig, &hash[0], raw_data(seckey), nil, nil) != 1 {
+		return {}, 0, false
+	}
+
+	// Normalize to lower-S (BIP62)
+	secp256k1_ecdsa_signature_normalize(ctx, &sig, &sig)
+
+	output_len := c.size_t(72)
+	if secp256k1_ecdsa_signature_serialize_der(ctx, &sig_der[0], &output_len, &sig) != 1 {
+		return {}, 0, false
+	}
+
+	return sig_der, int(output_len), true
+}
+
+// Derive a compressed public key from a secret key.
+pubkey_from_seckey :: proc(seckey: []u8) -> (pubkey_bytes: [33]u8, ok: bool) {
+	ctx := _global_secp256k1_ctx
+	if ctx == nil || len(seckey) != 32 { return {}, false }
+
+	pubkey: Secp256k1_Pubkey
+	if secp256k1_ec_pubkey_create(ctx, &pubkey, raw_data(seckey)) != 1 {
+		return {}, false
+	}
+
+	output_len := c.size_t(33)
+	if secp256k1_ec_pubkey_serialize(ctx, &pubkey_bytes[0], &output_len, &pubkey, SECP256K1_EC_COMPRESSED) != 1 {
+		return {}, false
+	}
+
+	return pubkey_bytes, true
+}
+
+// Verify that a secret key is valid (non-zero, less than group order).
+verify_seckey :: proc(seckey: []u8) -> bool {
+	ctx := _global_secp256k1_ctx
+	if ctx == nil || len(seckey) != 32 { return false }
+	return secp256k1_ec_seckey_verify(ctx, raw_data(seckey)) == 1
 }
 
 // Verify an ECDSA signature (DER-encoded) against a public key and message hash.

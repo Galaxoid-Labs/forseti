@@ -2,11 +2,11 @@
 
 A Bitcoin full node implementation written in [Odin](https://odin-lang.org/). Built from scratch with no Bitcoin library dependencies — only libsecp256k1 for elliptic curve cryptography, vendored RIPEMD-160, and vendored LevelDB for storage.
 
-This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, mempool with RBF, and a JSON-RPC interface with 30 methods.
+This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, mempool with RBF, and a JSON-RPC interface with 36 methods.
 
 ## Status
 
-**193 tests passing** across 9 packages. Successfully syncs the full signet blockchain (~294k blocks) with script verification.
+**202 tests passing** across 9 packages. Successfully syncs the full signet blockchain (~294k blocks) with script verification.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
@@ -18,7 +18,7 @@ This is an educational/experimental project. It implements the core components o
 | 5 | Persistent Storage (LevelDB) | Complete (13 tests) |
 | 6 | P2P Networking | Complete (6 tests) |
 | 7 | Mempool + Persistence + RBF | Complete (20 tests) |
-| 8 | RPC Interface (30 methods) | Complete (36 tests) |
+| 8 | RPC Interface (36 methods) | Complete (45 tests) |
 | 9 | P2P Integration + CLI + Shutdown | Complete |
 | 10 | Signet Sync (BIP325) | Complete |
 | 11 | LevelDB Storage Migration | Complete |
@@ -30,6 +30,7 @@ This is an educational/experimental project. It implements the core components o
 | 17 | RPC Enrichment (getpeerinfo, mining, network, validation) | Complete |
 | 18 | Configurable `--dbcache` (Bitcoin Core style) | Complete |
 | 19 | Parallel Script Verification (`--par`) | Complete |
+| 20 | Control + Raw Transaction RPCs | Complete |
 
 ## Dependencies
 
@@ -153,56 +154,127 @@ curl -s --data '{"method":"getblockchaininfo","params":[],"id":1}' \
 bitcoin-cli -rpcport=18443 getblockchaininfo
 ```
 
-### Available Methods (30)
+### Bitcoin Core RPC Coverage (36 / 78 non-wallet RPCs)
 
-**Blockchain:**
-- `getblockchaininfo` — Chain info, BIP activation heights, softfork status
-- `getblockcount` — Current block height
-- `getblockhash <height>` — Hash at height
-- `getbestblockhash` — Tip hash
-- `getblock <hash> [verbosity]` — Block data (0=hex, 1=json, 2=json with decoded txs)
-- `getblockheader <hash> [verbose]` — Header data (false=hex, true=json)
-- `getblockstats <hash_or_height>` — Block statistics (fees, sizes, counts)
-- `getdifficulty` — Current difficulty
-- `getchaintips` — All known chain tips
+The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are intentionally excluded.
 
-**Transactions:**
-- `getrawtransaction <txid> [verbose]` — Mempool tx lookup
-- `sendrawtransaction <hex>` — Submit tx to mempool
-- `decoderawtransaction <hex>` — Decode tx without submitting
-- `decodescript <hex>` — Decode script to ASM + type
-- `gettxout <txid> <vout> [include_mempool]` — UTXO lookup
+**Blockchain (14/25):**
 
-**Mempool:**
-- `getmempoolinfo` — Mempool summary (size, fees, RBF status)
-- `getrawmempool` — All mempool txids
-- `getmempoolentry <txid>` — Mempool entry details
-- `testmempoolaccept [<hex>, ...]` — Dry-run mempool validation
-- `savemempool` — Dump mempool to disk
+| Method | Status | Notes |
+|--------|--------|-------|
+| `getbestblockhash` | Yes | |
+| `getblock` | Yes | Verbosity 0, 1, 2 |
+| `getblockchaininfo` | Yes | |
+| `getblockcount` | Yes | |
+| `getblockfilter` | — | BIP157 compact block filters |
+| `getblockhash` | Yes | |
+| `getblockheader` | Yes | |
+| `getblockstats` | Yes | |
+| `getchaintips` | Yes | |
+| `getchaintxstats` | — | Per-window tx rate statistics |
+| `getdifficulty` | Yes | |
+| `getmempoolancestors` | — | Ancestor tracking not implemented |
+| `getmempooldescendants` | — | Descendant tracking not implemented |
+| `getmempoolentry` | Yes | |
+| `getmempoolinfo` | Yes | |
+| `getrawmempool` | Yes | |
+| `gettxout` | Yes | |
+| `gettxoutproof` | — | Merkle proof generation |
+| `gettxoutsetinfo` | — | Full UTXO set scan |
+| `preciousblock` | — | Manual best-chain override |
+| `pruneblockchain` | — | No pruning support |
+| `savemempool` | Yes | |
+| `scantxoutset` | — | UTXO set descriptor scan |
+| `verifychain` | — | Block-by-block re-verification |
+| `verifytxoutproof` | — | Merkle proof verification |
 
-**Mining:**
-- `getmininginfo` — Mining info (blocks, difficulty, hashrate, pooled txs)
-- `getnetworkhashps [nblocks] [height]` — Estimated network hash rate
+**Control (6/6):**
 
-**Network:**
-- `getconnectioncount` — Number of peers
-- `getpeerinfo` — Detailed peer info (18 fields: addr, services, bytes, ping, sync state)
-- `getnetworkinfo` — Network/protocol info
-- `getnettotals` — Total bytes sent/received
-- `ping` — Send ping to all peers
+| Method | Status | Notes |
+|--------|--------|-------|
+| `getmemoryinfo` | Yes | Reports UTXO cache usage |
+| `getrpcinfo` | Yes | |
+| `help` | Yes | Per-method and full listing |
+| `logging` | Yes | Read-only category report |
+| `stop` | Yes | Graceful shutdown |
+| `uptime` | Yes | |
 
-**Wallet:**
-- `validateaddress <address>` — Validate and decode a Bitcoin address
+**Generating (0/3):**
 
-**Control:**
-- `help [method]` — List all methods or get help for a specific method
-- `stop` — Graceful shutdown
-- `uptime` — Seconds since startup
+| Method | Status | Notes |
+|--------|--------|-------|
+| `generateblock` | — | Regtest block generation |
+| `generatetoaddress` | — | Regtest mining to address |
+| `generatetodescriptor` | — | Regtest mining to descriptor |
+
+**Mining (2/6):**
+
+| Method | Status | Notes |
+|--------|--------|-------|
+| `getblocktemplate` | — | Block template for miners |
+| `getmininginfo` | Yes | |
+| `getnetworkhashps` | Yes | |
+| `prioritisetransaction` | — | Manual fee delta |
+| `submitblock` | — | Mined block submission |
+| `submitheader` | — | Header-only submission |
+
+**Network (5/13):**
+
+| Method | Status | Notes |
+|--------|--------|-------|
+| `addnode` | — | Manual peer management |
+| `clearbanned` | — | No ban list |
+| `disconnectnode` | — | Manual peer disconnect |
+| `getaddednodeinfo` | — | Manual peer list info |
+| `getconnectioncount` | Yes | |
+| `getnettotals` | Yes | |
+| `getnetworkinfo` | Yes | |
+| `getnodeaddresses` | — | Known address gossip |
+| `getpeerinfo` | Yes | 18 fields |
+| `listbanned` | — | No ban list |
+| `ping` | Yes | |
+| `setban` | — | No ban list |
+| `setnetworkactive` | — | No network toggle |
+
+**Raw Transactions (8/17):**
+
+| Method | Status | Notes |
+|--------|--------|-------|
+| `analyzepsbt` | — | PSBT not implemented |
+| `combinepsbt` | — | PSBT not implemented |
+| `combinerawtransaction` | Yes | |
+| `converttopsbt` | — | PSBT not implemented |
+| `createpsbt` | — | PSBT not implemented |
+| `createrawtransaction` | Yes | |
+| `decodepsbt` | — | PSBT not implemented |
+| `decoderawtransaction` | Yes | |
+| `decodescript` | Yes | |
+| `finalizepsbt` | — | PSBT not implemented |
+| `fundrawtransaction` | — | Requires wallet UTXO selection |
+| `getrawtransaction` | Yes | Mempool lookup |
+| `joinpsbts` | — | PSBT not implemented |
+| `sendrawtransaction` | Yes | |
+| `signrawtransactionwithkey` | Yes | P2PKH, P2WPKH, P2SH-P2WPKH |
+| `testmempoolaccept` | Yes | |
+| `utxoupdatepsbt` | — | PSBT not implemented |
+
+**Util (1/8):**
+
+| Method | Status | Notes |
+|--------|--------|-------|
+| `createmultisig` | — | Multisig script construction |
+| `deriveaddresses` | — | Descriptor address derivation |
+| `estimatesmartfee` | — | Fee estimation not implemented |
+| `getdescriptorinfo` | — | Output descriptor analysis |
+| `getindexinfo` | — | Optional index status |
+| `signmessagewithprivkey` | — | Message signing |
+| `validateaddress` | Yes | |
+| `verifymessage` | — | Message signature verification |
 
 ## Testing
 
 ```bash
-# Run all 193 tests
+# Run all 202 tests
 make test
 
 # Test individual packages
@@ -214,7 +286,7 @@ odin test storage         # 13 tests
 odin test chain           #  8 tests
 odin test p2p             #  6 tests
 odin test mempool         # 20 tests
-odin test rpc             # 36 tests
+odin test rpc             # 45 tests
 ```
 
 ## Project Structure
@@ -223,7 +295,7 @@ odin test rpc             # 36 tests
 bitcoin-node-odin/
 ├── main.odin              # Entry point, CLI parsing, config file, thread orchestration
 ├── Makefile               # Build system
-├── crypto/                # SHA-256d, RIPEMD-160, HASH160, secp256k1, Merkle root, address encoding
+├── crypto/                # SHA-256d, RIPEMD-160, HASH160, secp256k1 (verify+sign), Merkle root, address encoding, WIF
 ├── wire/                  # Protocol types, CompactSize, tx/block serialization, message framing
 ├── script/                # Script interpreter, opcodes, standard types, Taproot (BIP341/342)
 ├── consensus/             # Chain params, PoW, difficulty, block/tx validation, BIP325 signet
@@ -231,7 +303,7 @@ bitcoin-node-odin/
 ├── chain/                 # UTXO cache, block index (skip list), undo data, chain state
 ├── p2p/                   # Peer connections, sync manager, connection manager
 ├── mempool/               # Fee rates, relay policy, validation pipeline, RBF, persistence
-├── rpc/                   # JSON-RPC server (30 methods), handlers, types
+├── rpc/                   # JSON-RPC server (36 methods), handlers, types
 └── deps/                  # C/C++ dependencies
     ├── libsecp256k1/      # Git submodule (bitcoin-core/secp256k1)
     ├── leveldb/           # Vendored LevelDB C++ source

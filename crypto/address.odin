@@ -85,6 +85,89 @@ base58check_encode :: proc(version: u8, payload: []byte, allocator := context.te
 	return result
 }
 
+// Decode a WIF (Wallet Import Format) private key.
+// Returns the 32-byte secret key and whether the key is for compressed pubkeys.
+wif_decode :: proc(wif: string) -> (seckey: [32]u8, compressed: bool, ok: bool) {
+	if len(wif) < 50 || len(wif) > 52 {
+		return {}, false, false
+	}
+
+	// Build reverse lookup table
+	rev: [128]i8
+	for i in 0 ..< 128 {
+		rev[i] = -1
+	}
+	alpha := BASE58_ALPHABET
+	for i in 0 ..< 58 {
+		rev[alpha[i]] = i8(i)
+	}
+
+	// Decode base58 to big integer in 38-byte buffer (max WIF decoded size)
+	decoded: [38]byte
+	for i in 0 ..< len(wif) {
+		c := wif[i]
+		if c >= 128 { return {}, false, false }
+		val := rev[c]
+		if val < 0 { return {}, false, false }
+
+		carry := u32(val)
+		for j := 37; j >= 0; j -= 1 {
+			carry += u32(decoded[j]) * 58
+			decoded[j] = u8(carry & 0xff)
+			carry >>= 8
+		}
+		if carry != 0 { return {}, false, false }
+	}
+
+	// Find first non-zero byte to determine payload length
+	start := 0
+	for start < 38 && decoded[start] == 0 {
+		start += 1
+	}
+
+	// Count leading '1's in input (each maps to a leading zero byte)
+	leading_ones := 0
+	for i in 0 ..< len(wif) {
+		if wif[i] != '1' { break }
+		leading_ones += 1
+	}
+	start = start - leading_ones
+
+	payload_len := 38 - start
+
+	// Version byte: 0x80 (mainnet) or 0xEF (testnet/regtest/signet)
+	version := decoded[start]
+	if version != 0x80 && version != 0xEF {
+		return {}, false, false
+	}
+
+	if payload_len == 38 {
+		// Compressed: version(1) + key(32) + compress_flag(1) + checksum(4) = 38
+		if decoded[start + 33] != 0x01 {
+			return {}, false, false
+		}
+		// Verify checksum
+		checksum := sha256d(decoded[start:start + 34])
+		if decoded[start + 34] != checksum[0] || decoded[start + 35] != checksum[1] ||
+		   decoded[start + 36] != checksum[2] || decoded[start + 37] != checksum[3] {
+			return {}, false, false
+		}
+		copy(seckey[:], decoded[start + 1:start + 33])
+		return seckey, true, true
+	} else if payload_len == 37 {
+		// Uncompressed: version(1) + key(32) + checksum(4) = 37
+		checksum := sha256d(decoded[start:start + 33])
+		if decoded[start + 33] != checksum[0] || decoded[start + 34] != checksum[1] ||
+		   decoded[start + 35] != checksum[2] || decoded[start + 36] != checksum[3] {
+			return {}, false, false
+		}
+		copy(seckey[:], decoded[start + 1:start + 33])
+		return seckey, false, true
+	}
+
+	return {}, false, false
+}
+
 // Bech32/Bech32m polymod checksum.
 _bech32_polymod :: proc(values: []u8) -> u32 {
 	GEN := [5]u32{0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3}
