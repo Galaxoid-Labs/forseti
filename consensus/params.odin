@@ -25,6 +25,10 @@ Chain_Params :: struct {
 	signet_challenge_len:      int,
 	// Assumevalid: skip script verification below this height
 	assumevalid_height:        int,
+	// Address encoding prefixes
+	p2pkh_prefix:              u8,
+	p2sh_prefix:               u8,
+	bech32_hrp:                string,
 	// Hardcoded genesis block header
 	genesis_header:            wire.Block_Header,
 }
@@ -52,6 +56,9 @@ _init_params :: proc "contextless" () {
 		csv_height               = 419_328,
 		segwit_height            = 481_824,
 		taproot_height           = 709_632,
+		p2pkh_prefix             = 0x00,
+		p2sh_prefix              = 0x05,
+		bech32_hrp               = "bc",
 	}
 	// mainnet pow_limit: 00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 	MAINNET_PARAMS.pow_limit[3] = 0xff
@@ -82,6 +89,9 @@ _init_params :: proc "contextless" () {
 		csv_height               = 1,
 		segwit_height            = 1,
 		taproot_height           = 1,
+		p2pkh_prefix             = 0x6F,
+		p2sh_prefix              = 0xC4,
+		bech32_hrp               = "tb",
 	}
 	TESTNET3_PARAMS.pow_limit = MAINNET_PARAMS.pow_limit
 
@@ -100,6 +110,9 @@ _init_params :: proc "contextless" () {
 		csv_height               = 1,
 		segwit_height            = 1,
 		taproot_height           = 1,
+		p2pkh_prefix             = 0x6F,
+		p2sh_prefix              = 0xC4,
+		bech32_hrp               = "tb",
 	}
 	TESTNET4_PARAMS.pow_limit = MAINNET_PARAMS.pow_limit
 
@@ -118,6 +131,9 @@ _init_params :: proc "contextless" () {
 		csv_height               = 1,
 		segwit_height            = 1,
 		taproot_height           = 1,
+		p2pkh_prefix             = 0x6F,
+		p2sh_prefix              = 0xC4,
+		bech32_hrp               = "tb",
 	}
 	// signet pow_limit: 00000377ae000000000000000000000000000000000000000000000000000000
 	SIGNET_PARAMS.pow_limit[2] = 0x03
@@ -229,6 +245,9 @@ _init_params :: proc "contextless" () {
 		csv_height               = 0,
 		segwit_height            = 0,
 		taproot_height           = 0,
+		p2pkh_prefix             = 0x6F,
+		p2sh_prefix              = 0xC4,
+		bech32_hrp               = "bcrt",
 	}
 	// regtest pow_limit: 7fffff0000000000000000000000000000000000000000000000000000000000
 	REGTEST_PARAMS.pow_limit[0] = 0x7f

@@ -229,7 +229,7 @@ _handle_getrawtransaction :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_R
 	}
 
 	// Verbose: decode to JSON
-	obj := _tx_to_json(tx, entry)
+	obj := _tx_to_json(tx, entry, srv.params)
 	return _make_result(json.Value(obj), srv._current_id)
 }
 
@@ -389,8 +389,15 @@ _handle_gettxout :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 		obj["value"] = json.Value(json.Float(_satoshi_to_btc(coin.amount)))
 		obj["coinbase"] = json.Value(json.Boolean(coin.is_coinbase))
 
-		spk_obj := make(json.Object, 2, context.temp_allocator)
+		spk_obj := make(json.Object, 4, context.temp_allocator)
+		spk_obj["asm"] = json.Value(json.String(script.script_to_asm(coin.script)))
 		spk_obj["hex"] = json.Value(json.String(_bytes_to_hex(coin.script)))
+		coin_stype := script.classify_script(coin.script)
+		spk_obj["type"] = json.Value(json.String(script.script_type_name(coin_stype)))
+		coin_addr, coin_addr_ok := _script_to_address(coin.script, srv.params)
+		if coin_addr_ok {
+			spk_obj["address"] = json.Value(json.String(coin_addr))
+		}
 		obj["scriptPubKey"] = json.Value(spk_obj)
 
 		return _make_result(json.Value(obj), srv._current_id)
@@ -409,8 +416,15 @@ _handle_gettxout :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 			obj["value"] = json.Value(json.Float(_satoshi_to_btc(txout.value)))
 			obj["coinbase"] = json.Value(json.Boolean(false))
 
-			spk_obj := make(json.Object, 2, context.temp_allocator)
+			spk_obj := make(json.Object, 4, context.temp_allocator)
+			spk_obj["asm"] = json.Value(json.String(script.script_to_asm(txout.script_pubkey)))
 			spk_obj["hex"] = json.Value(json.String(_bytes_to_hex(txout.script_pubkey)))
+			mp_stype := script.classify_script(txout.script_pubkey)
+			spk_obj["type"] = json.Value(json.String(script.script_type_name(mp_stype)))
+			mp_addr, mp_addr_ok := _script_to_address(txout.script_pubkey, srv.params)
+			if mp_addr_ok {
+				spk_obj["address"] = json.Value(json.String(mp_addr))
+			}
 			obj["scriptPubKey"] = json.Value(spk_obj)
 
 			return _make_result(json.Value(obj), srv._current_id)
@@ -450,14 +464,14 @@ _get_block_stripped_size :: proc(block: ^wire.Block) -> int {
 	return size
 }
 
-_tx_to_json :: proc(tx: ^wire.Tx, entry: ^mempool.Mempool_Entry) -> json.Object {
-	obj := _decode_tx_to_json(tx)
+_tx_to_json :: proc(tx: ^wire.Tx, entry: ^mempool.Mempool_Entry, params: ^consensus.Chain_Params) -> json.Object {
+	obj := _decode_tx_to_json(tx, params)
 	obj["vsize"] = json.Value(json.Integer(entry.vsize))
 	return obj
 }
 
 // Decode a transaction into JSON (for decoderawtransaction and getrawtransaction).
-_decode_tx_to_json :: proc(tx: ^wire.Tx) -> json.Object {
+_decode_tx_to_json :: proc(tx: ^wire.Tx, params: ^consensus.Chain_Params) -> json.Object {
 	obj := make(json.Object, 12, context.temp_allocator)
 
 	txid := wire.tx_id(tx)
@@ -512,11 +526,15 @@ _decode_tx_to_json :: proc(tx: ^wire.Tx) -> json.Object {
 		outp["value"] = json.Value(json.Float(_satoshi_to_btc(tx.outputs[i].value)))
 		outp["n"] = json.Value(json.Integer(i))
 
-		spk := make(json.Object, 3, context.temp_allocator)
+		spk := make(json.Object, 4, context.temp_allocator)
 		spk["asm"] = json.Value(json.String(script.script_to_asm(tx.outputs[i].script_pubkey)))
 		spk["hex"] = json.Value(json.String(_bytes_to_hex(tx.outputs[i].script_pubkey)))
 		stype := script.classify_script(tx.outputs[i].script_pubkey)
 		spk["type"] = json.Value(json.String(script.script_type_name(stype)))
+		addr, addr_ok := _script_to_address(tx.outputs[i].script_pubkey, params)
+		if addr_ok {
+			spk["address"] = json.Value(json.String(addr))
+		}
 		outp["scriptPubKey"] = json.Value(spk)
 
 		vout[i] = json.Value(outp)
@@ -751,7 +769,7 @@ _handle_decoderawtransaction :: proc(srv: ^RPC_Server, params: json.Value) -> RP
 		return _make_error(.Tx_Deser_Error, "TX decode failed: invalid transaction", srv._current_id)
 	}
 
-	obj := _decode_tx_to_json(&tx)
+	obj := _decode_tx_to_json(&tx, srv.params)
 	return _make_result(json.Value(obj), srv._current_id)
 }
 
@@ -768,11 +786,16 @@ _handle_decodescript :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respon
 		return _make_error(.Invalid_Params, "Invalid hex string", srv._current_id)
 	}
 
-	obj := make(json.Object, 4, context.temp_allocator)
+	obj := make(json.Object, 5, context.temp_allocator)
 	obj["asm"] = json.Value(json.String(script.script_to_asm(raw)))
 
 	stype := script.classify_script(raw)
 	obj["type"] = json.Value(json.String(script.script_type_name(stype)))
+
+	ds_addr, ds_addr_ok := _script_to_address(raw, srv.params)
+	if ds_addr_ok {
+		obj["address"] = json.Value(json.String(ds_addr))
+	}
 
 	// P2SH hash of this script
 	h160 := crypto.hash160(raw)
@@ -1114,4 +1137,24 @@ _handle_getblockstats :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respo
 	obj["total_weight"] = json.Value(json.Integer(total_weight))
 
 	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// Convert a scriptPubKey to an address string using chain params.
+_script_to_address :: proc(spk: []byte, params: ^consensus.Chain_Params) -> (string, bool) {
+	stype := script.classify_script(spk)
+
+	switch stype {
+	case .P2PKH:
+		return crypto.base58check_encode(params.p2pkh_prefix, spk[3:23]), true
+	case .P2SH:
+		return crypto.base58check_encode(params.p2sh_prefix, spk[2:22]), true
+	case .P2WPKH, .P2WSH, .P2TR, .Witness_Unknown:
+		ver, prog, ok := script.is_witness_program(spk)
+		if !ok { return "", false }
+		return crypto.bech32_encode(params.bech32_hrp, ver, prog), true
+	case .P2PK, .Null_Data, .Non_Standard:
+		return "", false
+	}
+
+	return "", false
 }
