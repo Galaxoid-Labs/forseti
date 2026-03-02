@@ -39,16 +39,18 @@ CLI_Flag :: enum {
 	Connect,
 	P2P_Port,
 	No_P2P,
+	Mempool_Full_RBF,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
 
 CLI_Config :: struct {
-	network:   string,
-	data_dir:  string,
-	rpc_port:  int,
-	connect:   string, // ip:port of manual peer
-	p2p_port:  int,
-	no_p2p:    bool,
+	network:         string,
+	data_dir:        string,
+	rpc_port:        int,
+	connect:         string, // ip:port of manual peer
+	p2p_port:        int,
+	no_p2p:          bool,
+	mempool_fullrbf: bool,
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -57,6 +59,7 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 	cfg.rpc_port = 0  // 0 = use network default
 	cfg.p2p_port = 0  // 0 = use network default
 	cfg.no_p2p = false
+	cfg.mempool_fullrbf = true
 
 	for arg in os.args[1:] {
 		if arg == "--help" || arg == "-h" {
@@ -90,6 +93,10 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 		} else if arg == "--no-p2p" {
 			cfg.no_p2p = true
 			flags_set += {.No_P2P}
+		} else if strings.has_prefix(arg, "--mempoolfullrbf=") {
+			val := arg[len("--mempoolfullrbf="):]
+			cfg.mempool_fullrbf = val == "1" || val == "true"
+			flags_set += {.Mempool_Full_RBF}
 		} else {
 			fmt.eprintln("Error: unknown flag:", arg)
 			_print_usage()
@@ -110,6 +117,7 @@ _print_usage :: proc() {
 	fmt.println("  --connect=<ip:port>   Connect to specific peer instead of DNS discovery")
 	fmt.println("  --p2p-port=<port>     P2P listen port (default: network-appropriate)")
 	fmt.println("  --no-p2p              Disable P2P networking (RPC-only mode)")
+	fmt.println("  --mempoolfullrbf=<0|1> Allow full RBF replacement (default: 1)")
 	fmt.println("  --help, -h            Show this help message")
 }
 
@@ -183,6 +191,12 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 	if .No_P2P not_in flags_set {
 		if val, found := _ini_get(&m, cfg.network, "no-p2p"); found {
 			cfg.no_p2p = val == "1" || val == "true" || val == "yes"
+		}
+	}
+
+	if .Mempool_Full_RBF not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "mempoolfullrbf"); found {
+			cfg.mempool_fullrbf = val == "1" || val == "true" || val == "yes"
 		}
 	}
 }
@@ -282,6 +296,7 @@ main :: proc() {
 	// Initialize mempool.
 	mp := new(mempool.Mempool)
 	mempool.mempool_init(mp, cs, params)
+	mp.fullrbf = cfg.mempool_fullrbf
 	defer mempool.mempool_save(mp, cfg.data_dir)
 	defer mempool.mempool_destroy(mp)
 

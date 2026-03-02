@@ -282,6 +282,21 @@ _handle_sendrawtransaction :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_
 		case .Mempool_Full:
 			msg = "Mempool is full"
 			code = .Mempool_Error
+		case .RBF_Not_Signaling:
+			msg = "RBF rejected: original transaction does not signal replaceability"
+			code = .Verify_Error
+		case .RBF_New_Unconfirmed:
+			msg = "RBF rejected: replacement introduces new unconfirmed inputs"
+			code = .Verify_Error
+		case .RBF_Insufficient_Fee:
+			msg = "RBF rejected: insufficient fee (must pay more than conflict set)"
+			code = .Mempool_Error
+		case .RBF_Fee_Too_Low:
+			msg = "RBF rejected: additional fee does not cover replacement bandwidth"
+			code = .Mempool_Error
+		case .RBF_Too_Many_Evictions:
+			msg = "RBF rejected: too many potential replacements (>100)"
+			code = .Verify_Error
 		case:
 			msg = fmt.tprintf("Mempool rejection: %v", mp_err)
 			code = .Verify_Error
@@ -320,7 +335,7 @@ _handle_getmempoolinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Resp
 	obj["minrelaytxfee"] = json.Value(json.Float(_satoshi_to_btc(mempool.MIN_RELAY_TX_FEE)))
 	obj["incrementalrelayfee"] = json.Value(json.Float(_satoshi_to_btc(mempool.MIN_RELAY_TX_FEE)))
 	obj["unbroadcastcount"] = json.Value(json.Integer(0))
-	obj["fullrbf"] = json.Value(json.Boolean(false))
+	obj["fullrbf"] = json.Value(json.Boolean(srv.mp.fullrbf))
 
 	return _make_result(json.Value(obj), srv._current_id)
 }
@@ -825,6 +840,10 @@ _handle_getmempoolentry :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Res
 	}
 	obj["depends"] = json.Value(depends)
 
+	// bip125-replaceable: true if tx signals RBF or fullrbf is enabled
+	replaceable := srv.mp.fullrbf || mempool.tx_signals_rbf(&entry.tx)
+	obj["bip125-replaceable"] = json.Value(json.Boolean(replaceable))
+
 	return _make_result(json.Value(obj), srv._current_id)
 }
 
@@ -906,8 +925,13 @@ _mempool_error_string :: proc(err: mempool.Mempool_Error) -> string {
 	case .Insufficient_Fee:    return "min-fee-not-met"
 	case .Too_Many_Sigops:     return "bad-txns-too-many-sigops"
 	case .Failed_Script:       return "mandatory-script-verify-flag-failed"
-	case .Mempool_Full:        return "mempool-full"
-	case:                      return "unknown"
+	case .Mempool_Full:            return "mempool-full"
+	case .RBF_Not_Signaling:       return "txn-mempool-conflict"
+	case .RBF_New_Unconfirmed:     return "rbf-new-unconfirmed"
+	case .RBF_Insufficient_Fee:    return "insufficient-fee"
+	case .RBF_Fee_Too_Low:         return "insufficient-fee"
+	case .RBF_Too_Many_Evictions:  return "too-many-potential-replacements"
+	case:                          return "unknown"
 	}
 }
 

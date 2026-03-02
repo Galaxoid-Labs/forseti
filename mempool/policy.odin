@@ -15,6 +15,7 @@ MAX_STANDARD_SIGOPS :: 4000
 MAX_SCRIPT_SIZE :: 10_000
 MAX_STANDARD_SCRIPTPUBKEY_SIZE :: 10_000
 MAX_OP_RETURN_SIZE :: 83                   // Bitcoin Core -datacarriersize default (OP_RETURN + push + 80 bytes data)
+MAX_RBF_EVICTIONS :: 100                   // BIP125 rule 5: max txs evicted per replacement
 
 // Check transaction against standard relay policy.
 check_tx_policy :: proc(tx: ^wire.Tx) -> Mempool_Error {
