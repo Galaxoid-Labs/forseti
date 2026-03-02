@@ -2,7 +2,7 @@ package storage
 
 import "../wire"
 
-UTXO_MAX_VALUE_SIZE :: 128
+UTXO_MAX_VALUE_SIZE :: 10240 // 17-byte header + up to ~10k script (consensus max)
 
 UTXO_Coin :: struct {
 	height:      u32,

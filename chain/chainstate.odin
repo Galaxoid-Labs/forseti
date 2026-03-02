@@ -1,6 +1,7 @@
 package chain
 
 import "core:log"
+import "core:mem"
 import "core:os"
 import "../consensus"
 import "../crypto"
@@ -149,8 +150,9 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 		}
 	}
 
-	// 3. BIP30: Check no unspent UTXOs with same txids (after BIP34 activation)
-	if height >= cs.params.bip34_height {
+	// 3. BIP30: Check no unspent UTXOs with same txids. After BIP34 activation,
+	// duplicate txids are impossible (coinbase includes height), so skip the check.
+	if height < cs.params.bip34_height {
 		for i in 0 ..< len(block.txs) {
 			tx := block.txs[i]
 			txid := wire.tx_id(&tx)
@@ -166,11 +168,28 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 	// 4. Process non-coinbase transactions: validate, spend inputs, add outputs.
 	//    Each tx is processed atomically so later transactions in the same block
 	//    can spend outputs created by earlier ones (intra-block spending).
+	//    On failure, all changes from prior txs are rolled back so the UTXO cache
+	//    remains consistent (critical for block retry after Bad_Script etc.).
 	total_fees: i64 = 0
 	script_flags := consensus.get_script_flags(height, cs.params)
 	skip_scripts := cs.params.assumevalid_height > 0 && height <= cs.params.assumevalid_height
 
 	undo_coins := make([dynamic]Undo_Coin, 0, 64, context.temp_allocator)
+	applied_tx_indices := make([dynamic]int, 0, len(block.txs), context.temp_allocator)
+
+	// Per-input verification arena: sighash computation allocates wire writers
+	// on temp_allocator. For txs with hundreds of inputs, these accumulate and
+	// exhaust the block arena. This 2MB scratch arena (heap-allocated, shared
+	// across all txs) is reset between inputs to bound memory usage.
+	verify_buf: []byte
+	verify_arena: mem.Arena
+	verify_alloc: mem.Allocator
+	if !skip_scripts {
+		verify_buf = make([]byte, 2 * 1024 * 1024)
+		mem.arena_init(&verify_arena, verify_buf)
+		verify_alloc = mem.arena_allocator(&verify_arena)
+	}
+	defer if verify_buf != nil { delete(verify_buf) }
 
 	for tx_idx in 0 ..< len(block.txs) {
 		tx := block.txs[tx_idx]
@@ -187,11 +206,13 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 			prev_out := tx.inputs[in_idx].previous_output
 			coin, found := coins_cache_get(&cs.coins, prev_out)
 			if !found {
+				_rollback_applied_txs(cs, block, applied_tx_indices[:], undo_coins[:])
 				return .Inputs_Unavailable
 			}
 
 			if coin.is_coinbase {
 				if height - int(coin.height) < consensus.COINBASE_MATURITY {
+					_rollback_applied_txs(cs, block, applied_tx_indices[:], undo_coins[:])
 					return .Coinbase_Not_Mature
 				}
 			}
@@ -205,13 +226,20 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 
 		// 4b. Script verification (skipped under assumevalid)
 		if !skip_scripts {
+			sighash_cache: script.Sighash_Cache
+			saved_temp := context.temp_allocator
+
 			for in_idx in 0 ..< len(tx.inputs) {
+				mem.arena_free_all(&verify_arena)
+				context.temp_allocator = verify_alloc
+
 				verifier := script.Script_Verifier {
 					tx            = &block.txs[tx_idx],
 					input_idx     = in_idx,
 					amount        = spent_outputs[in_idx].value,
 					flags         = script_flags,
 					spent_outputs = spent_outputs,
+					sighash_cache = &sighash_cache,
 				}
 
 				witness: [][]byte
@@ -226,9 +254,24 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 					witness,
 				)
 				if serr != .None {
+					context.temp_allocator = saved_temp
+					txid := wire.tx_id(&block.txs[tx_idx])
+					// Log txid in display order (reversed)
+					txid_rev: Hash256
+					for b in 0 ..< 32 { txid_rev[b] = txid[31 - b] }
+					log.errorf(
+						"Script FAIL height=%d tx_idx=%d in_idx=%d/%d err=%v txid=%02x%02x%02x%02x%02x%02x%02x%02x... scriptPubKey_len=%d num_inputs=%d",
+						height, tx_idx, in_idx, len(tx.inputs), serr,
+						txid_rev[0], txid_rev[1], txid_rev[2], txid_rev[3],
+						txid_rev[4], txid_rev[5], txid_rev[6], txid_rev[7],
+						len(spent_outputs[in_idx].script_pubkey), len(tx.inputs),
+					)
+					_rollback_applied_txs(cs, block, applied_tx_indices[:], undo_coins[:])
 					return .Bad_Script
 				}
 			}
+
+			context.temp_allocator = saved_temp
 		}
 
 		// 4c. Fees
@@ -243,6 +286,7 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 			prev_out := tx.inputs[in_idx].previous_output
 			spent_coin, ok := coins_cache_spend(&cs.coins, prev_out)
 			if !ok {
+				_rollback_applied_txs(cs, block, applied_tx_indices[:], undo_coins[:])
 				return .Invalid_State
 			}
 			append(&undo_coins, Undo_Coin{outpoint = prev_out, coin = spent_coin})
@@ -260,6 +304,8 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 			}
 			coins_cache_add(&cs.coins, op, coin)
 		}
+
+		append(&applied_tx_indices, tx_idx)
 	}
 
 	// 5. Verify coinbase value <= subsidy + total_fees
@@ -381,6 +427,79 @@ accept_block_header :: proc(cs: ^Chain_State, header: ^wire.Block_Header) -> (^B
 	return entry, .None
 }
 
+// Accept a batch of block headers in a single LMDB write transaction.
+// Returns the number accepted and the best new header height.
+accept_block_headers_batch :: proc(cs: ^Chain_State, headers: []wire.Block_Header) -> (accepted: int, best_height: int) {
+	best_height = cs.block_index.best_header != nil ? cs.block_index.best_header.height : -1
+
+	if len(headers) == 0 {
+		return 0, best_height
+	}
+
+	// Open one write transaction for the entire batch.
+	txn, terr := storage.lmdb_begin_write(&cs.lmdb)
+	if terr != .None {
+		log.errorf("Failed to begin batch write txn for headers: %v", terr)
+		return 0, best_height
+	}
+
+	for i in 0 ..< len(headers) {
+		hdr := headers[i]
+		hash := wire.block_header_hash(&hdr)
+
+		// Skip already-known headers.
+		if hash in cs.block_index.entries {
+			continue
+		}
+
+		// Validate PoW.
+		cerr := consensus.check_block_header(&hdr, cs.params)
+		if cerr != .None {
+			continue
+		}
+
+		// Link to parent.
+		parent_height := -1
+		if hdr.prev_hash != HASH_ZERO {
+			parent, parent_found := cs.block_index.entries[hdr.prev_hash]
+			if !parent_found {
+				continue
+			}
+			parent_height = parent.height
+		}
+
+		new_height := parent_height + 1
+		status := storage.Block_Status{.Valid_Header}
+
+		entry := block_index_add(&cs.block_index, &hdr, new_height, status)
+		rec := block_index_to_record(entry)
+
+		perr := storage.index_db_batch_put(&cs.index_db, txn, rec)
+		if perr != .None {
+			log.errorf("Failed to batch-write header at height %d: %v", new_height, perr)
+			continue
+		}
+
+		accepted += 1
+		if new_height > best_height {
+			best_height = new_height
+		}
+	}
+
+	// Commit the entire batch in one fsync.
+	if accepted > 0 {
+		cerr := storage.lmdb_commit(txn)
+		if cerr != .None {
+			log.errorf("Failed to commit header batch: %v", cerr)
+			return 0, best_height
+		}
+	} else {
+		storage.lmdb_abort(txn)
+	}
+
+	return accepted, best_height
+}
+
 // Accept a full block: accept header, store block data, connect to chain.
 accept_block :: proc(cs: ^Chain_State, block: ^wire.Block) -> Chain_Error {
 	// Accept header
@@ -431,16 +550,16 @@ store_block :: proc(cs: ^Chain_State, block: ^wire.Block) -> Chain_Error {
 	entry.data_size = loc.data_size
 	entry.status += {.Has_Data}
 
-	// Persist updated index record.
-	rec := block_index_to_record(entry)
-	storage.index_db_put(&cs.index_db, rec)
+	// In-memory index is updated; LMDB persist deferred to connect_block
+	// which writes the final status (Has_Data + Valid_Chain). On crash,
+	// un-persisted blocks are re-downloaded — connect_pending_blocks handles this.
 
 	return .None
 }
 
 // Try to connect the next block(s) at tip+1. Reads stored blocks from disk.
-// Returns the number of blocks connected.
-connect_pending_blocks :: proc(cs: ^Chain_State) -> (connected: int, err: Chain_Error) {
+// Returns the number of blocks connected and hashes of any blocks that need re-download.
+connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 = nil) -> (connected: int, err: Chain_Error) {
 	// Build index: prev_hash -> entry for blocks stored but not yet connected.
 	// This gives O(1) lookup per block instead of scanning the full index.
 	pending := make(map[Hash256]^Block_Index_Entry, 1024, context.temp_allocator)
@@ -450,12 +569,30 @@ connect_pending_blocks :: proc(cs: ^Chain_State) -> (connected: int, err: Chain_
 		}
 	}
 
-	for {
+	// Per-block scratch arena: each block deserialization allocates txs, scripts,
+	// and witness data. Without per-iteration cleanup, connecting thousands of
+	// blocks leaks gigabytes into the caller's temp_allocator.
+	block_arena_buf := make([]byte, 64 * 1024 * 1024) // 64 MB scratch
+	defer delete(block_arena_buf)
+	block_arena: mem.Arena
+	mem.arena_init(&block_arena, block_arena_buf)
+	block_alloc := mem.arena_allocator(&block_arena)
+
+	// Limit blocks per call so the caller (P2P thread) isn't blocked too long.
+	// Remaining blocks are picked up on the next incoming block message.
+	MAX_CONNECT_BATCH :: 256
+
+	for connected < MAX_CONNECT_BATCH {
 		tip_hash, _ := chain_tip(cs)
 		next_entry, found := pending[tip_hash]
 		if !found {
 			return connected, .None
 		}
+
+		// Reset arena for this block — frees block data AND connect_block's
+		// temp allocations (seen map, undo_coins, spent_outputs) from prev iteration.
+		mem.arena_free_all(&block_arena)
+		context.temp_allocator = block_alloc
 
 		// Read block from disk.
 		loc := storage.Block_Location{
@@ -463,24 +600,75 @@ connect_pending_blocks :: proc(cs: ^Chain_State) -> (connected: int, err: Chain_
 			data_offset = next_entry.data_offset,
 			data_size   = next_entry.data_size,
 		}
-		block, rerr := storage.block_db_read(&cs.block_db, loc, context.temp_allocator)
+		block, rerr := storage.block_db_read(&cs.block_db, loc, block_alloc)
 		if rerr != .None {
-			return connected, .Storage_Error
+			// Corrupt/truncated flat file data — strip Has_Data so it gets re-downloaded.
+			log.warnf("Pending block at height %d unreadable — marking for re-download", next_entry.height)
+			next_entry.status -= {.Has_Data}
+			rec := block_index_to_record(next_entry)
+			storage.index_db_put(&cs.index_db, rec)
+			if redownload != nil {
+				append(redownload, next_entry.hash)
+			}
+			return connected, .None
 		}
 
 		cerr := connect_block(cs, &block, next_entry)
 		if cerr != .None {
-			// Block failed validation — strip Has_Data so it gets re-downloaded.
-			// This handles corrupt blocks from partial flat file writes during crashes.
-			log.warnf("Pending block at height %d failed: %v — marking for re-download", next_entry.height, cerr)
-			next_entry.status -= {.Has_Data}
-			rec := block_index_to_record(next_entry)
-			storage.index_db_put(&cs.index_db, rec)
-			return connected, .None
+			if cerr == .Storage_Error {
+				// Storage/read error — strip Has_Data so it gets re-downloaded.
+				log.warnf("Pending block at height %d storage error — marking for re-download", next_entry.height)
+				next_entry.status -= {.Has_Data}
+				rec := block_index_to_record(next_entry)
+				storage.index_db_put(&cs.index_db, rec)
+				if redownload != nil {
+					append(redownload, next_entry.hash)
+				}
+			} else {
+				// Validation error (Bad_Script, Consensus_Error, etc.) — re-downloading
+				// won't help. Log and stop connecting; block stays stored but unconnected.
+				log.errorf("Block validation FAILED at height %d: %v — halting chain progress", next_entry.height, cerr)
+			}
+			return connected, cerr
 		}
 
 		delete_key(&pending, tip_hash)
 		connected += 1
+	}
+
+	return connected, .None
+}
+
+// Roll back UTXO cache changes from a partially-applied block.
+// Processes applied transactions in reverse order: first removes outputs,
+// then restores spent inputs. This handles intra-block spending correctly
+// because reversing in order ensures outputs are restored before being removed.
+_rollback_applied_txs :: proc(cs: ^Chain_State, block: ^wire.Block, applied: []int, undo_coins: []Undo_Coin) {
+	if len(applied) == 0 {
+		return
+	}
+
+	// Walk applied txs in reverse, undoing outputs then restoring inputs.
+	undo_offset := len(undo_coins)
+
+	for i := len(applied) - 1; i >= 0; i -= 1 {
+		tx_idx := applied[i]
+		tx := block.txs[tx_idx]
+
+		// Remove this tx's outputs (they were added as Fresh, so spending removes them).
+		txid := wire.tx_id(&tx)
+		for out_idx := len(tx.outputs) - 1; out_idx >= 0; out_idx -= 1 {
+			op := wire.Outpoint{hash = txid, index = u32(out_idx)}
+			coins_cache_spend(&cs.coins, op)
+		}
+
+		// Restore this tx's spent inputs.
+		num_inputs := len(tx.inputs)
+		undo_offset -= num_inputs
+		for j in 0 ..< num_inputs {
+			uc := undo_coins[undo_offset + j]
+			coins_cache_restore(&cs.coins, uc.outpoint, uc.coin)
+		}
 	}
 }
 

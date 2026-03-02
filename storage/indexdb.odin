@@ -107,6 +107,17 @@ index_db_put :: proc(db: ^Index_DB, record: Block_Index_Record) -> Storage_Error
 	return .None
 }
 
+// Write a record within a caller-provided write transaction (for batch header sync).
+index_db_batch_put :: proc(db: ^Index_DB, txn: MDB_txn, record: Block_Index_Record) -> Storage_Error {
+	buf: [BLOCK_INDEX_RECORD_SIZE]byte
+	_serialize_index_record(&buf, record)
+	hash := record.hash
+	perr := lmdb_put(txn, db.lmdb.index_dbi, hash[:], buf[:])
+	if perr != .None { return perr }
+	db.records[record.hash] = record
+	return .None
+}
+
 // Lookup a record by block hash (from in-memory map).
 index_db_get :: proc(db: ^Index_DB, hash: Hash256) -> (^Block_Index_Record, bool) {
 	rec, ok := &db.records[hash]

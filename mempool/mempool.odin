@@ -151,6 +151,7 @@ mempool_validate :: proc(mp: ^Mempool, tx: ^wire.Tx) -> (fee: i64, vsize: int, e
 	// Add standard policy flags
 	script_flags += script.STANDARD_FLAGS
 
+	sighash_cache: script.Sighash_Cache
 	for in_idx in 0 ..< len(tx.inputs) {
 		verifier := script.Script_Verifier {
 			tx            = tx,
@@ -158,6 +159,7 @@ mempool_validate :: proc(mp: ^Mempool, tx: ^wire.Tx) -> (fee: i64, vsize: int, e
 			amount        = spent_outputs[in_idx].value,
 			flags         = script_flags,
 			spent_outputs = spent_outputs,
+			sighash_cache = &sighash_cache,
 		}
 
 		witness: [][]byte

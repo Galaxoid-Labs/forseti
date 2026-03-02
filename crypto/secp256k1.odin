@@ -146,7 +146,8 @@ verify_schnorr :: proc(xonly_pubkey_bytes: []u8, sig64: []u8, msg: []u8) -> bool
 		return false
 	}
 
-	return secp256k1_schnorrsig_verify(ctx, raw_data(sig64), raw_data(msg), c.size_t(len(msg)), &pubkey) == 1
+	result := secp256k1_schnorrsig_verify(ctx, raw_data(sig64), raw_data(msg), c.size_t(len(msg)), &pubkey)
+	return result == 1
 }
 
 // Verify that output_key is the result of tweaking internal_key with tweak.

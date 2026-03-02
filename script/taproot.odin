@@ -266,23 +266,54 @@ compute_sighash_taproot :: proc(
 	wire.write_u32le(&w, tx.locktime)
 
 	// If not ANYONECANPAY: hash_prevouts, hash_amounts, hash_script_pubkeys, hash_sequences
+	cache := verifier.sighash_cache
 	if !anyone_can_pay {
-		hp := _sha256_prevouts(tx)
+		hp: Hash256
+		if cache != nil && cache.has_tap_prevouts {
+			hp = cache.tap_prevouts
+		} else {
+			hp = _sha256_prevouts(tx)
+			if cache != nil { cache.tap_prevouts = hp; cache.has_tap_prevouts = true }
+		}
 		wire.write_hash(&w, hp)
 
-		ha := _sha256_amounts(verifier)
+		ha: Hash256
+		if cache != nil && cache.has_tap_amounts {
+			ha = cache.tap_amounts
+		} else {
+			ha = _sha256_amounts(verifier)
+			if cache != nil { cache.tap_amounts = ha; cache.has_tap_amounts = true }
+		}
 		wire.write_hash(&w, ha)
 
-		hsp := _sha256_script_pubkeys(verifier)
+		hsp: Hash256
+		if cache != nil && cache.has_tap_script_pubkeys {
+			hsp = cache.tap_script_pubkeys
+		} else {
+			hsp = _sha256_script_pubkeys(verifier)
+			if cache != nil { cache.tap_script_pubkeys = hsp; cache.has_tap_script_pubkeys = true }
+		}
 		wire.write_hash(&w, hsp)
 
-		hs := _sha256_sequences(tx)
+		hs: Hash256
+		if cache != nil && cache.has_tap_sequences {
+			hs = cache.tap_sequences
+		} else {
+			hs = _sha256_sequences(tx)
+			if cache != nil { cache.tap_sequences = hs; cache.has_tap_sequences = true }
+		}
 		wire.write_hash(&w, hs)
 	}
 
 	// If not NONE and not SINGLE: hash_outputs
 	if effective_base != SIGHASH_NONE && effective_base != SIGHASH_SINGLE {
-		ho := _sha256_outputs(tx)
+		ho: Hash256
+		if cache != nil && cache.has_tap_outputs {
+			ho = cache.tap_outputs
+		} else {
+			ho = _sha256_outputs(tx)
+			if cache != nil { cache.tap_outputs = ho; cache.has_tap_outputs = true }
+		}
 		wire.write_hash(&w, ho)
 	}
 

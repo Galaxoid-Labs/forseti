@@ -282,7 +282,10 @@ main :: proc() {
 	// Initialize mempool.
 	mp := new(mempool.Mempool)
 	mempool.mempool_init(mp, cs, params)
+	defer mempool.mempool_save(mp, cfg.data_dir)
 	defer mempool.mempool_destroy(mp)
+
+	mempool.mempool_load(mp, cfg.data_dir)
 
 	// Start RPC server (cm wired below after P2P init).
 	srv := new(rpc.RPC_Server)
@@ -315,7 +318,7 @@ main :: proc() {
 
 	if !cfg.no_p2p {
 		cm = new(p2p.Conn_Manager)
-		cm_err := p2p.conn_manager_init(cm, cs, params)
+		cm_err := p2p.conn_manager_init(cm, cs, params, mp)
 		if cm_err != .None {
 			log.errorf("Failed to initialize connection manager: %v", cm_err)
 			// Continue without P2P — RPC still works.

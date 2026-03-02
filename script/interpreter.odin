@@ -97,6 +97,32 @@ LOCKTIME_THRESHOLD             :: u32(500_000_000)
 // Type aliases
 Hash256 :: crypto.Hash256
 
+// --- Sighash cache for BIP143 intermediate hashes ---
+
+// Caches hashPrevouts, hashSequence, and hashOutputs so they are computed
+// once per transaction instead of once per input. Without this, transactions
+// with many inputs (e.g. 996) exhaust the temp allocator arena.
+Sighash_Cache :: struct {
+	// BIP143 (segwit v0) — double SHA256
+	hash_prevouts:   Hash256,
+	hash_sequence:   Hash256,
+	hash_outputs:    Hash256,
+	has_prevouts:    bool,
+	has_sequence:    bool,
+	has_outputs:     bool,
+	// BIP341 (Taproot) — single SHA256
+	tap_prevouts:      Hash256,
+	tap_amounts:       Hash256,
+	tap_script_pubkeys: Hash256,
+	tap_sequences:     Hash256,
+	tap_outputs:       Hash256,
+	has_tap_prevouts:      bool,
+	has_tap_amounts:       bool,
+	has_tap_script_pubkeys: bool,
+	has_tap_sequences:     bool,
+	has_tap_outputs:       bool,
+}
+
 // --- Script Verifier ---
 
 Script_Verifier :: struct {
@@ -105,6 +131,7 @@ Script_Verifier :: struct {
 	amount:         i64,           // value of the output being spent (for SegWit sighash)
 	flags:          Verify_Flags,
 	spent_outputs:  []wire.Tx_Out, // all spent outputs (for Taproot sighash)
+	sighash_cache:  ^Sighash_Cache, // optional, shared across inputs of same tx
 }
 
 // Top-level script verification: 4-phase evaluation.
@@ -183,7 +210,7 @@ verify_script :: proc(
 				if !_is_single_push(script_sig, serialized_script) {
 					return .Witness_Malleated_P2SH
 				}
-				err = verify_witness_program(verifier, witness, wit_ver, wit_prog)
+				err = verify_witness_program(verifier, witness, wit_ver, wit_prog, is_p2sh = true)
 				if err != nil { return err }
 				// Clean stack after witness
 				clear(&stack_copy.items)
@@ -228,12 +255,13 @@ _is_single_push :: proc(script_sig: []byte, data: []byte) -> bool {
 	return false
 }
 
-// Verify a witness program (v0 only for now).
+// Verify a witness program (v0 P2WPKH/P2WSH, v1 Taproot).
 verify_witness_program :: proc(
 	verifier: ^Script_Verifier,
 	witness: [][]byte,
 	version: int,
 	program: []byte,
+	is_p2sh: bool = false,
 ) -> Script_Error {
 	if version == 0 {
 		if len(program) == 20 {
@@ -284,11 +312,11 @@ verify_witness_program :: proc(
 		} else {
 			return .Witness_Program_Wrong_Length
 		}
-	} else if version == 1 {
-		// Taproot (BIP341)
+	} else if version == 1 && len(program) == 32 && !is_p2sh {
+		// Taproot (BIP341) — native segwit v1 with exactly 32-byte program
 		return verify_taproot(verifier, witness, program)
 	} else {
-		// Future witness versions — succeed unless discouraged
+		// Future witness versions/lengths — succeed unless discouraged
 		if .Discourage_Upgradable_Witness in verifier.flags {
 			return .Discourage_Upgradable_Witness
 		}
@@ -722,7 +750,7 @@ execute_script :: proc(
 					sub_script := script[code_sep_pos:]
 					sighash: Hash256
 					if is_witness {
-						sighash = compute_sighash_witness_v0(verifier.tx, verifier.input_idx, sub_script, verifier.amount, hash_type)
+						sighash = compute_sighash_witness_v0(verifier.tx, verifier.input_idx, sub_script, verifier.amount, hash_type, verifier.sighash_cache)
 					} else {
 						sighash = compute_sighash_legacy(verifier.tx, verifier.input_idx, sub_script, hash_type)
 					}
@@ -842,7 +870,7 @@ execute_script :: proc(
 
 					sighash: Hash256
 					if is_witness {
-						sighash = compute_sighash_witness_v0(verifier.tx, verifier.input_idx, sub_script, verifier.amount, hash_type)
+						sighash = compute_sighash_witness_v0(verifier.tx, verifier.input_idx, sub_script, verifier.amount, hash_type, verifier.sighash_cache)
 					} else {
 						sighash = compute_sighash_legacy(verifier.tx, verifier.input_idx, sub_script, hash_type)
 					}
@@ -1123,36 +1151,60 @@ compute_sighash_legacy :: proc(tx: ^wire.Tx, input_idx: int, sub_script: []byte,
 
 // --- Sighash computation (BIP143 witness v0) ---
 
-compute_sighash_witness_v0 :: proc(tx: ^wire.Tx, input_idx: int, script_code: []byte, amount: i64, hash_type: u32) -> Hash256 {
+compute_sighash_witness_v0 :: proc(tx: ^wire.Tx, input_idx: int, script_code: []byte, amount: i64, hash_type: u32, cache: ^Sighash_Cache = nil) -> Hash256 {
 	base_type := hash_type & 0x1f
 	anyone_can_pay := (hash_type & u32(SIGHASH_ANYONECANPAY)) != 0
 
-	// Compute intermediate hashes
+	// Compute intermediate hashes (using cache if available)
 	hash_prevouts: Hash256
 	if !anyone_can_pay {
-		pw := wire.writer_init(context.temp_allocator)
-		for i in 0 ..< len(tx.inputs) {
-			wire.serialize_outpoint(&pw, &tx.inputs[i].previous_output)
+		if cache != nil && cache.has_prevouts {
+			hash_prevouts = cache.hash_prevouts
+		} else {
+			pw := wire.writer_init(context.temp_allocator)
+			for i in 0 ..< len(tx.inputs) {
+				wire.serialize_outpoint(&pw, &tx.inputs[i].previous_output)
+			}
+			hash_prevouts = crypto.sha256d(wire.writer_bytes(&pw))
+			if cache != nil {
+				cache.hash_prevouts = hash_prevouts
+				cache.has_prevouts = true
+			}
 		}
-		hash_prevouts = crypto.sha256d(wire.writer_bytes(&pw))
 	}
 
 	hash_sequence: Hash256
 	if !anyone_can_pay && base_type != SIGHASH_SINGLE && base_type != SIGHASH_NONE {
-		sw := wire.writer_init(context.temp_allocator)
-		for i in 0 ..< len(tx.inputs) {
-			wire.write_u32le(&sw, tx.inputs[i].sequence)
+		if cache != nil && cache.has_sequence {
+			hash_sequence = cache.hash_sequence
+		} else {
+			sw := wire.writer_init(context.temp_allocator)
+			for i in 0 ..< len(tx.inputs) {
+				wire.write_u32le(&sw, tx.inputs[i].sequence)
+			}
+			hash_sequence = crypto.sha256d(wire.writer_bytes(&sw))
+			if cache != nil {
+				cache.hash_sequence = hash_sequence
+				cache.has_sequence = true
+			}
 		}
-		hash_sequence = crypto.sha256d(wire.writer_bytes(&sw))
 	}
 
 	hash_outputs: Hash256
 	if base_type != SIGHASH_SINGLE && base_type != SIGHASH_NONE {
-		ow := wire.writer_init(context.temp_allocator)
-		for i in 0 ..< len(tx.outputs) {
-			wire.serialize_tx_out(&ow, &tx.outputs[i])
+		if cache != nil && cache.has_outputs {
+			hash_outputs = cache.hash_outputs
+		} else {
+			ow := wire.writer_init(context.temp_allocator)
+			for i in 0 ..< len(tx.outputs) {
+				wire.serialize_tx_out(&ow, &tx.outputs[i])
+			}
+			hash_outputs = crypto.sha256d(wire.writer_bytes(&ow))
+			if cache != nil {
+				cache.hash_outputs = hash_outputs
+				cache.has_outputs = true
+			}
 		}
-		hash_outputs = crypto.sha256d(wire.writer_bytes(&ow))
 	} else if base_type == SIGHASH_SINGLE && input_idx < len(tx.outputs) {
 		ow := wire.writer_init(context.temp_allocator)
 		wire.serialize_tx_out(&ow, &tx.outputs[input_idx])

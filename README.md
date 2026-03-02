@@ -6,24 +6,26 @@ This is an educational/experimental project. It implements the core components o
 
 ## Status
 
-**155 tests passing** across 9 packages. Successfully syncs the signet blockchain.
+**163 tests passing** across 9 packages. Successfully syncs the full signet blockchain (~294k blocks) with script verification.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
-| 0 | Crypto + C Bindings | Complete |
-| 1 | Wire Protocol + Serialization | Complete |
-| 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH) | Complete |
+| 0 | Crypto + C Bindings | Complete (14 tests) |
+| 1 | Wire Protocol + Serialization | Complete (24 tests) |
+| 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH) | Complete (45 tests) |
 | 2b | Taproot (BIP341/342) | Complete |
-| 3 | Consensus Rules + Block Validation | Complete |
-| 4 | UTXO Set + Chain State | Complete |
-| 5 | Persistent Storage (LMDB) | Complete |
-| 6 | P2P Networking | Complete |
-| 7 | Mempool | Complete |
-| 8 | RPC Interface (10 methods) | Complete |
-| 9 | P2P Integration + CLI + Shutdown | Complete |
-| 10 | Additional RPC Methods (+13 methods) | Complete |
-| 11 | Signet Sync (BIP325) | Complete |
-| 12 | LMDB Storage Migration | Complete |
+| 3 | Consensus Rules + Block Validation | Complete (15 tests) |
+| 4 | UTXO Set + Chain State | Complete (8 tests) |
+| 5 | Persistent Storage (LMDB) | Complete (13 tests) |
+| 6 | P2P Networking | Complete (6 tests) |
+| 7 | Mempool + Persistence | Complete (12 tests) |
+| 8-10 | RPC Interface (23 methods) | Complete (26 tests) |
+| 11 | P2P Integration + CLI + Shutdown | Complete |
+| 12 | Signet Sync (BIP325) | Complete |
+| 13 | LMDB Storage Migration | Complete |
+| 14 | Multi-peer Block Download + Bandwidth Scoring | Complete |
+| 15 | Mempool Persistence + Transaction Relay | Complete |
+| 16 | Sighash Caching + Arena Safety | Complete |
 
 ## Dependencies
 
@@ -204,7 +206,7 @@ bitcoin-node-odin/
 ├── storage/               # LMDB store, flat files, block DB, index DB, UTXO DB
 ├── chain/                 # UTXO cache, block index (skip list), undo data, chain state
 ├── p2p/                   # Peer connections, sync manager, connection manager
-├── mempool/               # Fee rates, relay policy, validation pipeline
+├── mempool/               # Fee rates, relay policy, validation pipeline, persistence
 ├── rpc/                   # JSON-RPC server, handlers, types
 └── deps/                  # C dependencies
     ├── libsecp256k1/      # Git submodule (bitcoin-core/secp256k1)
@@ -228,34 +230,44 @@ The node uses [LMDB](http://www.lmdb.tech/doc/) (Lightning Memory-Mapped Databas
 
 ## What's Left to Build
 
-### Needed for Real Network Sync
+### Correctness
 
+- **Large UTXO script handling** — UTXOs with scripts >~10KB fail to persist to LMDB (`Value_Too_Large`). Needs chunked storage or increased LMDB limits. Affects a handful of signet test transactions.
 - **Testnet3 20-min difficulty rule** — When block timestamp >20min after previous, difficulty resets to `pow_limit`
-- **Multi-peer header download** — Currently uses a single sync peer for headers; parallelizing would speed up initial sync
+- **Allocator audit** — Systematic review of `delete()` usage to ensure no heap corruption from mismatched allocators
+
+### Performance
+
+- **Batch `connect_block` LMDB writes** — Each connected block does individual `index_db_put` with fsync. Could batch like header sync for faster IBD.
+- **Parallel script verification** — Currently single-threaded; matters for mainnet
+- **Simplify header sync** — Peer racing logic can be simplified to single-peer now that LMDB batching removed the bottleneck
 
 ### Protocol Enhancements
 
 - **RBF (BIP125)** — Replace-by-fee; currently first-tx-wins
 - **Ancestor/descendant limits** — No CPFP chain depth limits (Bitcoin Core uses 25/25)
-- **Transaction relay** — P2P `inv`/`tx`/`getdata` for propagating mempool txs
 - **Compact blocks (BIP152)** — Bandwidth-efficient block relay
 - **Address encoding** — Base58Check and Bech32/Bech32m for RPC address fields
 
 ### Infrastructure
 
 - **`core:nbio` migration** — Replace thread-per-peer with async I/O event loop (waiting for Odin's nbio package to mature)
-- **Mempool persistence** — Currently in-memory only, lost on restart
-- **Parallel script verification** — Currently single-threaded
-- **Sighash caching** — Performance optimization for repeated signature checks
 
 ## Architecture Notes
 
 - **Thread model**: Main thread (setup + wait), RPC thread, P2P thread, one reader thread per peer
-- **Graceful shutdown**: SIGINT/SIGTERM triggers atomic UTXO + metadata flush to LMDB, then clean exit
-- **Headers-first sync**: Downloads headers via `getheaders`, then fetches blocks via `getdata` with a sliding window (16 blocks in flight)
-- **Write-back UTXO cache**: In-memory cache with dirty/fresh flags, flushed atomically to LMDB every 5000 blocks during sync
+- **Graceful shutdown**: SIGINT/SIGTERM triggers mempool save, atomic UTXO + metadata flush to LMDB, then clean exit
+- **Headers-first sync**: Single lead peer downloads headers via `getheaders`/`headers`, with automatic failover if the lead disconnects. Headers are batched into single LMDB write transactions (up to 2000 per batch)
+- **Multi-peer block download**: Round-robin block requests across all active peers (up to 8), with bandwidth-based scoring — fast peers get more slots (up to 64), slow peers get fewer (minimum 4), new peers get a trial allocation of 8 blocks
+- **Stall detection**: Blocks stalled >30s are requeued to other peers; header requests timeout after 60s with lead peer failover
+- **DNS peer discovery**: Resolves all A records from DNS seeds (typically 20+ addresses per seed)
+- **Write-back UTXO cache**: In-memory cache with dirty/fresh flags, flushed atomically to LMDB every 1000 blocks during sync. Rollback support for failed block validation
 - **Block index**: In-memory tree with skip list pointers for O(log n) ancestor lookup, persisted to LMDB
-- **Assumevalid**: Skips script verification for blocks below a configured height (200K for signet) for faster initial sync
+- **Sighash caching**: BIP143 (SegWit v0) and BIP341 (Taproot) intermediate hashes are cached per-transaction, avoiding O(n^2) re-computation for transactions with many inputs
+- **Per-input verification arena**: A 2MB heap-allocated scratch arena is reset between each input's script verification, preventing sighash writer accumulation from exhausting the 64MB block arena on large transactions
+- **Mempool persistence**: Mempool is saved to `<datadir>/mempool.dat` on shutdown and reloaded/revalidated on startup
+- **Transaction relay**: P2P `inv`/`tx`/`getdata` handling for propagating mempool transactions to peers
+- **Assumevalid**: Skips script verification for blocks below a configured height (250,050 for signet) for faster initial sync
 - **No external Odin dependencies**: Only `core:` and `base:` standard library packages
 
 ## License

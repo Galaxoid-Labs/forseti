@@ -1,5 +1,6 @@
 package chain
 
+import "core:log"
 import "core:mem"
 import "../storage"
 import "../wire"
@@ -158,11 +159,16 @@ coins_cache_restore :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: sto
 // Flush dirty entries to DB atomically. All UTXO changes + metadata are
 // committed in a single LMDB write transaction for crash consistency.
 coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) -> Chain_Error {
+	cache_size := len(cc.cache)
+	log.infof("UTXO flush at height %d: %d cache entries", tip_height, cache_size)
+
 	txn, terr := storage.lmdb_begin_write(cc.db.lmdb)
 	if terr != .None {
+		log.errorf("UTXO flush: failed to begin write txn")
 		return .Storage_Error
 	}
 
+	written, deleted := 0, 0
 	for outpoint, entry in cc.cache {
 		if .Dirty not_in entry.flags {
 			continue
@@ -171,21 +177,26 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 		if _is_spent_sentinel_val(entry) {
 			serr := storage.utxo_db_batch_delete(cc.db, txn, outpoint)
 			if serr != .None {
+				log.errorf("UTXO flush: batch_delete failed: %v", serr)
 				storage.lmdb_abort(txn)
 				return .Storage_Error
 			}
+			deleted += 1
 		} else {
 			serr := storage.utxo_db_batch_put(cc.db, txn, outpoint, entry.coin)
 			if serr != .None {
+				log.errorf("UTXO flush: batch_put failed for script_len=%d: %v", len(entry.coin.script), serr)
 				storage.lmdb_abort(txn)
 				return .Storage_Error
 			}
+			written += 1
 		}
 	}
 
 	// Write chain tip metadata in the same transaction
 	merr := write_meta_tip(cc.db.lmdb, txn, tip_hash, tip_height)
 	if merr != .None {
+		log.errorf("UTXO flush: write_meta_tip failed")
 		storage.lmdb_abort(txn)
 		return .Storage_Error
 	}
@@ -193,30 +204,21 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 	// ATOMIC: UTXOs + metadata committed together
 	cerr := storage.lmdb_commit(txn)
 	if cerr != .None {
+		log.errorf("UTXO flush: commit failed")
 		return .Storage_Error
 	}
 
-	// Clear spent sentinels, mark remaining as clean
-	to_remove := make([dynamic]wire.Outpoint, 0, len(cc.cache), context.temp_allocator)
-	for outpoint, entry in cc.cache {
-		if _is_spent_sentinel_val(entry) {
-			append(&to_remove, outpoint)
-		}
-	}
-	for op in to_remove {
-		// Free script memory if any
-		entry := cc.cache[op]
+	log.infof("UTXO flush OK: wrote %d, deleted %d, evicting cache", written, deleted)
+
+	// Evict entire cache after flush to bound memory usage.
+	// All entries have been written to LMDB and can be re-read on demand.
+	for _, entry in cc.cache {
 		if len(entry.coin.script) > 0 {
 			delete(entry.coin.script, cc.allocator)
 		}
-		delete_key(&cc.cache, op)
 	}
-
-	// Clear dirty/fresh flags on remaining entries
-	for outpoint in cc.cache {
-		entry := &cc.cache[outpoint]
-		entry.flags = {}
-	}
+	delete(cc.cache)
+	cc.cache = make(map[wire.Outpoint]Cache_Entry, 1024, cc.allocator)
 
 	return .None
 }

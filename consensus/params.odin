@@ -211,8 +211,8 @@ _init_params :: proc "contextless" () {
 	SIGNET_PARAMS.signet_challenge[69] = 0x52 // OP_2
 	SIGNET_PARAMS.signet_challenge[70] = 0xae // OP_CHECKMULTISIG
 
-	// Assumevalid: skip script verification for first 200K blocks
-	SIGNET_PARAMS.assumevalid_height = 200_000
+	// Assumevalid: skip script verification below this height
+	SIGNET_PARAMS.assumevalid_height = 250_050
 
 	REGTEST_PARAMS = Chain_Params {
 		name                     = "regtest",

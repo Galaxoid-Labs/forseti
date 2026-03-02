@@ -261,6 +261,12 @@ _handle_sendrawtransaction :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_
 	}
 
 	txid := wire.tx_id(&tx)
+
+	// Relay to peers.
+	if srv.cm != nil {
+		p2p.conn_manager_relay_tx(srv.cm, txid)
+	}
+
 	return _make_result(json.Value(json.String(_hash_to_hex(txid))), srv._current_id)
 }
 

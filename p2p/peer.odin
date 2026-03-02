@@ -105,7 +105,7 @@ peer_send_version :: proc(peer: ^Peer, params: ^consensus.Chain_Params, chain_he
 		nonce        = u64(timestamp) ~ u64(peer.id), // simple nonce
 		user_agent   = "/btcnode-odin:0.1.0/",
 		start_height = i32(chain_height),
-		relay        = false,
+		relay        = true,
 	}
 
 	w := wire.writer_init()

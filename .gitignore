@@ -11,3 +11,5 @@ deps/libsecp256k1/stamp-*
 deps/ripemd160/*.o
 *.o
 *.a
+*.dSYM/
+tsconfig.json

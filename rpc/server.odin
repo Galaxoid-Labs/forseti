@@ -63,6 +63,9 @@ rpc_server_stop :: proc(srv: ^RPC_Server) {
 // Main accept loop: process one connection at a time.
 rpc_server_run :: proc(srv: ^RPC_Server) {
 	for srv.running {
+		// Free temp allocations from previous request.
+		free_all(context.temp_allocator)
+
 		client, _, accept_err := tcp.accept_tcp(srv.listener)
 		if accept_err != nil {
 			if !srv.running {

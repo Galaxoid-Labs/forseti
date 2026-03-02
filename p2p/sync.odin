@@ -8,6 +8,7 @@ import "core:time"
 
 import "../chain"
 import "../consensus"
+import "../mempool"
 import "../storage"
 import "../wire"
 
@@ -31,6 +32,7 @@ Peer_Sync_State :: struct {
 Sync_Manager :: struct {
 	chain:              ^chain.Chain_State,
 	params:             ^consensus.Chain_Params,
+	mp:                 ^mempool.Mempool,
 	state:              Sync_State,
 	headers_received:   int,
 	best_header_height: int,
@@ -38,20 +40,24 @@ Sync_Manager :: struct {
 	block_request_time: map[Hash256]i64,
 	blocks_to_download: [dynamic]Hash256,
 	download_cursor:    int, // index into blocks_to_download for next request
+	requeue_list:       [dynamic]Hash256, // priority requeue — checked before main queue
 	last_tip_update:    i64,
 	peer_sync:          map[Peer_Id]Peer_Sync_State,
 	peer_rr_list:       [dynamic]Peer_Id,
 	peer_rr_cursor:     int,
 	last_stall_check:   i64,
+	header_lead_peer:   Peer_Id, // fastest responder becomes lead for header sync
 }
 
-sync_manager_init :: proc(sm: ^Sync_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params) {
+sync_manager_init :: proc(sm: ^Sync_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) {
 	sm.chain = cs
 	sm.params = params
+	sm.mp = mp
 	sm.state = .Idle
 	sm.blocks_in_flight = make(map[Hash256]Peer_Id, 64)
 	sm.block_request_time = make(map[Hash256]i64, 64)
 	sm.blocks_to_download = make([dynamic]Hash256, 0, 1024)
+	sm.requeue_list = make([dynamic]Hash256, 0, 64)
 	sm.last_tip_update = time.to_unix_seconds(time.now())
 	sm.peer_sync = make(map[Peer_Id]Peer_Sync_State, 16)
 	sm.peer_rr_list = make([dynamic]Peer_Id, 0, 16)
@@ -68,6 +74,7 @@ sync_manager_destroy :: proc(sm: ^Sync_Manager) {
 	delete(sm.blocks_in_flight)
 	delete(sm.block_request_time)
 	delete(sm.blocks_to_download)
+	delete(sm.requeue_list)
 	delete(sm.peer_sync)
 	delete(sm.peer_rr_list)
 }
@@ -82,28 +89,28 @@ sync_add_peer :: proc(sm: ^Sync_Manager, peer_id: Peer_Id) {
 	append(&sm.peer_rr_list, peer_id)
 }
 
-// Pick the best peer and start header sync with it as lead.
-// Other peers join from our current best header height when they become active.
+// Start header sync by racing all active peers. The fastest responder
+// becomes the lead peer for the remainder of header download.
 sync_start_header_sync :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) -> Peer_Id {
-	best_peer: ^Peer = nil
-	best_id: Peer_Id = 0
+	best_height: i32 = 0
+	any_active := false
 
-	for id, peer in peers {
+	for _, peer in peers {
 		if peer.state != .Active {
 			continue
 		}
-		if best_peer == nil || peer.start_height > best_peer.start_height {
-			best_peer = peer
-			best_id = id
+		any_active = true
+		if peer.start_height > best_height {
+			best_height = peer.start_height
 		}
 	}
 
-	if best_peer == nil {
+	if !any_active {
 		return 0
 	}
 
 	// If we already have headers up to or beyond the best peer's height, skip to block download.
-	if sm.best_header_height >= int(best_peer.start_height) {
+	if sm.best_header_height >= int(best_height) {
 		log.infof("Headers already up to date (height %d). Building download queue...", sm.best_header_height)
 		sm.state = .Downloading_Blocks
 		_build_download_queue(sm)
@@ -113,63 +120,91 @@ sync_start_header_sync :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) -> 
 			log.infof("%d blocks queued for download", len(sm.blocks_to_download))
 			sync_request_blocks(sm, peers)
 		}
-		return best_id
+		return 0
 	}
 
 	sm.state = .Syncing_Headers
 	sm.headers_received = 0
+	sm.header_lead_peer = 0 // no lead yet — first responder wins
 
 	locator := build_block_locator(sm.chain)
 	defer delete(locator)
 
 	now := time.to_unix_seconds(time.now())
+	sent := 0
 
-	// Send getheaders only to the lead peer.
-	peer_send_getheaders(best_peer, locator, HASH_ZERO)
-	ps := sm.peer_sync[best_id]
-	ps.getheaders_pending = true
-	ps.getheaders_sent_at = now
-	sm.peer_sync[best_id] = ps
+	// Race: send getheaders to ALL active peers.
+	for id, peer in peers {
+		if peer.state != .Active {
+			continue
+		}
+		peer_send_getheaders(peer, locator, HASH_ZERO)
+		ps := sm.peer_sync[id]
+		ps.getheaders_pending = true
+		ps.getheaders_sent_at = now
+		sm.peer_sync[id] = ps
+		sent += 1
+	}
 
-	log.infof("Starting header sync with lead peer %d (height %d)", best_id, best_peer.start_height)
-	return best_id
+	log.infof("Starting header sync: racing %d peers (best height %d)", sent, best_height)
+	return 0
 }
 
 // Process a batch of headers from a peer.
 sync_handle_headers :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, headers: []wire.Block_Header, peers: ^map[Peer_Id]^Peer) {
-	accepted := 0
-	for i in 0 ..< len(headers) {
-		hdr := headers[i]
-		entry, cerr := chain.accept_block_header(sm.chain, &hdr)
-		if cerr == .None {
-			accepted += 1
-			if entry != nil && entry.height > sm.best_header_height {
-				sm.best_header_height = entry.height
-			}
-		}
+	accepted, best_h := chain.accept_block_headers_batch(sm.chain, headers)
+	if best_h > sm.best_header_height {
+		sm.best_header_height = best_h
 	}
 
 	sm.headers_received += accepted
+
+	// If we're not actively syncing headers, just accept them and return.
+	// This handles unsolicited header announcements (BIP130) during block download.
+	if sm.state != .Syncing_Headers {
+		return
+	}
 
 	if sm.headers_received % 10000 < 2000 || len(headers) < MAX_HEADERS_PER_MSG {
 		log.infof("Headers: %d (best header height: %d)", sm.headers_received, sm.best_header_height)
 	}
 
 	if len(headers) >= MAX_HEADERS_PER_MSG {
-		// More headers available — send next getheaders to THIS peer (lead peer).
-		peer, found := peers[peer_id]
-		if found {
-			last_hdr := headers[len(headers) - 1]
-			last_hash := wire.block_header_hash(&last_hdr)
-			locator := [1]Hash256{last_hash}
-			peer_send_getheaders(peer, locator[:], HASH_ZERO)
+		// First full response wins the race — this peer becomes lead.
+		if sm.header_lead_peer == 0 {
+			sm.header_lead_peer = peer_id
+			log.infof("Header sync lead: peer %d (fastest responder)", peer_id)
 
-			// Update per-peer state.
-			now := time.to_unix_seconds(time.now())
+			// Cancel other peers' pending state so we don't wait for them.
+			for id, ps in sm.peer_sync {
+				if id != peer_id && ps.getheaders_pending {
+					new_ps := ps
+					new_ps.getheaders_pending = false
+					sm.peer_sync[id] = new_ps
+				}
+			}
+		}
+
+		// Only send follow-up getheaders to the lead peer.
+		if peer_id == sm.header_lead_peer {
+			peer, found := peers[peer_id]
+			if found {
+				last_hdr := headers[len(headers) - 1]
+				last_hash := wire.block_header_hash(&last_hdr)
+				locator := [1]Hash256{last_hash}
+				peer_send_getheaders(peer, locator[:], HASH_ZERO)
+
+				now := time.to_unix_seconds(time.now())
+				ps := sm.peer_sync[peer_id]
+				ps.last_header_hash = last_hash
+				ps.getheaders_pending = true
+				ps.getheaders_sent_at = now
+				sm.peer_sync[peer_id] = ps
+			}
+		} else {
+			// Non-lead peer responded — accept headers (duplicates are no-ops) but don't follow up.
 			ps := sm.peer_sync[peer_id]
-			ps.last_header_hash = last_hash
-			ps.getheaders_pending = true
-			ps.getheaders_sent_at = now
+			ps.getheaders_pending = false
 			sm.peer_sync[peer_id] = ps
 		}
 	} else {
@@ -212,14 +247,25 @@ sync_handle_headers :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, headers: []wire
 sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Block, peers: ^map[Peer_Id]^Peer) {
 	block_hash := wire.block_header_hash(&block.header)
 
-	// Remove from in-flight tracking.
+	// Remove from in-flight tracking — decrement the OWNER's count (the peer
+	// the block was last assigned to), not the sender's. When a block stalls
+	// and gets requeued to peer B, but peer A responds late, we must decrement
+	// B's count (the owner) to keep per-peer counts accurate.
+	owner, was_in_flight := sm.blocks_in_flight[block_hash]
 	delete_key(&sm.blocks_in_flight, block_hash)
 	delete_key(&sm.block_request_time, block_hash)
 
-	// Update per-peer tracking.
+	if was_in_flight {
+		ops, ops_found := sm.peer_sync[owner]
+		if ops_found {
+			ops.blocks_in_flight = max(0, ops.blocks_in_flight - 1)
+			sm.peer_sync[owner] = ops
+		}
+	}
+
+	// Credit delivery to the actual sender.
 	ps, ps_found := sm.peer_sync[peer_id]
 	if ps_found {
-		ps.blocks_in_flight = max(0, ps.blocks_in_flight - 1)
 		ps.last_block_received = time.to_unix_seconds(time.now())
 		ps.blocks_delivered += 1
 		sm.peer_sync[peer_id] = ps
@@ -237,10 +283,18 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 	prev_height: int
 	_, prev_height = chain.chain_tip(sm.chain)
 
-	connected, cerr := chain.connect_pending_blocks(sm.chain)
-	if cerr != .None {
+	redownload := make([dynamic]Hash256, 0, 4, context.temp_allocator)
+	connected, cerr := chain.connect_pending_blocks(sm.chain, &redownload)
+	if cerr != .None && cerr != .Storage_Error {
 		_, tip_height := chain.chain_tip(sm.chain)
-		log.errorf("Block validation failed at height %d: %v", tip_height + 1, cerr)
+		log.errorf("Block validation failed at height %d: %v — sync halted", tip_height + 1, cerr)
+		// Don't requeue or request more blocks — chain is stuck.
+		return
+	}
+
+	// Re-queue blocks that need re-download (storage errors only).
+	for h in redownload {
+		append(&sm.requeue_list, h)
 	}
 
 	if connected > 0 {
@@ -248,10 +302,16 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 		sm.last_tip_update = time.to_unix_seconds(time.now())
 
 		// Periodic UTXO flush to prevent unbounded memory growth during sync.
-		// Check if we crossed a 5000-block boundary.
-		if height / 5000 > prev_height / 5000 {
+		// Flush every 1000 blocks to keep flushes fast and avoid blocking
+		// the P2P thread long enough for peers to disconnect.
+		if height / 1000 > prev_height / 1000 {
 			tip_hash, tip_h := chain.chain_tip(sm.chain)
 			chain.coins_cache_flush(&sm.chain.coins, tip_hash, tip_h)
+		}
+
+		// Remove confirmed/conflicting txs from mempool.
+		if sm.mp != nil {
+			mempool.mempool_remove_for_block(sm.mp, block)
 		}
 
 		remaining := len(sm.blocks_to_download) - sm.download_cursor
@@ -260,7 +320,7 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 				height, remaining, len(sm.blocks_in_flight))
 
 			// Log per-peer throughput stats at 5000-block intervals.
-			if height / 5000 > prev_height / 5000 {
+			if height / 5000 > prev_height / 5000 && height > 5000 {
 				_log_peer_throughput(sm)
 			}
 		}
@@ -270,7 +330,7 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 	sync_request_blocks(sm, peers)
 
 	// Check if we're done.
-	remaining := len(sm.blocks_to_download) - sm.download_cursor
+	remaining := len(sm.requeue_list) + len(sm.blocks_to_download) - sm.download_cursor
 	if remaining == 0 && len(sm.blocks_in_flight) == 0 {
 		_, height := chain.chain_tip(sm.chain)
 		log.infof("Block download complete. In sync at height %d", height)
@@ -299,7 +359,7 @@ _peer_block_limit :: proc(ps: Peer_Sync_State, now: i64, total_rate: f64, num_sc
 
 // Fill in-flight window from download queue using bandwidth-weighted round-robin.
 sync_request_blocks :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
-	remaining := len(sm.blocks_to_download) - sm.download_cursor
+	remaining := len(sm.requeue_list) + len(sm.blocks_to_download) - sm.download_cursor
 	if remaining == 0 || len(sm.peer_rr_list) == 0 {
 		return
 	}
@@ -351,9 +411,41 @@ sync_request_blocks :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
 		inv := make([]wire.Inv_Vector, batch_size, context.temp_allocator)
 		count := 0
 
+		// Drain priority requeue list first (disconnected/stalled blocks).
+		for count < batch_size && len(sm.requeue_list) > 0 {
+			hash := pop(&sm.requeue_list)
+
+			if hash in sm.blocks_in_flight {
+				continue
+			}
+			entry, known := sm.chain.block_index.entries[hash]
+			if known && .Has_Data in entry.status {
+				continue
+			}
+
+			sm.blocks_in_flight[hash] = pid
+			sm.block_request_time[hash] = now
+			inv[count] = wire.Inv_Vector{
+				type = .Witness_Block,
+				hash = hash,
+			}
+			count += 1
+		}
+
+		// Then continue with main download queue.
 		for count < batch_size && sm.download_cursor < len(sm.blocks_to_download) {
 			hash := sm.blocks_to_download[sm.download_cursor]
 			sm.download_cursor += 1
+
+			// Skip blocks that are already stored or already in flight.
+			if hash in sm.blocks_in_flight {
+				continue
+			}
+			entry, known := sm.chain.block_index.entries[hash]
+			if known && .Has_Data in entry.status {
+				continue
+			}
+
 			sm.blocks_in_flight[hash] = pid
 			sm.block_request_time[hash] = now
 			inv[count] = wire.Inv_Vector{
@@ -369,7 +461,7 @@ sync_request_blocks :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
 			peer_send_getdata(peer, inv[:count])
 		}
 
-		remaining = len(sm.blocks_to_download) - sm.download_cursor
+		remaining = len(sm.requeue_list) + len(sm.blocks_to_download) - sm.download_cursor
 
 		// Reset peers_tried so we keep going through peers while there's work.
 		peers_tried = 0
@@ -388,8 +480,8 @@ sync_handle_disconnect :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, peers: ^map[
 	for hash in to_requeue {
 		delete_key(&sm.blocks_in_flight, hash)
 		delete_key(&sm.block_request_time, hash)
-		// Append to end of download queue — will be re-requested.
-		append(&sm.blocks_to_download, hash)
+		// Priority requeue — checked before main download queue.
+		append(&sm.requeue_list, hash)
 	}
 
 	// Remove from per-peer tracking.
@@ -414,39 +506,34 @@ sync_handle_disconnect :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, peers: ^map[
 		sync_request_blocks(sm, peers)
 	}
 
-	// If syncing headers, check if we lost the lead peer and need failover.
-	if sm.state == .Syncing_Headers {
-		has_pending := false
-		has_any := false
-		for _, ps in sm.peer_sync {
-			has_any = true
-			if ps.getheaders_pending {
-				has_pending = true
-				break
+	// If syncing headers and we lost the lead peer, race remaining peers.
+	if sm.state == .Syncing_Headers && peer_id == sm.header_lead_peer {
+		sm.header_lead_peer = 0
+
+		// Count remaining active peers and race them all.
+		locator := build_block_locator(sm.chain)
+		defer delete(locator)
+		now := time.to_unix_seconds(time.now())
+		sent := 0
+
+		for id, ps in sm.peer_sync {
+			peer, found := peers[id]
+			if !found || peer.state != .Active {
+				continue
 			}
+			peer_send_getheaders(peer, locator, HASH_ZERO)
+			new_ps := ps
+			new_ps.getheaders_pending = true
+			new_ps.getheaders_sent_at = now
+			sm.peer_sync[id] = new_ps
+			sent += 1
 		}
-		if !has_any {
-			log.warn("All sync peers disconnected, going idle...")
+
+		if sent == 0 {
+			log.warn("All sync peers disconnected during header sync, going idle...")
 			sm.state = .Idle
-		} else if !has_pending {
-			// Lead peer disconnected — pick new lead from remaining peers.
-			log.warn("Header sync lead peer disconnected, picking new lead...")
-			locator := build_block_locator(sm.chain)
-			defer delete(locator)
-			now := time.to_unix_seconds(time.now())
-			for id, ps in sm.peer_sync {
-				peer, found := peers[id]
-				if !found || peer.state != .Active {
-					continue
-				}
-				peer_send_getheaders(peer, locator, HASH_ZERO)
-				new_ps := ps
-				new_ps.getheaders_pending = true
-				new_ps.getheaders_sent_at = now
-				sm.peer_sync[id] = new_ps
-				log.infof("New header sync lead: peer %d", id)
-				break
-			}
+		} else {
+			log.infof("Header lead peer %d disconnected, racing %d remaining peers", peer_id, sent)
 		}
 	}
 }
@@ -482,8 +569,8 @@ sync_check_stalls :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
 				}
 				delete_key(&sm.blocks_in_flight, hash)
 				delete_key(&sm.block_request_time, hash)
-				// Requeue for download.
-				append(&sm.blocks_to_download, hash)
+				// Priority requeue — checked before main download queue.
+				append(&sm.requeue_list, hash)
 			}
 
 			log.infof("Requeued %d stalled blocks (>%ds)", len(stalled), BLOCK_STALL_TIMEOUT_SECS)

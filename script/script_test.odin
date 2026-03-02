@@ -4,6 +4,10 @@ import "../crypto"
 import "../wire"
 import "core:encoding/hex"
 import "core:fmt"
+import "core:mem"
+import "core:os"
+import "core:strconv"
+import "core:strings"
 import "core:testing"
 
 // --- Helpers ---
@@ -723,4 +727,387 @@ test_taproot_sighash_computation :: proc(t: ^testing.T) {
 	sighash4 := compute_sighash_taproot(&verifier, SIGHASH_ALL)
 	// These are NOT the same because the hash_type byte differs in the preimage
 	testing.expect(t, sighash != sighash4, "DEFAULT and ALL should differ (hash_type byte differs)")
+}
+
+@(test)
+test_sighash_cache_consistency :: proc(t: ^testing.T) {
+	// Verify that the sighash cache produces the same result as uncached.
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	tx_hex := "0100000002fff7f7881a8099afa6940d42d1e7f6362bec38171ea3edf433541db4e4ad969f0000000000eeffffff" +
+	          "ef51e1b804cc89d182d279655c3aa89e815b1b309fe287d9b2b55d57b90ec68a0100000000ffffffff" +
+	          "02202cb206000000001976a9148280b37df378db99f66f85c95a783a76ac7a6d5988ac" +
+	          "9093510d000000001976a9143bde42dbee7e4dbe6a21b2d50ce2f0167faa815988ac" +
+	          "11000000"
+	tx_bytes := hex_decode(tx_hex)
+	r := wire.reader_init(tx_bytes)
+	tx, _ := wire.deserialize_tx(&r, context.temp_allocator)
+
+	script_code := hex_decode("76a9141d0f172a0ecb48aee1be1f2687d2963ae33f71a188ac")
+	amount: i64 = 600000000
+
+	// Compute without cache
+	h_no_cache := compute_sighash_witness_v0(&tx, 1, script_code, amount, SIGHASH_ALL)
+
+	// Compute with cache
+	cache: Sighash_Cache
+	h_cached := compute_sighash_witness_v0(&tx, 1, script_code, amount, SIGHASH_ALL, &cache)
+
+	testing.expect(t, h_no_cache == h_cached, "cached sighash should match uncached")
+	testing.expect(t, cache.has_prevouts, "cache should have prevouts")
+	testing.expect(t, cache.has_sequence, "cache should have sequence")
+	testing.expect(t, cache.has_outputs, "cache should have outputs")
+
+	// Second call should use cache (same result)
+	h_cached2 := compute_sighash_witness_v0(&tx, 0, script_code, amount, SIGHASH_ALL, &cache)
+	testing.expect(t, h_cached != h_cached2, "different input should produce different sighash")
+}
+
+@(test)
+test_sighash_many_inputs_small_arena :: proc(t: ^testing.T) {
+	// Simulate a tx with 1000 inputs verified on a small arena.
+	// Without the sighash cache, this would exhaust the arena.
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	NUM_INPUTS :: 1000
+	arena_buf := make([]byte, 2 * 1024 * 1024) // 2 MB arena
+	defer delete(arena_buf)
+	arena: mem.Arena
+	mem.arena_init(&arena, arena_buf)
+	alloc := mem.arena_allocator(&arena)
+
+	// Build a tx with many inputs
+	inputs := make([]wire.Tx_In, NUM_INPUTS, alloc)
+	for i in 0 ..< NUM_INPUTS {
+		inputs[i] = wire.Tx_In {
+			previous_output = wire.Outpoint{
+				hash  = {byte(i), byte(i >> 8), byte(i >> 16), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+				         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+				index = u32(i),
+			},
+			sequence = 0xfffffffd,
+		}
+	}
+	outputs := make([]wire.Tx_Out, 1, alloc)
+	outputs[0] = wire.Tx_Out{value = 50_000_000, script_pubkey = hex_decode("0014abcdef0123456789abcdef0123456789abcdef01")}
+
+	tx := wire.Tx{
+		version  = 2,
+		inputs   = inputs,
+		outputs  = outputs,
+		locktime = 0,
+	}
+
+	script_code := hex_decode("76a914abcdef0123456789abcdef012345678900000088ac")
+
+	// Compute sighash for all inputs with cache — should NOT exhaust arena
+	cache: Sighash_Cache
+	prev_alloc := context.temp_allocator
+	context.temp_allocator = alloc
+	defer { context.temp_allocator = prev_alloc }
+
+	first_hash: Hash256
+	for i in 0 ..< NUM_INPUTS {
+		h := compute_sighash_witness_v0(&tx, i, script_code, 19999140, SIGHASH_ALL, &cache)
+		if i == 0 {
+			first_hash = h
+		}
+		// Each input should produce a unique sighash (different outpoint + sequence)
+		if i > 0 {
+			testing.expect(t, h != first_hash, fmt.tprintf("input %d should differ from input 0", i))
+		}
+	}
+
+	// Verify cache was populated
+	testing.expect(t, cache.has_prevouts, "cache should have prevouts after many inputs")
+	testing.expect(t, cache.has_sequence, "cache should have sequence after many inputs")
+	testing.expect(t, cache.has_outputs, "cache should have outputs after many inputs")
+}
+
+@(test)
+test_signet_250058_tx11_p2wpkh :: proc(t: ^testing.T) {
+	// Real-world regression test: signet block 250058, tx index 11.
+	// This tx has 996 P2WPKH inputs. Without the sighash cache, it exhausts
+	// the 64MB block arena during script verification (Bad_Script).
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	// Read raw tx hex from test data file (relative to source location)
+	src_dir := #location().file_path
+	base_dir := src_dir[:strings.last_index(src_dir, "/")]
+	tx_hex_raw, tx_ok := os.read_entire_file(fmt.tprintf("%s/testdata/signet_250058_tx11.hex", base_dir))
+	if !tx_ok {
+		testing.expect(t, false, "failed to read testdata/signet_250058_tx11.hex")
+		return
+	}
+	defer delete(tx_hex_raw)
+
+	// Trim whitespace and decode
+	tx_hex_str := strings.trim_space(string(tx_hex_raw))
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str)
+	if !hex_ok {
+		testing.expect(t, false, "failed to hex-decode tx")
+		return
+	}
+	defer delete(tx_bytes)
+
+	r := wire.reader_init(tx_bytes)
+	tx, tx_err := wire.deserialize_tx(&r)
+	if tx_err != nil {
+		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
+		return
+	}
+
+	testing.expect_value(t, len(tx.inputs), 996)
+	testing.expect_value(t, len(tx.outputs), 2)
+	testing.expect_value(t, len(tx.witness), 996)
+
+	// Read prevout data
+	prevout_raw, prev_ok := os.read_entire_file(fmt.tprintf("%s/testdata/signet_250058_tx11_prevouts.txt", base_dir))
+	if !prev_ok {
+		testing.expect(t, false, "failed to read prevouts file")
+		return
+	}
+	defer delete(prevout_raw)
+
+	// Parse prevouts: each line is "value scriptPubKey_hex"
+	spent_outputs := make([]wire.Tx_Out, len(tx.inputs))
+	defer delete(spent_outputs)
+
+	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n")
+	defer delete(lines)
+	testing.expect_value(t, len(lines), 996)
+
+	for i in 0 ..< len(lines) {
+		parts := strings.split(lines[i], " ")
+		defer delete(parts)
+		value, val_ok := strconv.parse_i64(parts[0])
+		if !val_ok { continue }
+		spk, spk_ok := hex.decode(transmute([]u8)parts[1])
+		if !spk_ok { continue }
+		spent_outputs[i] = wire.Tx_Out{value = value, script_pubkey = spk}
+	}
+
+	// Run script verification on a 2MB arena (smaller than the 64MB block arena)
+	// to prove the sighash cache prevents arena exhaustion.
+	arena_buf := make([]byte, 2 * 1024 * 1024)
+	defer delete(arena_buf)
+	arena: mem.Arena
+	mem.arena_init(&arena, arena_buf)
+	alloc := mem.arena_allocator(&arena)
+
+	prev_temp := context.temp_allocator
+	context.temp_allocator = alloc
+	defer { context.temp_allocator = prev_temp }
+
+	flags := Verify_Flags{.P2SH, .DER_Sig, .Strict_Enc, .Check_Locktime, .Check_Sequence,
+	                       .Witness, .Null_Dummy, .Low_S, .Null_Fail, .Witness_Pub_Key_Compressed}
+
+	sighash_cache: Sighash_Cache
+	verified := 0
+	for in_idx in 0 ..< len(tx.inputs) {
+		verifier := Script_Verifier {
+			tx            = &tx,
+			input_idx     = in_idx,
+			amount        = spent_outputs[in_idx].value,
+			flags         = flags,
+			spent_outputs = spent_outputs,
+			sighash_cache = &sighash_cache,
+		}
+
+		witness: [][]byte
+		if len(tx.witness) > in_idx {
+			witness = tx.witness[in_idx]
+		}
+
+		serr := verify_script(
+			&verifier,
+			tx.inputs[in_idx].script_sig,
+			spent_outputs[in_idx].script_pubkey,
+			witness,
+		)
+		if serr != .None {
+			testing.expect(t, false, fmt.tprintf("script verification failed at input %d: %v", in_idx, serr))
+			return
+		}
+		verified += 1
+	}
+
+	testing.expect_value(t, verified, 996)
+}
+
+@(test)
+test_signet_250183_p2a_anchor :: proc(t: ^testing.T) {
+	// Regression test: signet block 250183, tx index 33.
+	// This tx spends a P2A (Pay-to-Anchor) output: witness v1, 2-byte program (51024e73).
+	// Before fix, verify_witness_program routed ALL v1 programs to verify_taproot,
+	// which expected 32 bytes and failed with Witness_Program_Wrong_Length.
+	// P2A outputs are anyone-can-spend per consensus (future witness version space).
+	//
+	// Raw tx: 02000000015009079dd76641fe31fd2acb2bec61567a989dc3fd3c8a2ef28e24b87b9a52bd
+	//         0000000000fdffffff010000000000000000146a126f6e207369676e6574207765206c6561726e45d10300
+	// Prevout: value=900, scriptPubKey=51024e73
+
+	// Prevout scriptPubKey: OP_1 PUSH2 4e73 (witness v1, 2-byte program)
+	script_pubkey := []u8{0x51, 0x02, 0x4e, 0x73}
+
+	// Verify it's detected as a witness program
+	ver, prog, is_wit := is_witness_program(script_pubkey)
+	testing.expect(t, is_wit, "P2A should be detected as witness program")
+	testing.expect_value(t, ver, 1)
+	testing.expect_value(t, len(prog), 2)
+
+	// Build a minimal tx that spends this output (no witness data needed)
+	tx := wire.Tx{version = 2, locktime = 250181}
+	inputs := make([]wire.Tx_In, 1, context.temp_allocator)
+	inputs[0].sequence = 0xfffffffd
+	tx.inputs = inputs
+
+	outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
+	outputs[0].value = 0
+	outputs[0].script_pubkey = []u8{0x6a, 0x12, 0x6f, 0x6e, 0x20, 0x73, 0x69, 0x67, 0x6e, 0x65, 0x74, 0x20, 0x77, 0x65, 0x20, 0x6c, 0x65, 0x61, 0x72, 0x6e}
+	tx.outputs = outputs
+
+	spent_outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
+	spent_outputs[0] = wire.Tx_Out{value = 900, script_pubkey = script_pubkey}
+
+	// Consensus flags (no Discourage_Upgradable_Witness for block validation)
+	flags := Verify_Flags{.P2SH, .DER_Sig, .Strict_Enc, .Check_Locktime, .Check_Sequence,
+	                       .Witness, .Null_Dummy, .Low_S, .Null_Fail, .Witness_Pub_Key_Compressed}
+
+	verifier := Script_Verifier{
+		tx            = &tx,
+		input_idx     = 0,
+		amount        = 900,
+		flags         = flags,
+		spent_outputs = spent_outputs,
+	}
+
+	// Should succeed: v1 non-32-byte program is anyone-can-spend for consensus
+	serr := verify_script(&verifier, nil, script_pubkey, nil)
+	testing.expect(t, serr == .None, fmt.tprintf("P2A anchor should pass consensus: got %v", serr))
+
+	// With STANDARD_FLAGS (mempool policy), it should be rejected as discouraged
+	verifier.flags = STANDARD_FLAGS
+	serr2 := verify_script(&verifier, nil, script_pubkey, nil)
+	testing.expect(t, serr2 == .Discourage_Upgradable_Witness,
+		fmt.tprintf("P2A anchor should be discouraged in mempool: got %v", serr2))
+}
+
+@(test)
+test_signet_250447_tapscript_op_roll :: proc(t: ^testing.T) {
+	// Regression test: signet block 250447, tx index 96.
+	// txid: 00227f432246783950315d133f21bb5002d9eddbeb8c716844b5c6827a31a1e4
+	// This tx uses Taproot script-path spending (BIP342) with 228 witness items
+	// including OP_ROLL on a deep stack (n=215, stack_size=216).
+	// Before fix, stack_remove() called delete() on arena-allocated slice data,
+	// which passed the wrong allocator to free(), causing heap corruption (SIGABRT).
+	//
+	// Input: P2TR output, value=5490
+	// scriptPubKey: 51205784ff73f9d22768baeb80bde0ab39fb8cf34739d36588c6ed6bf6445c0eff5e
+
+	crypto.init_secp256k1()
+
+	// Raw tx hex split for readability (compile-time constant concat)
+	TX_HEX :: "020000000001010b579af47df92a26a635f557bef0f5ce5aaf24aee5359b2f9bb28cb70cfdca7901" +
+		"00000000ffffffff015c1200000000000022002017e90c8d35ea51ccde68896a84c26a50a47729b7" +
+		"d91e6b9dfc5ea30714473e0ee40336c80d04a8c72a0504074cd51104ce40421d04b96fa30a041904" +
+		"4c0104d33052180458271c140421cc7c150336c80d04a8c72a0504074cd51104ce40421d04b96fa3" +
+		"0a0419044c0104d33052180458271c140421cc7c150336c80d04a8c72a0504074cd51104ce40421d" +
+		"04b96fa30a0419044c0104d33052180458271c140421cc7c150336c80d04a8c72a0504074cd51104" +
+		"ce40421d04b96fa30a0419044c0104d33052180458271c140421cc7c150336c80d04a8c72a050407" +
+		"4cd51104ce40421d04b96fa30a0419044c0104d33052180458271c140421cc7c150336c80d04a8c7" +
+		"2a0504074cd51104ce40421d04b96fa30a0419044c0104d33052180458271c140421cc7c150336c8" +
+		"0d04a8c72a0504074cd51104ce40421d04b96fa30a0419044c0104d33052180458271c140421cc7c" +
+		"150336c80d04a8c72a0504074cd51104ce40421d04b96fa30a0419044c0104d33052180458271c14" +
+		"0421cc7c150336c80d04a8c72a0504074cd51104ce40421d04b96fa30a0419044c0104d330521804" +
+		"58271c140421cc7c150336c80d04a8c72a0504074cd51104ce40421d04b96fa30a0419044c0104d3" +
+		"3052180458271c140421cc7c150336c80d04a8c72a0504074cd51104ce40421d04b96fa30a041904" +
+		"4c0104d33052180458271c140421cc7c150336c80d04a8c72a0504074cd51104ce40421d04b96fa3" +
+		"0a0419044c0104d33052180458271c140421cc7c150336c80d04a8c72a0504074cd51104ce40421d" +
+		"04b96fa30a0419044c0104d33052180458271c140421cc7c150336c80d04a8c72a0504074cd51104" +
+		"ce40421d04b96fa30a0419044c0104d33052180458271c140421cc7c150336c80d04a8c72a050407" +
+		"4cd51104ce40421d04b96fa30a0419044c0104d33052180458271c140421cc7c150336c80d04a8c7" +
+		"2a0504074cd51104ce40421d04b96fa30a0419044c0104d33052180458271c140421cc7c150336c8" +
+		"0d04a8c72a0504074cd51104ce40421d04b96fa30a0419044c0104d33052180458271c140421cc7c" +
+		"150336c80d04a8c72a0504074cd51104ce40421d04b96fa30a0419044c0104d33052180458271c14" +
+		"0421cc7c150336c80d04a8c72a0504074cd51104ce40421d04b96fa30a0419044c0104d330521804" +
+		"58271c140421cc7c150336c80d04a8c72a0504074cd51104ce40421d04b96fa30a0419044c0104d3" +
+		"3052180458271c140421cc7c150336c80d04a8c72a0504074cd51104ce40421d04b96fa30a041904" +
+		"4c0104d33052180458271c140421cc7c150336c80d04a8c72a0504074cd51104ce40421d04b96fa3" +
+		"0a0419044c0104d33052180458271c140421cc7c150336c80d04a8c72a0504074cd51104ce40421d" +
+		"04b96fa30a0419044c0104d33052180458271c140421cc7c150336c80d04a8c72a0504074cd51104" +
+		"ce40421d04b96fa30a0419044c0104d33052180458271c140421cc7c15036c901b04518f550a040f" +
+		"98aa03049c81841a0472df4615043308980204a761a41004b14e3808044298f90a4149d366b3cf99" +
+		"e0ed8e0fc25bfe63f95d403ac0a857e014c478231c0d51ec5cb8de4558e04f374344f5e8484b4f7d" +
+		"e7855a45ed3f662173ab2e3b76a29094cfe201fd310500205af96d958b8c5634fbbfe83bbdac9c32" +
+		"200d07db64225317e9c3debd2a5581afba519d6b6b6b6b6b6b6b6b6b02d7007a016c7a02d7007a01" +
+		"6d7a02d7007a016e7a02d7007a016f7a02d7007a01707a02d7007a01717a02d7007a01727a02d700" +
+		"7a01737a02d7007a01747a876b876b876b876b876b876b876b876b876b6c6c6c6c6c6c6c6c6c9a9a" +
+		"9a9a9a9a9a9a6b02c5007a01637a02c5007a01647a02c5007a01657a02c5007a01667a02c5007a01" +
+		"677a02c5007a01687a02c5007a01697a02c5007a016a7a02c5007a016b7a876b876b876b876b876b" +
+		"876b876b876b876b6c6c6c6c6c6c6c6c6c9a9a9a9a9a9a9a9a6b02b3007a015a7a02b3007a015b7a" +
+		"02b3007a015c7a02b3007a015d7a02b3007a015e7a02b3007a015f7a02b3007a01607a02b3007a01" +
+		"617a02b3007a01627a876b876b876b876b876b876b876b876b876b6c6c6c6c6c6c6c6c6c9a9a9a9a" +
+		"9a9a9a9a6b02a1007a01517a02a1007a01527a02a1007a01537a02a1007a01547a02a1007a01557a" +
+		"02a1007a01567a02a1007a01577a02a1007a01587a02a1007a01597a876b876b876b876b876b876b" +
+		"876b876b876b6c6c6c6c6c6c6c6c6c9a9a9a9a9a9a9a9a6b028f007a01487a028f007a01497a028f" +
+		"007a014a7a028f007a014b7a028f007a014c7a028f007a014d7a028f007a014e7a028f007a014f7a" +
+		"028f007a01507a876b876b876b876b876b876b876b876b876b6c6c6c6c6c6c6c6c6c9a9a9a9a9a9a" +
+		"9a9a6b017d7a013f7a017d7a01407a017d7a01417a017d7a01427a017d7a01437a017d7a01447a01" +
+		"7d7a01457a017d7a01467a017d7a01477a876b876b876b876b876b876b876b876b876b6c6c6c6c6c" +
+		"6c6c6c6c9a9a9a9a9a9a9a9a6b016b7a01367a016b7a01377a016b7a01387a016b7a01397a016b7a" +
+		"013a7a016b7a013b7a016b7a013c7a016b7a013d7a016b7a013e7a876b876b876b876b876b876b87" +
+		"6b876b876b6c6c6c6c6c6c6c6c6c9a9a9a9a9a9a9a9a6b01597a012d7a01597a012e7a01597a012f" +
+		"7a01597a01307a01597a01317a01597a01327a01597a01337a01597a01347a01597a01357a876b87" +
+		"6b876b876b876b876b876b876b876b6c6c6c6c6c6c6c6c6c9a9a9a9a9a9a9a9a6b01477a01247a01" +
+		"477a01257a01477a01267a01477a01277a01477a01287a01477a01297a01477a012a7a01477a012b" +
+		"7a01477a012c7a876b876b876b876b876b876b876b876b876b6c6c6c6c6c6c6c6c6c9a9a9a9a9a9a" +
+		"9a9a6b01357a011b7a01357a011c7a01357a011d7a01357a011e7a01357a011f7a01357a01207a01" +
+		"357a01217a01357a01227a01357a01237a876b876b876b876b876b876b876b876b876b6c6c6c6c6c" +
+		"6c6c6c6c9a9a9a9a9a9a9a9a6b01237a01127a01237a01137a01237a01147a01237a01157a01237a" +
+		"01167a01237a01177a01237a01187a01237a01197a01237a011a7a876b876b876b876b876b876b87" +
+		"6b876b876b6c6c6c6c6c6c6c6c6c9a9a9a9a9a9a9a9a6b01117a597a01117a5a7a01117a5b7a0111" +
+		"7a5c7a01117a5d7a01117a5e7a01117a5f7a01117a607a01117a01117a876b876b876b876b876b87" +
+		"6b876b876b876b6c6c6c6c6c6c6c6c6c9a9a9a9a9a9a9a9a6b6c6c6c6c6c6c6c6c6c6c6c6c9a9a9a" +
+		"9a9a9a9a9a9a9a9a630336c80d04a8c72a0504074cd51104ce40421d04b96fa30a0419044c0104d3" +
+		"3052180458271c140421cc7c156700766e6f6e686c6c6c6c6c6c6c6c6c01117a597a01117a5a7a01" +
+		"117a5b7a01117a5c7a01117a5d7a01117a5e7a01117a5f7a01117a607a01117a01117a876b876b87" +
+		"6b876b876b876b876b876b876b6c6c6c6c6c6c6c6c6c9a9a9a9a9a9a9a9a9141c050929b74c1a049" +
+		"54b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac086c30f51129972d143545fc2c98535" +
+		"3bc4bc2a55d4973f219a6b3025330ffef500000000"
+
+	raw_tx_hex := TX_HEX
+
+	raw_tx := hex_decode(raw_tx_hex)
+	r := wire.reader_init(raw_tx)
+	tx, terr := wire.deserialize_tx(&r, context.temp_allocator)
+	testing.expect(t, terr == .None, fmt.tprintf("Failed to deserialize tx: %v", terr))
+	testing.expect_value(t, len(tx.inputs), 1)
+	testing.expect_value(t, len(tx.witness), 1)
+	testing.expect(t, len(tx.witness[0]) == 228, fmt.tprintf("Expected 228 witness items, got %d", len(tx.witness[0])))
+
+	// Spent output: P2TR
+	script_pubkey := hex_decode("51205784ff73f9d22768baeb80bde0ab39fb8cf34739d36588c6ed6bf6445c0eff5e")
+	spent_value: i64 = 5490
+
+	spent_outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
+	spent_outputs[0] = wire.Tx_Out{value = spent_value, script_pubkey = script_pubkey}
+
+	// Consensus flags at height 250447
+	flags := Verify_Flags{.P2SH, .DER_Sig, .Strict_Enc, .Check_Locktime, .Check_Sequence,
+	                       .Witness, .Null_Dummy, .Low_S, .Null_Fail, .Witness_Pub_Key_Compressed}
+
+	verifier := Script_Verifier{
+		tx            = &tx,
+		input_idx     = 0,
+		amount        = spent_value,
+		flags         = flags,
+		spent_outputs = spent_outputs,
+	}
+
+	serr := verify_script(&verifier, tx.inputs[0].script_sig, script_pubkey, tx.witness[0])
+	testing.expect(t, serr == .None, fmt.tprintf("Tapscript with OP_ROLL should pass: got %v", serr))
 }

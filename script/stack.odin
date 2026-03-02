@@ -69,8 +69,7 @@ stack_dup_n :: proc(s: ^Script_Stack, n: int) -> Script_Error {
 stack_remove :: proc(s: ^Script_Stack, idx: int) -> Script_Error {
 	actual := len(s.items) + idx
 	if actual < 0 || actual >= len(s.items) { return .Invalid_Stack_Operation }
-	// Free removed element
-	delete(s.items[actual])
+	// Free removed element — no-op on arena, safe
 	ordered_remove(&s.items, actual)
 	return nil
 }

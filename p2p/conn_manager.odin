@@ -9,6 +9,7 @@ import "core:time"
 
 import "../chain"
 import "../consensus"
+import "../mempool"
 import "../wire"
 
 Conn_Manager :: struct {
@@ -17,15 +18,17 @@ Conn_Manager :: struct {
 	sync_mgr:       Sync_Manager,
 	chain:          ^chain.Chain_State,
 	params:         ^consensus.Chain_Params,
+	mp:             ^mempool.Mempool,
 	next_peer_id:   Peer_Id,
 	network_magic:  u32,
 	default_port:   int,
 	shutdown:        bool,
 }
 
-conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params) -> Net_Error {
+conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) -> Net_Error {
 	cm.chain = cs
 	cm.params = params
+	cm.mp = mp
 	cm.network_magic = params.network_magic
 	cm.next_peer_id = 1
 	cm.shutdown = false
@@ -42,13 +45,13 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 	cm.peers = make(map[Peer_Id]^Peer, MAX_OUTBOUND_PEERS * 2)
 
 	// Create buffered channel for peer messages.
-	ch, ch_err := chan.create(chan.Chan(Peer_Message), 256, context.allocator)
+	ch, ch_err := chan.create(chan.Chan(Peer_Message), 4096, context.allocator)
 	if ch_err != nil {
 		return .Connection_Failed
 	}
 	cm.msg_chan = ch
 
-	sync_manager_init(&cm.sync_mgr, cs, params)
+	sync_manager_init(&cm.sync_mgr, cs, params, mp)
 
 	return .None
 }
@@ -203,6 +206,10 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 
 	// Main message loop.
 	for !cm.shutdown {
+		// Free temp allocations from previous iteration (block deserialization,
+		// inv messages, etc.) to prevent unbounded memory growth during IBD.
+		free_all(context.temp_allocator)
+
 		msg, ok := chan.recv(cm.msg_chan)
 		if !ok {
 			break // Channel closed.
@@ -264,6 +271,10 @@ _conn_manager_process_message :: proc(cm: ^Conn_Manager, msg: Peer_Message) {
 		if found {
 			peer.send_headers = true
 		}
+	case wire.CMD_TX:
+		_conn_manager_handle_tx(cm, msg.peer_id, msg.payload)
+	case wire.CMD_GETDATA:
+		_conn_manager_handle_getdata(cm, msg.peer_id, msg.payload)
 	case wire.CMD_SENDCMPCT, wire.CMD_FEEFILTER, wire.CMD_WTXIDRELAY, wire.CMD_ADDRV2, wire.CMD_ADDR:
 		// Ignored for now.
 	case:
@@ -322,8 +333,16 @@ _conn_manager_handle_verack :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 		case .Idle:
 			sync_start_header_sync(&cm.sync_mgr, &cm.peers)
 		case .Syncing_Headers:
-			// Late-joining peer stays idle until dispatched by sync_handle_headers
-			// from the current best header tip. This avoids duplicate header downloads.
+			// Add late-joining peer to the header race if no lead has been selected yet.
+			if cm.sync_mgr.header_lead_peer == 0 {
+				locator := build_block_locator(cm.sync_mgr.chain)
+				defer delete(locator)
+				peer_send_getheaders(peer, locator, HASH_ZERO)
+				ps := cm.sync_mgr.peer_sync[peer_id]
+				ps.getheaders_pending = true
+				ps.getheaders_sent_at = time.to_unix_seconds(time.now())
+				cm.sync_mgr.peer_sync[peer_id] = ps
+			}
 		case .Downloading_Blocks:
 			// Fill new peer's available block slots.
 			sync_request_blocks(&cm.sync_mgr, &cm.peers)
@@ -363,24 +382,26 @@ _conn_manager_handle_inv :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: [
 		return
 	}
 
-	// For now, we only care about block announcements when in sync.
-	if cm.sync_mgr.state != .In_Sync {
-		return
-	}
-
 	peer, found := cm.peers[peer_id]
 	if !found {
 		return
 	}
 
-	// Request any announced blocks we don't have.
 	wanted := make([dynamic]wire.Inv_Vector, 0, len(inv_msg.inventory), context.temp_allocator)
 	for iv in inv_msg.inventory {
 		#partial switch iv.type {
 		case .Block, .Witness_Block:
-			_, known := cm.chain.block_index.entries[iv.hash]
-			if !known {
-				append(&wanted, wire.Inv_Vector{type = .Witness_Block, hash = iv.hash})
+			// Block inv only matters when in sync.
+			if cm.sync_mgr.state == .In_Sync {
+				_, known := cm.chain.block_index.entries[iv.hash]
+				if !known {
+					append(&wanted, wire.Inv_Vector{type = .Witness_Block, hash = iv.hash})
+				}
+			}
+		case .Tx, .Witness_Tx:
+			// Only process tx inv when in sync (no point during IBD).
+			if cm.sync_mgr.state == .In_Sync && cm.mp != nil && !mempool.mempool_has(cm.mp, iv.hash) {
+				append(&wanted, wire.Inv_Vector{type = .Witness_Tx, hash = iv.hash})
 			}
 		}
 	}
@@ -420,4 +441,93 @@ _conn_manager_handle_pong :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: 
 	if pong.nonce == peer.ping_nonce {
 		peer.last_pong = time.to_unix_seconds(time.now())
 	}
+}
+
+// Handle inbound tx message: validate, add to mempool, relay to other peers.
+_conn_manager_handle_tx :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []byte) {
+	if cm.mp == nil || cm.sync_mgr.state != .In_Sync {
+		return
+	}
+
+	r := wire.reader_init(payload)
+	tx, err := wire.deserialize_tx(&r, context.temp_allocator)
+	if err != nil {
+		log.debugf("Bad tx from peer %d", peer_id)
+		return
+	}
+
+	txid := wire.tx_id(&tx)
+	mp_err := mempool.mempool_add(cm.mp, &tx)
+	if mp_err != .None {
+		log.debugf("Rejected tx %s from peer %d: %v", _hash_to_hex_short(txid), peer_id, mp_err)
+		return
+	}
+
+	log.debugf("Accepted tx %s from peer %d", _hash_to_hex_short(txid), peer_id)
+	_conn_manager_relay_tx(cm, txid, peer_id)
+}
+
+// Handle inbound getdata: serve txs from mempool.
+_conn_manager_handle_getdata :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []byte) {
+	r := wire.reader_init(payload)
+	gd_msg, err := wire.deserialize_getdata(&r, context.temp_allocator)
+	if err != .None {
+		return
+	}
+
+	peer, found := cm.peers[peer_id]
+	if !found {
+		return
+	}
+
+	for iv in gd_msg.inventory {
+		#partial switch iv.type {
+		case .Tx, .Witness_Tx:
+			if cm.mp == nil {
+				continue
+			}
+			entry, mp_found := mempool.mempool_get(cm.mp, iv.hash)
+			if !mp_found {
+				continue
+			}
+			// Serialize and send tx message.
+			w := wire.writer_init(context.temp_allocator)
+			wire.serialize_tx(&w, &entry.tx)
+			peer_send_message(peer, wire.CMD_TX, wire.writer_bytes(&w))
+		}
+	}
+}
+
+// Relay a tx inv to all active peers except the sender.
+_conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid: Hash256, from_peer: Peer_Id) {
+	inv := [1]wire.Inv_Vector{{type = .Witness_Tx, hash = txid}}
+	w := wire.writer_init(context.temp_allocator)
+	inv_msg := wire.Inv_Message{inventory = inv[:]}
+	wire.serialize_inv(&w, &inv_msg)
+	payload := wire.writer_bytes(&w)
+
+	for id, peer in cm.peers {
+		if id == from_peer || peer.state != .Active {
+			continue
+		}
+		peer_send_message(peer, wire.CMD_INV, payload)
+	}
+}
+
+// Exported relay for RPC thread (no sender to exclude).
+conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid: Hash256) {
+	_conn_manager_relay_tx(cm, txid, Peer_Id(0))
+}
+
+// Short hex for log messages (first 8 chars).
+_hash_to_hex_short :: proc(hash: Hash256) -> string {
+	hex := "0123456789abcdef"
+	buf: [16]byte
+	// Display in reversed byte order (standard Bitcoin display).
+	for i in 0 ..< 8 {
+		b := hash[31 - i]
+		buf[i * 2] = hex[b >> 4]
+		buf[i * 2 + 1] = hex[b & 0x0f]
+	}
+	return fmt.tprintf("%s...", string(buf[:16]))
 }

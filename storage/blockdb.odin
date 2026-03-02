@@ -34,34 +34,31 @@ block_db_store :: proc(db: ^Block_DB, block: ^wire.Block) -> (loc: Block_Locatio
 }
 
 // Store pre-serialized block bytes with [magic:4 LE][size:4 LE][raw_block] framing.
+// Header and data are written as a single flat_file_write so they can't split across files.
 block_db_store_raw :: proc(db: ^Block_DB, raw_block: []byte) -> (loc: Block_Location, err: Storage_Error) {
-	// Build 8-byte header: magic(4) + size(4), both little-endian
-	header: [8]byte
-	magic := db.network_magic
-	header[0] = byte(magic)
-	header[1] = byte(magic >> 8)
-	header[2] = byte(magic >> 16)
-	header[3] = byte(magic >> 24)
 	size := u32(len(raw_block))
-	header[4] = byte(size)
-	header[5] = byte(size >> 8)
-	header[6] = byte(size >> 16)
-	header[7] = byte(size >> 24)
 
-	// Write header
-	hdr_pos, herr := flat_file_write(&db.files, header[:])
-	if herr != .None {
-		return {}, herr
-	}
+	// Build combined buffer: 8-byte header + raw block data
+	combined := make([]byte, 8 + len(raw_block), context.temp_allocator)
+	magic := db.network_magic
+	combined[0] = byte(magic)
+	combined[1] = byte(magic >> 8)
+	combined[2] = byte(magic >> 16)
+	combined[3] = byte(magic >> 24)
+	combined[4] = byte(size)
+	combined[5] = byte(size >> 8)
+	combined[6] = byte(size >> 16)
+	combined[7] = byte(size >> 24)
+	copy(combined[8:], raw_block)
 
-	// Write raw block data
-	_, werr := flat_file_write(&db.files, raw_block)
+	// Single write — header and data always land in the same file.
+	pos, werr := flat_file_write(&db.files, combined)
 	if werr != .None {
 		return {}, werr
 	}
 
-	loc.file_num = hdr_pos.file_num
-	loc.data_offset = hdr_pos.offset + 8 // skip the 8-byte header
+	loc.file_num = pos.file_num
+	loc.data_offset = pos.offset + 8 // skip the 8-byte header
 	loc.data_size = size
 	return loc, .None
 }

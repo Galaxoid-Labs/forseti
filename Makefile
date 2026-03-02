@@ -11,7 +11,7 @@ build: deps
 test: deps
 	odin test crypto
 	odin test wire
-	odin test script
+	odin test script -define:ODIN_TEST_THREADS=1
 	odin test consensus
 	odin test storage
 	odin test chain
