@@ -41,6 +41,7 @@ CLI_Flag :: enum {
 	No_P2P,
 	Mempool_Full_RBF,
 	DbCache,
+	Par,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
 
@@ -53,6 +54,7 @@ CLI_Config :: struct {
 	no_p2p:          bool,
 	mempool_fullrbf: bool,
 	db_cache_mb:     int,
+	par_threads:     int, // 0 = auto, 1 = serial, >= 2 = N threads
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -63,6 +65,7 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 	cfg.no_p2p = false
 	cfg.mempool_fullrbf = true
 	cfg.db_cache_mb = 450
+	cfg.par_threads = 0  // auto-detect
 
 	for arg in os.args[1:] {
 		if arg == "--help" || arg == "-h" {
@@ -108,6 +111,14 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 			}
 			cfg.db_cache_mb = max(val, 4)
 			flags_set += {.DbCache}
+		} else if strings.has_prefix(arg, "--par=") {
+			val, parse_ok := strconv.parse_int(arg[len("--par="):])
+			if !parse_ok {
+				fmt.eprintln("Error: invalid --par value")
+				return cfg, flags_set, false
+			}
+			cfg.par_threads = max(val, 0)
+			flags_set += {.Par}
 		} else {
 			fmt.eprintln("Error: unknown flag:", arg)
 			_print_usage()
@@ -130,6 +141,7 @@ _print_usage :: proc() {
 	fmt.println("  --no-p2p              Disable P2P networking (RPC-only mode)")
 	fmt.println("  --mempoolfullrbf=<0|1> Allow full RBF replacement (default: 1)")
 	fmt.println("  --dbcache=<MB>        Database cache size in MiB (default: 450, min: 4)")
+	fmt.println("  --par=<N>             Script verification threads (0=auto, 1=serial, 2+=parallel; default: 0)")
 	fmt.println("  --help, -h            Show this help message")
 }
 
@@ -219,6 +231,35 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 			}
 		}
 	}
+
+	if .Par not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "par"); found {
+			if n, parse_ok := strconv.parse_int(val); parse_ok {
+				cfg.par_threads = max(n, 0)
+			}
+		}
+	}
+}
+
+// Resolve par_threads: 0 = auto-detect, 1 = serial, >= 2 = parallel.
+// Returns the resolved script_threads value to pass to chain_state_init.
+_resolve_par_threads :: proc(par: int) -> int {
+	if par >= 2 {
+		return min(par, 15)
+	}
+	if par == 1 {
+		return 0 // serial
+	}
+	// Auto-detect: use available CPUs minus 2 (for main + P2P threads)
+	n := os.processor_core_count()
+	if n <= 0 {
+		return 4 // fallback
+	}
+	result := max(n - 2, 1)
+	if result < 2 {
+		return 0 // serial on single/dual-core
+	}
+	return min(result, 15)
 }
 
 _select_params :: proc(network: string) -> (params: ^consensus.Chain_Params, rpc_port: int, ok: bool) {
@@ -298,13 +339,21 @@ main :: proc() {
 		rpc_port = cfg.rpc_port
 	}
 
+	// Resolve parallel script verification threads.
+	script_threads := _resolve_par_threads(cfg.par_threads)
+
 	log.infof("Network: %s", params.name)
 	log.infof("Data directory: %s", cfg.data_dir)
 	log.infof("DB cache: %d MiB", cfg.db_cache_mb)
+	if script_threads >= 2 {
+		log.infof("Script verification: %d threads", script_threads)
+	} else {
+		log.info("Script verification: serial")
+	}
 
 	// Initialize chain state.
 	cs := new(chain.Chain_State)
-	cs_err := chain.chain_state_init(cs, cfg.data_dir, params, cfg.db_cache_mb)
+	cs_err := chain.chain_state_init(cs, cfg.data_dir, params, cfg.db_cache_mb, script_threads)
 	if cs_err != .None {
 		log.errorf("Failed to initialize chain state: %v", cs_err)
 		return

@@ -123,6 +123,53 @@ Sighash_Cache :: struct {
 	has_tap_outputs:       bool,
 }
 
+// Eagerly populate all sighash cache fields (BIP143 + BIP341).
+// Called once per tx before dispatching parallel script verification.
+// Workers read the fully-populated cache without synchronization.
+sighash_cache_precompute :: proc(cache: ^Sighash_Cache, tx: ^wire.Tx, spent_outputs: []wire.Tx_Out) {
+	// BIP143 (double SHA256)
+	{
+		pw := wire.writer_init(context.temp_allocator)
+		for i in 0 ..< len(tx.inputs) {
+			wire.serialize_outpoint(&pw, &tx.inputs[i].previous_output)
+		}
+		cache.hash_prevouts = crypto.sha256d(wire.writer_bytes(&pw))
+		cache.has_prevouts = true
+	}
+	{
+		sw := wire.writer_init(context.temp_allocator)
+		for i in 0 ..< len(tx.inputs) {
+			wire.write_u32le(&sw, tx.inputs[i].sequence)
+		}
+		cache.hash_sequence = crypto.sha256d(wire.writer_bytes(&sw))
+		cache.has_sequence = true
+	}
+	{
+		ow := wire.writer_init(context.temp_allocator)
+		for i in 0 ..< len(tx.outputs) {
+			wire.serialize_tx_out(&ow, &tx.outputs[i])
+		}
+		cache.hash_outputs = crypto.sha256d(wire.writer_bytes(&ow))
+		cache.has_outputs = true
+	}
+
+	// BIP341 (single SHA256) — use existing Taproot helpers
+	cache.tap_prevouts = _sha256_prevouts(tx)
+	cache.has_tap_prevouts = true
+
+	cache.tap_amounts = _sha256_amounts(spent_outputs)
+	cache.has_tap_amounts = true
+
+	cache.tap_script_pubkeys = _sha256_script_pubkeys(spent_outputs)
+	cache.has_tap_script_pubkeys = true
+
+	cache.tap_sequences = _sha256_sequences(tx)
+	cache.has_tap_sequences = true
+
+	cache.tap_outputs = _sha256_outputs(tx)
+	cache.has_tap_outputs = true
+}
+
 // --- Script Verifier ---
 
 Script_Verifier :: struct {
@@ -356,10 +403,14 @@ execute_script :: proc(
 	}
 
 	op_count := 0
-	code_sep_pos := 0 // position of last OP_CODESEPARATOR
+	code_sep_pos := 0 // position of last OP_CODESEPARATOR (byte offset for legacy)
+	opcode_idx := 0   // opcode index for BIP342 code_separator_pos
 
 	pos := 0
 	for pos < len(script) {
+		cur_opcode_idx := opcode_idx
+		opcode_idx += 1
+
 		op := script[pos]
 		pos += 1
 
@@ -711,9 +762,9 @@ execute_script :: proc(
 
 		// --- Signature operations ---
 		case .OP_CODESEPARATOR:
-			code_sep_pos = pos
+			code_sep_pos = pos // byte offset for legacy FindAndDelete
 			if codesep_pos != nil {
-				codesep_pos^ = u32(pos)
+				codesep_pos^ = u32(cur_opcode_idx) // BIP342: opcode index, not byte offset
 			}
 
 		case .OP_CHECKSIG, .OP_CHECKSIGVERIFY:

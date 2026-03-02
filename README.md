@@ -6,13 +6,13 @@ This is an educational/experimental project. It implements the core components o
 
 ## Status
 
-**191 tests passing** across 9 packages. Successfully syncs the full signet blockchain (~294k blocks) with script verification.
+**193 tests passing** across 9 packages. Successfully syncs the full signet blockchain (~294k blocks) with script verification.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
 | 0 | Crypto + C Bindings | Complete (24 tests) |
 | 1 | Wire Protocol + Serialization | Complete (24 tests) |
-| 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH, Taproot) | Complete (45 tests) |
+| 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH, Taproot) | Complete (47 tests) |
 | 3 | Consensus Rules + Block Validation | Complete (15 tests) |
 | 4 | UTXO Set + Chain State | Complete (8 tests) |
 | 5 | Persistent Storage (LevelDB) | Complete (13 tests) |
@@ -29,6 +29,7 @@ This is an educational/experimental project. It implements the core components o
 | 16 | Address Encoding (Base58Check + Bech32/Bech32m) | Complete |
 | 17 | RPC Enrichment (getpeerinfo, mining, network, validation) | Complete |
 | 18 | Configurable `--dbcache` (Bitcoin Core style) | Complete |
+| 19 | Parallel Script Verification (`--par`) | Complete |
 
 ## Dependencies
 
@@ -101,6 +102,7 @@ The binary is output as `btcnode` in the project root.
 | `--no-p2p` | Disable P2P (RPC-only mode) | `false` |
 | `--mempoolfullrbf=<0\|1>` | Allow full RBF replacement | `1` |
 | `--dbcache=<MB>` | Database cache size in MiB | `450` |
+| `--par=<N>` | Script verification threads (0=auto, 1=serial, 2+=parallel) | `0` |
 
 ### Config File
 
@@ -117,6 +119,7 @@ connect=127.0.0.1:18444
 no-p2p=1
 mempoolfullrbf=1
 dbcache=450
+par=0
 
 # Network-specific sections override global values
 [regtest]
@@ -199,13 +202,13 @@ bitcoin-cli -rpcport=18443 getblockchaininfo
 ## Testing
 
 ```bash
-# Run all 191 tests
+# Run all 193 tests
 make test
 
 # Test individual packages
 odin test crypto          # 24 tests
 odin test wire            # 24 tests
-odin test script          # 45 tests (use -define:ODIN_TEST_THREADS=1 if flaky)
+odin test script          # 47 tests (use -define:ODIN_TEST_THREADS=1 if flaky)
 odin test consensus       # 15 tests
 odin test storage         # 13 tests
 odin test chain           #  8 tests
@@ -261,7 +264,6 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 
 ### Performance
 
-- **Parallel script verification** — Currently single-threaded; matters for mainnet
 - **Snappy compression for LevelDB** — Would reduce disk usage for mainnet
 
 ### Protocol Enhancements
@@ -275,7 +277,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 
 ## Architecture Notes
 
-- **Thread model**: Main thread (setup + wait), RPC thread, P2P thread, one reader thread per peer
+- **Thread model**: Main thread (setup + wait), RPC thread, P2P thread, one reader thread per peer, N script verification worker threads (`--par`)
 - **Graceful shutdown**: SIGINT/SIGTERM triggers mempool save, atomic UTXO + metadata flush to LevelDB, then clean exit
 - **Headers-first sync**: Single lead peer downloads headers via `getheaders`/`headers`, with automatic failover if the lead disconnects. Headers are batched into single WriteBatch transactions (up to 2000 per batch)
 - **Multi-peer block download**: Round-robin block requests across all active peers (up to 8), with bandwidth-based scoring — fast peers get more slots (up to 64), slow peers get fewer (minimum 4), new peers get a trial allocation of 8 blocks
@@ -285,13 +287,14 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Write-back UTXO cache**: In-memory cache with dirty/fresh flags, flushed atomically to LevelDB when memory usage exceeds the configurable budget (`--dbcache`, default 450 MiB). Rollback support for failed block validation
 - **Block index**: In-memory tree with skip list pointers for O(log n) ancestor lookup, persisted to LevelDB
 - **Sighash caching**: BIP143 (SegWit v0) and BIP341 (Taproot) intermediate hashes are cached per-transaction, avoiding O(n^2) re-computation for transactions with many inputs
-- **Per-input verification arena**: A 2MB heap-allocated scratch arena is reset between each input's script verification, preventing sighash writer accumulation from exhausting the 64MB block arena on large transactions
+- **Parallel script verification**: Two-phase block validation — Phase 1 processes UTXO updates sequentially (single-threaded, no locking), Phase 2 dispatches all script checks to a persistent thread pool (`--par=N`). Sighash caches are eagerly pre-computed before dispatch so workers read immutable data without synchronization. Serial fallback for small blocks (<16 inputs) or `--par=1`
+- **Per-input verification arena**: A 2MB heap-allocated scratch arena is reset between each input's script verification (serial path), preventing sighash writer accumulation from exhausting the 64MB block arena on large transactions. Parallel workers each allocate their own 2MB arena
 - **Mempool persistence**: Mempool is saved to `<datadir>/mempool.dat` on shutdown and reloaded/revalidated on startup
 - **Transaction relay**: P2P `inv`/`tx`/`getdata` handling for propagating mempool transactions to peers
 - **RBF (BIP125)**: Full replace-by-fee support — signaling check (opt-in or fullrbf), no new unconfirmed parents, higher absolute fee, bandwidth fee, max 100 evictions
 - **Address encoding**: Base58Check (P2PKH, P2SH) and Bech32/Bech32m (P2WPKH, P2WSH, P2TR) for both encoding and decoding, with network-aware validation
 - **Configurable DB cache**: `--dbcache` controls total database memory (default 450 MiB), split following Bitcoin Core's algorithm — small LevelDB caches (2-8 MiB), large in-memory coins cache (~440 MiB). Lower values reduce RAM usage at the cost of more frequent UTXO flushes during sync
-- **Assumevalid**: Skips script verification for blocks below a configured height (250,050 for signet) for faster initial sync
+- **Assumevalid**: Skips script verification for blocks below a configured height (267,665 for signet) for faster initial sync
 - **No external Odin dependencies**: Only `core:` and `base:` standard library packages
 
 ## License

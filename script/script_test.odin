@@ -939,6 +939,217 @@ test_signet_250058_tx11_p2wpkh :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_signet_2148_tx1_two_phase :: proc(t: ^testing.T) {
+	// Regression test: signet block 2148, tx index 1.
+	// This tx has 400 P2WPKH inputs. It exposed a use-after-free bug in the
+	// two-phase connect_block restructuring: spent_outputs[].script_pubkey
+	// pointed to cache-owned data that was freed by coins_cache_spend before
+	// Phase 2 script verification could read it, causing Eval_False / Script_Too_Large.
+	// Fix: clone script_pubkey to temp_allocator before spending.
+	//
+	// This test verifies that all 400 inputs pass script verification when
+	// prevout scripts are properly preserved (simulating the cloned data path).
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	src_dir := #location().file_path
+	base_dir := src_dir[:strings.last_index(src_dir, "/")]
+	tx_hex_raw, tx_ok := os.read_entire_file(fmt.tprintf("%s/testdata/signet_2148_tx1.hex", base_dir))
+	if !tx_ok {
+		testing.expect(t, false, "failed to read testdata/signet_2148_tx1.hex")
+		return
+	}
+	defer delete(tx_hex_raw)
+
+	tx_hex_str := strings.trim_space(string(tx_hex_raw))
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str)
+	if !hex_ok {
+		testing.expect(t, false, "failed to hex-decode tx")
+		return
+	}
+	defer delete(tx_bytes)
+
+	r := wire.reader_init(tx_bytes)
+	tx, tx_err := wire.deserialize_tx(&r)
+	if tx_err != nil {
+		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
+		return
+	}
+
+	testing.expect_value(t, len(tx.inputs), 400)
+	testing.expect_value(t, len(tx.outputs), 2)
+	testing.expect_value(t, len(tx.witness), 400)
+
+	// Read prevout data
+	prevout_raw, prev_ok := os.read_entire_file(fmt.tprintf("%s/testdata/signet_2148_tx1_prevouts.txt", base_dir))
+	if !prev_ok {
+		testing.expect(t, false, "failed to read prevouts file")
+		return
+	}
+	defer delete(prevout_raw)
+
+	spent_outputs := make([]wire.Tx_Out, len(tx.inputs))
+	defer delete(spent_outputs)
+
+	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n")
+	defer delete(lines)
+	testing.expect_value(t, len(lines), 400)
+
+	for i in 0 ..< len(lines) {
+		parts := strings.split(lines[i], " ")
+		defer delete(parts)
+		value, val_ok := strconv.parse_i64(parts[0])
+		if !val_ok { continue }
+		spk, spk_ok := hex.decode(transmute([]u8)parts[1])
+		if !spk_ok { continue }
+		spent_outputs[i] = wire.Tx_Out{value = value, script_pubkey = spk}
+	}
+
+	// Use a 2MB arena to verify scripts (same as connect_block's per-input arena).
+	arena_buf := make([]byte, 2 * 1024 * 1024)
+	defer delete(arena_buf)
+	arena: mem.Arena
+	mem.arena_init(&arena, arena_buf)
+	alloc := mem.arena_allocator(&arena)
+
+	prev_temp := context.temp_allocator
+	context.temp_allocator = alloc
+	defer { context.temp_allocator = prev_temp }
+
+	flags := Verify_Flags{.P2SH, .DER_Sig, .Strict_Enc, .Check_Locktime, .Check_Sequence,
+	                       .Witness, .Null_Dummy, .Low_S, .Null_Fail, .Witness_Pub_Key_Compressed}
+
+	// Pre-compute sighash cache (as two-phase connect_block does)
+	sighash_cache: Sighash_Cache
+	sighash_cache_precompute(&sighash_cache, &tx, spent_outputs)
+
+	verified := 0
+	for in_idx in 0 ..< len(tx.inputs) {
+		mem.arena_free_all(&arena)
+
+		verifier := Script_Verifier {
+			tx            = &tx,
+			input_idx     = in_idx,
+			amount        = spent_outputs[in_idx].value,
+			flags         = flags,
+			spent_outputs = spent_outputs,
+			sighash_cache = &sighash_cache,
+		}
+
+		witness: [][]byte
+		if len(tx.witness) > in_idx {
+			witness = tx.witness[in_idx]
+		}
+
+		serr := verify_script(
+			&verifier,
+			tx.inputs[in_idx].script_sig,
+			spent_outputs[in_idx].script_pubkey,
+			witness,
+		)
+		if serr != .None {
+			testing.expect(t, false, fmt.tprintf("script verification failed at input %d: %v", in_idx, serr))
+			return
+		}
+		verified += 1
+	}
+
+	testing.expect_value(t, verified, 400)
+}
+
+@(test)
+test_signet_90719_tapscript_codeseparator :: proc(t: ^testing.T) {
+	// Regression test: signet block 90719, tx index 9.
+	// Taproot script path spend with OP_CODESEPARATOR in the tapscript:
+	//   <pk1> OP_CHECKSIGVERIFY OP_CODESEPARATOR <pk2> OP_CHECKSIGVERIFY OP_CODESEPARATOR <pk3> OP_CHECKSIG
+	// BIP342 requires code_separator_pos to be the OPCODE INDEX (not byte offset).
+	// Before fix, code_separator_pos was set to the byte offset, causing wrong sighash
+	// and Eval_False for all Schnorr signatures after an OP_CODESEPARATOR.
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	src_dir := #location().file_path
+	base_dir := src_dir[:strings.last_index(src_dir, "/")]
+	tx_hex_raw, tx_ok := os.read_entire_file(fmt.tprintf("%s/testdata/signet_90719_tx9.hex", base_dir))
+	if !tx_ok {
+		testing.expect(t, false, "failed to read testdata/signet_90719_tx9.hex")
+		return
+	}
+	defer delete(tx_hex_raw)
+
+	tx_hex_str := strings.trim_space(string(tx_hex_raw))
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str)
+	if !hex_ok {
+		testing.expect(t, false, "failed to hex-decode tx")
+		return
+	}
+	defer delete(tx_bytes)
+
+	r := wire.reader_init(tx_bytes)
+	tx, tx_err := wire.deserialize_tx(&r)
+	if tx_err != nil {
+		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
+		return
+	}
+
+	testing.expect_value(t, len(tx.inputs), 1)
+	testing.expect_value(t, len(tx.outputs), 1)
+	testing.expect_value(t, len(tx.witness), 1)
+	testing.expect(t, len(tx.witness[0]) == 5, "expected 5 witness items (3 sigs + script + control)")
+
+	// Read prevout data
+	prevout_raw, prev_ok := os.read_entire_file(fmt.tprintf("%s/testdata/signet_90719_tx9_prevouts.txt", base_dir))
+	if !prev_ok {
+		testing.expect(t, false, "failed to read prevouts file")
+		return
+	}
+	defer delete(prevout_raw)
+
+	spent_outputs := make([]wire.Tx_Out, 1)
+	defer delete(spent_outputs)
+
+	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n")
+	defer delete(lines)
+
+	parts := strings.split(lines[0], " ")
+	defer delete(parts)
+	value, _ := strconv.parse_i64(parts[0])
+	spk, _ := hex.decode(transmute([]u8)parts[1])
+	spent_outputs[0] = wire.Tx_Out{value = value, script_pubkey = spk}
+
+	arena_buf := make([]byte, 2 * 1024 * 1024)
+	defer delete(arena_buf)
+	arena: mem.Arena
+	mem.arena_init(&arena, arena_buf)
+	alloc := mem.arena_allocator(&arena)
+
+	prev_temp := context.temp_allocator
+	context.temp_allocator = alloc
+	defer { context.temp_allocator = prev_temp }
+
+	flags := Verify_Flags{.P2SH, .DER_Sig, .Strict_Enc, .Check_Locktime, .Check_Sequence,
+	                       .Witness, .Null_Dummy, .Low_S, .Null_Fail, .Witness_Pub_Key_Compressed}
+
+	sighash_cache: Sighash_Cache
+	verifier := Script_Verifier {
+		tx            = &tx,
+		input_idx     = 0,
+		amount        = spent_outputs[0].value,
+		flags         = flags,
+		spent_outputs = spent_outputs,
+		sighash_cache = &sighash_cache,
+	}
+
+	serr := verify_script(
+		&verifier,
+		tx.inputs[0].script_sig,
+		spent_outputs[0].script_pubkey,
+		tx.witness[0],
+	)
+	testing.expect(t, serr == .None, fmt.tprintf("script verification failed: %v", serr))
+}
+
+@(test)
 test_signet_250183_p2a_anchor :: proc(t: ^testing.T) {
 	// Regression test: signet block 250183, tx index 33.
 	// This tx spends a P2A (Pay-to-Anchor) output: witness v1, 2-byte program (51024e73).

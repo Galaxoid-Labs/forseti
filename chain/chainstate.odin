@@ -3,6 +3,9 @@ package chain
 import "core:log"
 import "core:mem"
 import "core:os"
+import "core:sync"
+import "core:thread"
+import "core:time"
 import "../consensus"
 import "../crypto"
 import "../script"
@@ -10,23 +13,28 @@ import "../storage"
 import "../wire"
 
 Chain_State :: struct {
-	block_index:  Block_Index,
-	store:        storage.LDB_Store,
-	index_db:     storage.Index_DB,
-	block_db:     storage.Block_DB,
-	utxo_db:      storage.UTXO_DB,
-	coins:        Coins_Cache,
-	active_chain: [dynamic]Hash256,
-	undo_files:   storage.Flat_File_Manager,
-	params:       ^consensus.Chain_Params,
-	// Per-input verification arena: heap-allocated once, reset between inputs.
-	verify_buf:   []byte,
-	verify_arena: mem.Arena,
-	verify_alloc: mem.Allocator,
+	block_index:    Block_Index,
+	store:          storage.LDB_Store,
+	index_db:       storage.Index_DB,
+	block_db:       storage.Block_DB,
+	utxo_db:        storage.UTXO_DB,
+	coins:          Coins_Cache,
+	active_chain:   [dynamic]Hash256,
+	undo_files:     storage.Flat_File_Manager,
+	params:         ^consensus.Chain_Params,
+	// Per-input verification arena: heap-allocated once, reset between inputs (serial path).
+	verify_buf:     []byte,
+	verify_arena:   mem.Arena,
+	verify_alloc:   mem.Allocator,
+	// Parallel script verification
+	verify_pool:    thread.Pool,
+	verify_wg:      sync.Wait_Group,
+	script_threads: int, // >= 2 = parallel (pool active), < 2 = serial (no pool)
 }
 
 // Initialize chain state. Caller allocates Chain_State and passes pointer.
-chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.Chain_Params, db_cache_mb: int = 450) -> Chain_Error {
+// script_threads: 0 or 1 = serial verification, >= 2 = parallel with N worker threads.
+chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.Chain_Params, db_cache_mb: int = 450, script_threads: int = 0) -> Chain_Error {
 	cs.params = params
 
 	// Ensure data_dir exists
@@ -100,6 +108,13 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	mem.arena_init(&cs.verify_arena, cs.verify_buf)
 	cs.verify_alloc = mem.arena_allocator(&cs.verify_arena)
 
+	// Initialize parallel script verification thread pool
+	cs.script_threads = script_threads
+	if script_threads >= 2 {
+		thread.pool_init(&cs.verify_pool, context.allocator, script_threads)
+		thread.pool_start(&cs.verify_pool)
+	}
+
 	// Connect any stored-but-not-connected blocks from a previous session.
 	pending_connected, _ := connect_pending_blocks(cs)
 	if pending_connected > 0 {
@@ -112,6 +127,12 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 
 // Destroy chain state, flushing everything to disk.
 chain_state_destroy :: proc(cs: ^Chain_State) {
+	// Shut down parallel verification pool before flushing
+	if cs.script_threads >= 2 {
+		thread.pool_join(&cs.verify_pool)
+		thread.pool_destroy(&cs.verify_pool)
+	}
+
 	tip_hash, tip_height := chain_tip(cs)
 	coins_cache_flush(&cs.coins, tip_hash, tip_height)
 	coins_cache_destroy(&cs.coins)
@@ -152,6 +173,7 @@ chain_header_height :: proc(cs: ^Chain_State) -> int {
 // Connect a block to the active chain tip.
 connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_Entry) -> Chain_Error {
 	height := entry.height
+	block_start := time.tick_now()
 
 	// 1. Context-free validation
 	block_val := block^
@@ -188,11 +210,11 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 		}
 	}
 
-	// 4. Process non-coinbase transactions: validate, spend inputs, add outputs.
-	//    Each tx is processed atomically so later transactions in the same block
-	//    can spend outputs created by earlier ones (intra-block spending).
-	//    On failure, all changes from prior txs are rolled back so the UTXO cache
-	//    remains consistent (critical for block retry after Bad_Script etc.).
+	// 4. Two-phase block validation:
+	//    Phase 1: Process UTXO updates sequentially (spend inputs, add outputs, collect fees).
+	//             Collect script checks for deferred verification.
+	//    Phase 2: Verify all script checks (parallel or serial).
+	//    On failure, all UTXO changes are rolled back atomically.
 	total_fees: i64 = 0
 	script_flags := consensus.get_script_flags(height, cs.params)
 	skip_scripts := cs.params.assumevalid_height > 0 && height <= cs.params.assumevalid_height
@@ -200,14 +222,14 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 	undo_coins := make([dynamic]Undo_Coin, 0, 64, context.temp_allocator)
 	applied_tx_indices := make([dynamic]int, 0, len(block.txs), context.temp_allocator)
 
-	// Per-input verification arena: sighash computation allocates wire writers
-	// on temp_allocator. For txs with hundreds of inputs, these accumulate and
-	// exhaust the block arena. The Chain_State's persistent 2MB scratch arena
-	// is reset between inputs to bound memory usage.
+	// Script check batch: pre-allocate capacity to avoid reallocation (keeps pointers stable).
+	batch: Script_Check_Batch
 	if !skip_scripts {
-		mem.arena_free_all(&cs.verify_arena)
+		batch.checks = make([dynamic]Script_Check, 0, 256, context.temp_allocator)
+		batch.caches = make([dynamic]script.Sighash_Cache, 0, len(block.txs), context.temp_allocator)
 	}
 
+	// --- Phase 1: UTXO processing + check collection ---
 	for tx_idx in 0 ..< len(block.txs) {
 		tx := block.txs[tx_idx]
 
@@ -234,61 +256,43 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 				}
 			}
 
+			// Clone script to temp_allocator — coins_cache_spend (step 4d)
+			// frees the cache-owned script, so we need a copy that survives
+			// through Phase 2 script verification.
+			script_clone := make([]byte, len(coin.script), context.temp_allocator)
+			copy(script_clone, coin.script)
 			spent_outputs[in_idx] = wire.Tx_Out {
 				value         = coin.amount,
-				script_pubkey = coin.script,
+				script_pubkey = script_clone,
 			}
 			input_sum += coin.amount
 		}
 
-		// 4b. Script verification (skipped under assumevalid)
+		// 4b. Collect script checks (skipped under assumevalid)
 		if !skip_scripts {
-			sighash_cache: script.Sighash_Cache
-			saved_temp := context.temp_allocator
+			cache_idx := len(batch.caches)
+			append(&batch.caches, script.Sighash_Cache{})
+			script.sighash_cache_precompute(&batch.caches[cache_idx], &block.txs[tx_idx], spent_outputs)
 
 			for in_idx in 0 ..< len(tx.inputs) {
-				mem.arena_free_all(&cs.verify_arena)
-				context.temp_allocator = cs.verify_alloc
-
-				verifier := script.Script_Verifier {
+				witness: [][]byte
+				if len(tx.witness) > in_idx {
+					witness = tx.witness[in_idx]
+				}
+				append(&batch.checks, Script_Check{
 					tx            = &block.txs[tx_idx],
 					input_idx     = in_idx,
 					amount        = spent_outputs[in_idx].value,
 					flags         = script_flags,
 					spent_outputs = spent_outputs,
-					sighash_cache = &sighash_cache,
-				}
-
-				witness: [][]byte
-				if len(tx.witness) > in_idx {
-					witness = tx.witness[in_idx]
-				}
-
-				serr := script.verify_script(
-					&verifier,
-					tx.inputs[in_idx].script_sig,
-					spent_outputs[in_idx].script_pubkey,
-					witness,
-				)
-				if serr != .None {
-					context.temp_allocator = saved_temp
-					txid := wire.tx_id(&block.txs[tx_idx])
-					// Log txid in display order (reversed)
-					txid_rev: Hash256
-					for b in 0 ..< 32 { txid_rev[b] = txid[31 - b] }
-					log.errorf(
-						"Script FAIL height=%d tx_idx=%d in_idx=%d/%d err=%v txid=%02x%02x%02x%02x%02x%02x%02x%02x... scriptPubKey_len=%d num_inputs=%d",
-						height, tx_idx, in_idx, len(tx.inputs), serr,
-						txid_rev[0], txid_rev[1], txid_rev[2], txid_rev[3],
-						txid_rev[4], txid_rev[5], txid_rev[6], txid_rev[7],
-						len(spent_outputs[in_idx].script_pubkey), len(tx.inputs),
-					)
-					_rollback_applied_txs(cs, block, applied_tx_indices[:], undo_coins[:])
-					return .Bad_Script
-				}
+					sighash_cache = &batch.caches[cache_idx],
+					script_sig    = tx.inputs[in_idx].script_sig,
+					script_pubkey = spent_outputs[in_idx].script_pubkey,
+					witness       = witness,
+					tx_idx        = tx_idx,
+					height        = height,
+				})
 			}
-
-			context.temp_allocator = saved_temp
 		}
 
 		// 4c. Fees
@@ -323,6 +327,23 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 		}
 
 		append(&applied_tx_indices, tx_idx)
+	}
+
+	// --- Phase 2: Script verification (all checks at once) ---
+	script_elapsed: time.Duration
+	if !skip_scripts && len(batch.checks) > 0 {
+		script_start := time.tick_now()
+		serr: script.Script_Error
+		if cs.script_threads >= 2 && len(batch.checks) >= PARALLEL_THRESHOLD {
+			serr = verify_checks_parallel(&cs.verify_pool, &cs.verify_wg, batch.checks[:], height)
+		} else {
+			serr = verify_checks_serial(cs, batch.checks[:], height)
+		}
+		script_elapsed = time.tick_diff(script_start, time.tick_now())
+		if serr != .None {
+			_rollback_applied_txs(cs, block, applied_tx_indices[:], undo_coins[:])
+			return .Bad_Script
+		}
 	}
 
 	// 5. Verify coinbase value <= subsidy + total_fees
@@ -369,6 +390,19 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 	storage.index_db_put(&cs.index_db, rec)
 
 	append(&cs.active_chain, entry.hash)
+
+	// Timing log for blocks with script verification
+	total_elapsed := time.tick_diff(block_start, time.tick_now())
+	num_checks := len(batch.checks) if !skip_scripts else 0
+	if num_checks > 0 {
+		total_ms := time.duration_milliseconds(total_elapsed)
+		script_ms := time.duration_milliseconds(script_elapsed)
+		mode := "parallel" if (cs.script_threads >= 2 && num_checks >= PARALLEL_THRESHOLD) else "serial"
+		log.debugf(
+			"Block %d: %d txs, %d checks (%s), script=%.1fms total=%.1fms",
+			height, len(block.txs), num_checks, mode, script_ms, total_ms,
+		)
+	}
 
 	return .None
 }

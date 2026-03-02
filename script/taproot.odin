@@ -281,7 +281,7 @@ compute_sighash_taproot :: proc(
 		if cache != nil && cache.has_tap_amounts {
 			ha = cache.tap_amounts
 		} else {
-			ha = _sha256_amounts(verifier)
+			ha = _sha256_amounts(verifier.spent_outputs)
 			if cache != nil { cache.tap_amounts = ha; cache.has_tap_amounts = true }
 		}
 		wire.write_hash(&w, ha)
@@ -290,7 +290,7 @@ compute_sighash_taproot :: proc(
 		if cache != nil && cache.has_tap_script_pubkeys {
 			hsp = cache.tap_script_pubkeys
 		} else {
-			hsp = _sha256_script_pubkeys(verifier)
+			hsp = _sha256_script_pubkeys(verifier.spent_outputs)
 			if cache != nil { cache.tap_script_pubkeys = hsp; cache.has_tap_script_pubkeys = true }
 		}
 		wire.write_hash(&w, hsp)
@@ -381,21 +381,21 @@ _sha256_prevouts :: proc(tx: ^wire.Tx) -> Hash256 {
 	return crypto.sha256_hash(wire.writer_bytes(&w))
 }
 
-_sha256_amounts :: proc(verifier: ^Script_Verifier) -> Hash256 {
+_sha256_amounts :: proc(spent_outputs: []wire.Tx_Out) -> Hash256 {
 	w := wire.writer_init(context.temp_allocator)
-	if verifier.spent_outputs != nil {
-		for i in 0 ..< len(verifier.spent_outputs) {
-			wire.write_i64le(&w, verifier.spent_outputs[i].value)
+	if spent_outputs != nil {
+		for i in 0 ..< len(spent_outputs) {
+			wire.write_i64le(&w, spent_outputs[i].value)
 		}
 	}
 	return crypto.sha256_hash(wire.writer_bytes(&w))
 }
 
-_sha256_script_pubkeys :: proc(verifier: ^Script_Verifier) -> Hash256 {
+_sha256_script_pubkeys :: proc(spent_outputs: []wire.Tx_Out) -> Hash256 {
 	w := wire.writer_init(context.temp_allocator)
-	if verifier.spent_outputs != nil {
-		for i in 0 ..< len(verifier.spent_outputs) {
-			wire.write_var_bytes(&w, verifier.spent_outputs[i].script_pubkey)
+	if spent_outputs != nil {
+		for i in 0 ..< len(spent_outputs) {
+			wire.write_var_bytes(&w, spent_outputs[i].script_pubkey)
 		}
 	}
 	return crypto.sha256_hash(wire.writer_bytes(&w))
