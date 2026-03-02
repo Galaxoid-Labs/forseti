@@ -25,12 +25,16 @@ Block_Index_Record :: struct {
 	bits:        u32,
 	nonce:       u32,
 	status:      Block_Status,
+	num_tx:      u32,
 }
 
 // Fixed size of a record on disk:
 // length(4) + hash(32) + prev_hash(32) + height(4) + file_num(4) + data_offset(4) + data_size(4) +
-// version(4) + timestamp(4) + bits(4) + nonce(4) + status(1) = 101 bytes
-BLOCK_INDEX_RECORD_SIZE :: 101
+// version(4) + timestamp(4) + bits(4) + nonce(4) + status(1) + num_tx(4) = 105 bytes
+BLOCK_INDEX_RECORD_SIZE :: 105
+
+// Legacy record size (before num_tx was added). Used for backward-compatible deserialization.
+BLOCK_INDEX_RECORD_SIZE_LEGACY :: 101
 
 Index_DB :: struct {
 	store:   ^LDB_Store,
@@ -50,7 +54,7 @@ index_db_init :: proc(store: ^LDB_Store, allocator := context.allocator) -> (db:
 	for leveldb_iter_valid(iter) != 0 {
 		vlen: c.size_t
 		vptr := leveldb_iter_value(iter, &vlen)
-		if vlen >= c.size_t(BLOCK_INDEX_RECORD_SIZE) {
+		if vlen >= c.size_t(BLOCK_INDEX_RECORD_SIZE_LEGACY) {
 			data := vptr[:vlen]
 			rec, ok := _deserialize_index_record(data)
 			if ok {
@@ -206,10 +210,17 @@ _serialize_index_record :: proc(buf: ^[BLOCK_INDEX_RECORD_SIZE]byte, rec: Block_
 
 	// status (1)
 	buf[off] = transmute(u8)rec.status
+	off += 1
+
+	// num_tx (4 LE)
+	buf[off] = byte(rec.num_tx); off += 1
+	buf[off] = byte(rec.num_tx >> 8); off += 1
+	buf[off] = byte(rec.num_tx >> 16); off += 1
+	buf[off] = byte(rec.num_tx >> 24); off += 1
 }
 
 _deserialize_index_record :: proc(data: []byte) -> (rec: Block_Index_Record, ok: bool) {
-	if len(data) < BLOCK_INDEX_RECORD_SIZE {
+	if len(data) < BLOCK_INDEX_RECORD_SIZE_LEGACY {
 		return {}, false
 	}
 
@@ -264,6 +275,12 @@ _deserialize_index_record :: proc(data: []byte) -> (rec: Block_Index_Record, ok:
 
 	// status (1)
 	rec.status = transmute(Block_Status)data[off]
+	off += 1
+
+	// num_tx (4 LE) — only present in new format (105+ bytes)
+	if len(data) >= BLOCK_INDEX_RECORD_SIZE {
+		rec.num_tx = u32(data[off]) | u32(data[off + 1]) << 8 | u32(data[off + 2]) << 16 | u32(data[off + 3]) << 24
+	}
 
 	return rec, true
 }

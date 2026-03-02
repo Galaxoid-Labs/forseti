@@ -223,6 +223,8 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_testmempoolaccept(srv, req.params)
 	case "getchaintips":
 		return _handle_getchaintips(srv, req.params)
+	case "getchaintxstats":
+		return _handle_getchaintxstats(srv, req.params)
 	case "getblockstats":
 		return _handle_getblockstats(srv, req.params)
 	case "help":

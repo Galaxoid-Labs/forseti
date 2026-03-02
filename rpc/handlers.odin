@@ -1052,6 +1052,108 @@ _mempool_error_string :: proc(err: mempool.Mempool_Error) -> string {
 
 // --- getchaintips ---
 
+_handle_getchaintxstats :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	chain_h := chain.chain_height(srv.chain)
+	if chain_h < 0 {
+		return _make_error(.Internal_Error, "Chain not initialized", srv._current_id)
+	}
+
+	// Default window: min(chain_height, 30 days of blocks at 10-min intervals)
+	default_window := chain_h
+	if default_window > 30 * 24 * 6 {
+		default_window = 30 * 24 * 6
+	}
+
+	// Parse optional nblocks (param 0)
+	nblocks := default_window
+	nblocks_val, nblocks_ok := _get_int_param(params, 0)
+	if nblocks_ok {
+		nblocks = nblocks_val
+	}
+
+	// Parse optional blockhash (param 1) — defaults to chain tip
+	end_hash: Hash256
+	hash_hex, hash_ok := _get_string_param(params, 1)
+	if hash_ok {
+		h, h_ok := _hex_to_hash(hash_hex)
+		if !h_ok {
+			return _make_error(.Invalid_Params, "Invalid block hash", srv._current_id)
+		}
+		end_hash = h
+	} else {
+		end_hash = srv.chain.active_chain[chain_h]
+	}
+
+	end_entry, found := srv.chain.block_index.entries[end_hash]
+	if !found {
+		return _make_error(.Block_Not_Found, "Block not found", srv._current_id)
+	}
+
+	if nblocks < 0 || nblocks > end_entry.height {
+		return _make_error(.Invalid_Params, "Invalid nblocks", srv._current_id)
+	}
+
+	// Walk backward from end_entry for nblocks to find start_entry
+	start_entry := chain.block_index_get_ancestor(end_entry, end_entry.height - nblocks)
+	if start_entry == nil {
+		return _make_error(.Internal_Error, "Failed to find ancestor block", srv._current_id)
+	}
+
+	// Compute window_tx_count by walking from start+1 to end
+	window_tx_count: i64 = 0
+	if end_entry.chain_tx > 0 && start_entry.chain_tx > 0 {
+		// Fast path: use precomputed cumulative counts
+		window_tx_count = end_entry.chain_tx - start_entry.chain_tx
+	} else {
+		// Slow path: walk the window and sum num_tx, reading from disk if needed
+		current := end_entry
+		for current != nil && current.height > start_entry.height {
+			if current.num_tx > 0 {
+				window_tx_count += i64(current.num_tx)
+			} else if .Has_Data in current.status {
+				// Read block from disk to count txs
+				loc := storage.Block_Location {
+					file_num    = current.file_num,
+					data_offset = current.data_offset,
+					data_size   = current.data_size,
+				}
+				block, berr := storage.block_db_read(&srv.chain.block_db, loc, context.temp_allocator)
+				if berr == .None {
+					window_tx_count += i64(len(block.txs))
+				}
+			}
+			current = current.prev
+		}
+	}
+
+	// Compute window interval
+	window_interval := i64(end_entry.timestamp) - i64(start_entry.timestamp)
+
+	obj := make(json.Object, 8, context.temp_allocator)
+	obj["time"] = json.Value(json.Integer(i64(end_entry.timestamp)))
+	obj["window_final_block_hash"] = json.Value(json.String(_hash_to_hex(end_entry.hash)))
+	obj["window_final_block_height"] = json.Value(json.Integer(end_entry.height))
+	obj["window_block_count"] = json.Value(json.Integer(nblocks))
+
+	if nblocks > 0 {
+		obj["window_tx_count"] = json.Value(json.Integer(window_tx_count))
+		obj["window_interval"] = json.Value(json.Integer(window_interval))
+		if window_interval > 0 {
+			txrate := f64(window_tx_count) / f64(window_interval)
+			obj["txrate"] = json.Value(json.Float(txrate))
+		}
+	}
+
+	// Include txcount (cumulative) only if chain_tx is populated
+	if end_entry.chain_tx > 0 {
+		obj["txcount"] = json.Value(json.Integer(end_entry.chain_tx))
+	}
+
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// --- getchaintips ---
+
 _handle_getchaintips :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 	// Build set of hashes that are referenced as prev_hash (i.e., have children)
 	has_child := make(map[Hash256]bool, len(srv.chain.block_index.entries), context.temp_allocator)
@@ -1266,6 +1368,7 @@ RPC_METHODS := [?]string{
 	"getblockheader",
 	"getblockstats",
 	"getchaintips",
+	"getchaintxstats",
 	"getconnectioncount",
 	"getdifficulty",
 	"getmempoolentry",
@@ -1345,6 +1448,7 @@ _get_method_help :: proc(method: string) -> string {
 	case "getmempoolentry":      return "getmempoolentry \"txid\"\nReturns mempool data for given transaction."
 	case "testmempoolaccept":    return "testmempoolaccept [\"rawtx\",...]\nReturns result of mempool acceptance tests."
 	case "getchaintips":         return "getchaintips\nReturn information about all known tips in the block tree."
+	case "getchaintxstats":      return "getchaintxstats ( nblocks \"blockhash\" )\nCompute statistics about the total number and rate of transactions in the chain."
 	case "getblockstats":        return "getblockstats hash_or_height\nCompute per block statistics for a given window."
 	case "help":                 return "help ( \"method\" )\nList all commands, or get help for a specified command."
 	case "getmininginfo":        return "getmininginfo\nReturns a json object containing mining-related information."

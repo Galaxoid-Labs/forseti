@@ -1756,6 +1756,90 @@ _base58_encode_test :: proc(data: []byte) -> string {
 }
 
 @(test)
+test_rpc_getchaintxstats :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "txstats", 10)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	// Default params (full chain window)
+	resp := _handle_getchaintxstats(srv, nil)
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error with default params")
+
+	obj, ok := resp.result.(json.Object)
+	testing.expect(t, ok, "result should be object")
+	if !ok { return }
+
+	// Check required fields
+	_, has_time := obj["time"]
+	testing.expect(t, has_time, "should have 'time' field")
+
+	wbh, has_wbh := obj["window_final_block_height"]
+	testing.expect(t, has_wbh, "should have 'window_final_block_height' field")
+	if has_wbh {
+		h, h_ok := wbh.(json.Integer)
+		testing.expect(t, h_ok && int(h) == 9, fmt.tprintf("window_final_block_height should be 9, got %v", wbh))
+	}
+
+	wtc, has_wtc := obj["window_tx_count"]
+	testing.expect(t, has_wtc, "should have 'window_tx_count' field")
+	if has_wtc {
+		tc, tc_ok := wtc.(json.Integer)
+		// 9 blocks in window (height 1-9), each with 1 tx = 9 txs
+		testing.expect(t, tc_ok && int(tc) == 9, fmt.tprintf("window_tx_count should be 9, got %v", wtc))
+	}
+
+	// Test with explicit nblocks
+	p := _make_params(json.Value(json.Integer(5)))
+	resp2 := _handle_getchaintxstats(srv, p)
+	_, has_err2 := resp2.error.?
+	testing.expect(t, !has_err2, "should not error with nblocks=5")
+
+	obj2, ok2 := resp2.result.(json.Object)
+	testing.expect(t, ok2, "result should be object")
+	if ok2 {
+		wtc2, has_wtc2 := obj2["window_tx_count"]
+		if has_wtc2 {
+			tc2, tc2_ok := wtc2.(json.Integer)
+			testing.expect(t, tc2_ok && int(tc2) == 5, fmt.tprintf("window_tx_count should be 5 for nblocks=5, got %v", wtc2))
+		}
+
+		wbc, has_wbc := obj2["window_block_count"]
+		if has_wbc {
+			bc, bc_ok := wbc.(json.Integer)
+			testing.expect(t, bc_ok && int(bc) == 5, fmt.tprintf("window_block_count should be 5, got %v", wbc))
+		}
+	}
+
+	// Test txcount (cumulative) — 10 blocks with 1 tx each = 10 total
+	txcount, has_txcount := obj["txcount"]
+	testing.expect(t, has_txcount, "should have 'txcount' field")
+	if has_txcount {
+		tc, tc_ok := txcount.(json.Integer)
+		testing.expect(t, tc_ok && int(tc) == 10, fmt.tprintf("txcount should be 10, got %v", txcount))
+	}
+
+	// Test txrate is present and positive
+	_, has_rate := obj["txrate"]
+	testing.expect(t, has_rate, "should have 'txrate' field")
+}
+
+@(test)
+test_rpc_getchaintxstats_invalid :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "txstats_inv", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	// nblocks too large
+	p := _make_params(json.Value(json.Integer(999)))
+	resp := _handle_getchaintxstats(srv, p)
+	_, has_err := resp.error.?
+	testing.expect(t, has_err, "should error for nblocks > chain height")
+}
+
+@(test)
 test_rpc_help_includes_new :: proc(t: ^testing.T) {
 	srv, cs, mp, params, dir := _make_test_rpc_server(t, "help_new", 5)
 	defer _cleanup_test(srv, cs, mp, params, dir)
@@ -1770,6 +1854,7 @@ test_rpc_help_includes_new :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "result should be string")
 	if !ok { return }
 
+	testing.expect(t, _str_contains(result, "getchaintxstats"), "should contain getchaintxstats")
 	testing.expect(t, _str_contains(result, "getmemoryinfo"), "should contain getmemoryinfo")
 	testing.expect(t, _str_contains(result, "getrpcinfo"), "should contain getrpcinfo")
 	testing.expect(t, _str_contains(result, "logging"), "should contain logging")

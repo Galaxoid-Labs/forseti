@@ -2,11 +2,11 @@
 
 A Bitcoin full node implementation written in [Odin](https://odin-lang.org/). Built from scratch with no Bitcoin library dependencies — only libsecp256k1 for elliptic curve cryptography, vendored RIPEMD-160, and vendored LevelDB for storage.
 
-This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, mempool with RBF, and a JSON-RPC interface with 36 methods.
+This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, mempool with RBF, and a JSON-RPC interface with 37 methods.
 
 ## Status
 
-**202 tests passing** across 9 packages. Successfully syncs the full signet blockchain (~294k blocks) with script verification.
+**204 tests passing** across 9 packages. Successfully syncs the full signet blockchain (~294k blocks) with script verification.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
@@ -18,7 +18,7 @@ This is an educational/experimental project. It implements the core components o
 | 5 | Persistent Storage (LevelDB) | Complete (13 tests) |
 | 6 | P2P Networking | Complete (6 tests) |
 | 7 | Mempool + Persistence + RBF | Complete (20 tests) |
-| 8 | RPC Interface (36 methods) | Complete (45 tests) |
+| 8 | RPC Interface (37 methods) | Complete (47 tests) |
 | 9 | P2P Integration + CLI + Shutdown | Complete |
 | 10 | Signet Sync (BIP325) | Complete |
 | 11 | LevelDB Storage Migration | Complete |
@@ -158,7 +158,7 @@ bitcoin-cli -rpcport=18443 getblockchaininfo
 
 The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are intentionally excluded.
 
-**Blockchain (14/25):**
+**Blockchain (15/25):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
@@ -171,7 +171,7 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `getblockheader` | Yes | |
 | `getblockstats` | Yes | |
 | `getchaintips` | Yes | |
-| `getchaintxstats` | — | Per-window tx rate statistics |
+| `getchaintxstats` | Yes | |
 | `getdifficulty` | Yes | |
 | `getmempoolancestors` | — | Ancestor tracking not implemented |
 | `getmempooldescendants` | — | Descendant tracking not implemented |
@@ -274,7 +274,7 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 ## Testing
 
 ```bash
-# Run all 202 tests
+# Run all 204 tests
 make test
 
 # Test individual packages
@@ -286,7 +286,7 @@ odin test storage         # 13 tests
 odin test chain           #  8 tests
 odin test p2p             #  6 tests
 odin test mempool         # 20 tests
-odin test rpc             # 45 tests
+odin test rpc             # 47 tests
 ```
 
 ## Project Structure
@@ -303,7 +303,7 @@ bitcoin-node-odin/
 ├── chain/                 # UTXO cache, block index (skip list), undo data, chain state
 ├── p2p/                   # Peer connections, sync manager, connection manager
 ├── mempool/               # Fee rates, relay policy, validation pipeline, RBF, persistence
-├── rpc/                   # JSON-RPC server (36 methods), handlers, types
+├── rpc/                   # JSON-RPC server (37 methods), handlers, types
 └── deps/                  # C/C++ dependencies
     ├── libsecp256k1/      # Git submodule (bitcoin-core/secp256k1)
     ├── leveldb/           # Vendored LevelDB C++ source

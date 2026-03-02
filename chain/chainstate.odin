@@ -102,6 +102,9 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 
 	_rebuild_active_chain(cs)
 
+	// Compute cumulative chain_tx for the active chain
+	_compute_chain_tx(cs)
+
 	// Allocate persistent per-input verification arena (2 MB, reused across blocks)
 	cs.verify_buf = make([]byte, 2 * 1024 * 1024)
 	mem.arena_init(&cs.verify_arena, cs.verify_buf)
@@ -379,6 +382,12 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 
 	// 8. Update entry status and append to active chain
 	entry.status += {.Valid_Transactions, .Valid_Chain}
+	entry.num_tx = u32(len(block.txs))
+	prev_chain_tx: i64 = 0
+	if entry.prev != nil {
+		prev_chain_tx = entry.prev.chain_tx
+	}
+	entry.chain_tx = prev_chain_tx + i64(entry.num_tx)
 
 	// Persist updated index record
 	rec := block_index_to_record(entry)
@@ -801,5 +810,16 @@ _rebuild_active_chain :: proc(cs: ^Chain_State) {
 			cs.active_chain[current.height] = current.hash
 		}
 		current = current.prev
+	}
+}
+
+// Walk the active chain forward (genesis → tip) and compute cumulative chain_tx.
+_compute_chain_tx :: proc(cs: ^Chain_State) {
+	running_total: i64 = 0
+	for i in 0 ..< len(cs.active_chain) {
+		entry, found := cs.block_index.entries[cs.active_chain[i]]
+		if !found { continue }
+		running_total += i64(entry.num_tx)
+		entry.chain_tx = running_total
 	}
 }

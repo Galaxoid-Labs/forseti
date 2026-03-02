@@ -21,6 +21,8 @@ Block_Index_Entry :: struct {
 	undo_file_num: u32,
 	undo_offset:   u32,
 	undo_size:     u32,
+	num_tx:     u32,      // Number of transactions in this block (0 if not yet populated)
+	chain_tx:   i64,      // Cumulative tx count from genesis to this block (computed at runtime)
 	prev:       ^Block_Index_Entry,
 	skip:       [SKIP_LIST_MAX]^Block_Index_Entry,
 }
@@ -62,6 +64,7 @@ block_index_load :: proc(idx: ^Block_Index, db: ^storage.Index_DB) {
 		entry.file_num = rec.file_num
 		entry.data_offset = rec.data_offset
 		entry.data_size = rec.data_size
+		entry.num_tx = rec.num_tx
 		idx.entries[hash] = entry
 	}
 
@@ -177,6 +180,7 @@ block_index_to_record :: proc(entry: ^Block_Index_Entry) -> storage.Block_Index_
 		file_num    = entry.file_num,
 		data_offset = entry.data_offset,
 		data_size   = entry.data_size,
+		num_tx      = entry.num_tx,
 	}
 }
 
