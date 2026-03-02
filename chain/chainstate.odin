@@ -5,7 +5,6 @@ import "core:mem"
 import "core:os"
 import "core:sync"
 import "core:thread"
-import "core:time"
 import "../consensus"
 import "../crypto"
 import "../script"
@@ -173,7 +172,6 @@ chain_header_height :: proc(cs: ^Chain_State) -> int {
 // Connect a block to the active chain tip.
 connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_Entry) -> Chain_Error {
 	height := entry.height
-	block_start := time.tick_now()
 
 	// 1. Context-free validation
 	block_val := block^
@@ -330,16 +328,13 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 	}
 
 	// --- Phase 2: Script verification (all checks at once) ---
-	script_elapsed: time.Duration
 	if !skip_scripts && len(batch.checks) > 0 {
-		script_start := time.tick_now()
 		serr: script.Script_Error
 		if cs.script_threads >= 2 && len(batch.checks) >= PARALLEL_THRESHOLD {
 			serr = verify_checks_parallel(&cs.verify_pool, &cs.verify_wg, batch.checks[:], height)
 		} else {
 			serr = verify_checks_serial(cs, batch.checks[:], height)
 		}
-		script_elapsed = time.tick_diff(script_start, time.tick_now())
 		if serr != .None {
 			_rollback_applied_txs(cs, block, applied_tx_indices[:], undo_coins[:])
 			return .Bad_Script
@@ -390,19 +385,6 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 	storage.index_db_put(&cs.index_db, rec)
 
 	append(&cs.active_chain, entry.hash)
-
-	// Timing log for blocks with script verification
-	total_elapsed := time.tick_diff(block_start, time.tick_now())
-	num_checks := len(batch.checks) if !skip_scripts else 0
-	if num_checks > 0 {
-		total_ms := time.duration_milliseconds(total_elapsed)
-		script_ms := time.duration_milliseconds(script_elapsed)
-		mode := "parallel" if (cs.script_threads >= 2 && num_checks >= PARALLEL_THRESHOLD) else "serial"
-		log.debugf(
-			"Block %d: %d txs, %d checks (%s), script=%.1fms total=%.1fms",
-			height, len(block.txs), num_checks, mode, script_ms, total_ms,
-		)
-	}
 
 	return .None
 }
