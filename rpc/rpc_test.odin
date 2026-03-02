@@ -319,6 +319,28 @@ test_getblockchaininfo :: proc(t: ^testing.T) {
 	pruned, pruned_ok := obj["pruned"].(json.Boolean)
 	testing.expect(t, pruned_ok, "pruned should be boolean")
 	testing.expect(t, !pruned, "should not be pruned")
+
+	// Check softforks matches Bitcoin Core format
+	sf, sf_ok := obj["softforks"].(json.Object)
+	testing.expect(t, sf_ok, "softforks should be object")
+	if sf_ok {
+		// Check segwit fork as representative example
+		segwit, sw_ok := sf["segwit"].(json.Object)
+		testing.expect(t, sw_ok, "softforks.segwit should be object")
+		if sw_ok {
+			stype, st_ok := segwit["type"].(json.String)
+			testing.expect(t, st_ok, "segwit.type should be string")
+			testing.expect(t, stype == "buried", fmt.tprintf("segwit.type should be 'buried', got '%s'", stype))
+
+			active, a_ok := segwit["active"].(json.Boolean)
+			testing.expect(t, a_ok, "segwit.active should be boolean")
+			testing.expect(t, active, "segwit should be active on regtest")
+
+			sh, sh_ok := segwit["height"].(json.Integer)
+			testing.expect(t, sh_ok, "segwit.height should be integer")
+			testing.expect_value(t, int(sh), 0) // regtest activates at 0
+		}
+	}
 }
 
 @(test)

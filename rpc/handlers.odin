@@ -49,15 +49,15 @@ _handle_getblockchaininfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_R
 	obj["pruned"] = json.Value(json.Boolean(false))
 	obj["warnings"] = json.Value(json.String(""))
 
-	// BIP activation heights
-	bips := make(json.Object, 6, context.temp_allocator)
-	bips["bip34"] = json.Value(json.Integer(srv.params.bip34_height))
-	bips["bip65"] = json.Value(json.Integer(srv.params.bip65_height))
-	bips["bip66"] = json.Value(json.Integer(srv.params.bip66_height))
-	bips["csv"] = json.Value(json.Integer(srv.params.csv_height))
-	bips["segwit"] = json.Value(json.Integer(srv.params.segwit_height))
-	bips["taproot"] = json.Value(json.Integer(srv.params.taproot_height))
-	obj["softforks"] = json.Value(bips)
+	// Softforks (Bitcoin Core format)
+	softforks := make(json.Object, 6, context.temp_allocator)
+	softforks["bip34"] = json.Value(_make_buried_softfork(srv.params.bip34_height, height))
+	softforks["bip66"] = json.Value(_make_buried_softfork(srv.params.bip66_height, height))
+	softforks["bip65"] = json.Value(_make_buried_softfork(srv.params.bip65_height, height))
+	softforks["csv"] = json.Value(_make_buried_softfork(srv.params.csv_height, height))
+	softforks["segwit"] = json.Value(_make_buried_softfork(srv.params.segwit_height, height))
+	softforks["taproot"] = json.Value(_make_buried_softfork(srv.params.taproot_height, height))
+	obj["softforks"] = json.Value(softforks)
 
 	return _make_result(json.Value(obj), srv._current_id)
 }
@@ -410,6 +410,15 @@ _handle_gettxout :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 
 _satoshi_to_btc :: proc(satoshi: i64) -> f64 {
 	return f64(satoshi) / 100_000_000.0
+}
+
+// Build a buried softfork object matching Bitcoin Core's format.
+_make_buried_softfork :: proc(activation_height: int, current_height: int) -> json.Object {
+	obj := make(json.Object, 3, context.temp_allocator)
+	obj["type"] = json.Value(json.String("buried"))
+	obj["active"] = json.Value(json.Boolean(current_height >= activation_height))
+	obj["height"] = json.Value(json.Integer(activation_height))
+	return obj
 }
 
 // Block size excluding witness data.
