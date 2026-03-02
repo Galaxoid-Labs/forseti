@@ -182,8 +182,12 @@ _handle_getblock :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 	tx_arr := make(json.Array, len(block.txs), context.temp_allocator)
 	for i in 0 ..< len(block.txs) {
 		tx := block.txs[i]
-		txid := wire.tx_id(&tx)
-		tx_arr[i] = json.Value(json.String(_hash_to_hex(txid)))
+		if verbosity >= 2 {
+			tx_arr[i] = json.Value(_decode_tx_to_json(&tx, srv.params))
+		} else {
+			txid := wire.tx_id(&tx)
+			tx_arr[i] = json.Value(json.String(_hash_to_hex(txid)))
+		}
 	}
 	obj["tx"] = json.Value(tx_arr)
 
@@ -687,14 +691,33 @@ _handle_getpeerinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respons
 	arr := make(json.Array, len(srv.cm.peers), context.temp_allocator)
 	i := 0
 	for id, peer in srv.cm.peers {
-		obj := make(json.Object, 8, context.temp_allocator)
+		obj := make(json.Object, 20, context.temp_allocator)
 		obj["id"] = json.Value(json.Integer(i64(id)))
 		obj["addr"] = json.Value(json.String(peer.address))
-		obj["services"] = json.Value(json.Integer(i64(peer.services)))
+		obj["services"] = json.Value(json.String(fmt.tprintf("%016x", peer.services)))
+		obj["servicesnames"] = json.Value(_services_to_names(peer.services))
+		obj["lastsend"] = json.Value(json.Integer(peer.last_send))
+		obj["lastrecv"] = json.Value(json.Integer(peer.last_recv))
+		obj["bytessent"] = json.Value(json.Integer(peer.bytes_sent))
+		obj["bytesrecv"] = json.Value(json.Integer(peer.bytes_recv))
+		obj["conntime"] = json.Value(json.Integer(peer.connected_at))
 		obj["version"] = json.Value(json.Integer(i64(peer.version)))
 		obj["subver"] = json.Value(json.String(peer.user_agent))
-		obj["startingheight"] = json.Value(json.Integer(i64(peer.start_height)))
 		obj["inbound"] = json.Value(json.Boolean(false))
+		obj["startingheight"] = json.Value(json.Integer(i64(peer.start_height)))
+		obj["synced_headers"] = json.Value(json.Integer(srv.cm.sync_mgr.best_header_height))
+		obj["synced_blocks"] = json.Value(json.Integer(chain.chain_height(srv.chain)))
+		obj["connection_type"] = json.Value(json.String("outbound-full-relay"))
+
+		// Peer sync state
+		ps, ps_found := srv.cm.sync_mgr.peer_sync[id]
+		if ps_found {
+			obj["last_block"] = json.Value(json.Integer(ps.last_block_received))
+			obj["inflight"] = json.Value(json.Integer(ps.blocks_in_flight))
+		} else {
+			obj["last_block"] = json.Value(json.Integer(0))
+			obj["inflight"] = json.Value(json.Integer(0))
+		}
 
 		// Compute ping time
 		ping_time := 0.0
@@ -708,6 +731,30 @@ _handle_getpeerinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respons
 	}
 
 	return _make_result(json.Value(arr), srv._current_id)
+}
+
+// Decode service bits to human-readable names.
+_services_to_names :: proc(services: u64) -> json.Array {
+	count := 0
+	if services & 1 != 0 { count += 1 }       // NODE_NETWORK
+	if services & 8 != 0 { count += 1 }       // NODE_WITNESS
+	if services & 1024 != 0 { count += 1 }    // NODE_NETWORK_LIMITED
+
+	names := make(json.Array, count, context.temp_allocator)
+	idx := 0
+	if services & 1 != 0 {
+		names[idx] = json.Value(json.String("NETWORK"))
+		idx += 1
+	}
+	if services & 8 != 0 {
+		names[idx] = json.Value(json.String("WITNESS"))
+		idx += 1
+	}
+	if services & 1024 != 0 {
+		names[idx] = json.Value(json.String("NETWORK_LIMITED"))
+		idx += 1
+	}
+	return names
 }
 
 // --- getnetworkinfo ---
@@ -1157,4 +1204,307 @@ _script_to_address :: proc(spk: []byte, params: ^consensus.Chain_Params) -> (str
 	}
 
 	return "", false
+}
+
+// --- help ---
+
+RPC_METHODS := [?]string{
+	"decoderawtransaction",
+	"decodescript",
+	"getbestblockhash",
+	"getblock",
+	"getblockchaininfo",
+	"getblockcount",
+	"getblockhash",
+	"getblockheader",
+	"getblockstats",
+	"getchaintips",
+	"getconnectioncount",
+	"getdifficulty",
+	"getmempoolentry",
+	"getmempoolinfo",
+	"getmininginfo",
+	"getnettotals",
+	"getnetworkhashps",
+	"getnetworkinfo",
+	"getpeerinfo",
+	"getrawmempool",
+	"getrawtransaction",
+	"gettxout",
+	"help",
+	"ping",
+	"savemempool",
+	"sendrawtransaction",
+	"stop",
+	"testmempoolaccept",
+	"uptime",
+	"validateaddress",
+}
+
+_handle_help :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	method_name, has_method := _get_string_param(params, 0)
+
+	if !has_method || len(method_name) == 0 {
+		// Return sorted list of all method names
+		b := strings.builder_make(0, 512, context.temp_allocator)
+		for i in 0 ..< len(RPC_METHODS) {
+			if i > 0 { strings.write_byte(&b, '\n') }
+			strings.write_string(&b, RPC_METHODS[i])
+		}
+		return _make_result(json.Value(json.String(strings.to_string(b))), srv._current_id)
+	}
+
+	// Check if method exists
+	found := false
+	for m in RPC_METHODS {
+		if m == method_name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return _make_error(.Method_Not_Found, fmt.tprintf("help: unknown method '%s'", method_name), srv._current_id)
+	}
+
+	usage := _get_method_help(method_name)
+	return _make_result(json.Value(json.String(usage)), srv._current_id)
+}
+
+_get_method_help :: proc(method: string) -> string {
+	switch method {
+	case "getblockchaininfo":    return "getblockchaininfo\nReturns an object containing various state info regarding blockchain processing."
+	case "getblockcount":        return "getblockcount\nReturns the height of the most-work fully-validated chain."
+	case "getblockhash":         return "getblockhash height\nReturns hash of block in best-block-chain at height provided."
+	case "getbestblockhash":     return "getbestblockhash\nReturns the hash of the best (tip) block in the most-work fully-validated chain."
+	case "getblock":             return "getblock \"blockhash\" ( verbosity )\nReturns block data. verbosity 0=hex, 1=json, 2=json with decoded txs."
+	case "getrawtransaction":    return "getrawtransaction \"txid\" ( verbose )\nReturn the raw transaction data."
+	case "sendrawtransaction":   return "sendrawtransaction \"hexstring\"\nSubmit a raw transaction to the mempool."
+	case "getmempoolinfo":       return "getmempoolinfo\nReturns details on the active state of the TX memory pool."
+	case "getrawmempool":        return "getrawmempool\nReturns all transaction ids in memory pool."
+	case "gettxout":             return "gettxout \"txid\" n ( include_mempool )\nReturns details about an unspent transaction output."
+	case "getblockheader":       return "getblockheader \"blockhash\" ( verbose )\nReturns information about a block header."
+	case "getdifficulty":        return "getdifficulty\nReturns the proof-of-work difficulty as a multiple of the minimum difficulty."
+	case "getconnectioncount":   return "getconnectioncount\nReturns the number of connections to other nodes."
+	case "getpeerinfo":          return "getpeerinfo\nReturns data about each connected network peer."
+	case "getnetworkinfo":       return "getnetworkinfo\nReturns an object containing various state info regarding P2P networking."
+	case "stop":                 return "stop\nRequest a graceful shutdown of the node."
+	case "uptime":               return "uptime\nReturns the total uptime of the server in seconds."
+	case "decoderawtransaction": return "decoderawtransaction \"hexstring\"\nReturn a JSON object representing the serialized, hex-encoded transaction."
+	case "decodescript":         return "decodescript \"hexstring\"\nDecode a hex-encoded script."
+	case "getmempoolentry":      return "getmempoolentry \"txid\"\nReturns mempool data for given transaction."
+	case "testmempoolaccept":    return "testmempoolaccept [\"rawtx\",...]\nReturns result of mempool acceptance tests."
+	case "getchaintips":         return "getchaintips\nReturn information about all known tips in the block tree."
+	case "getblockstats":        return "getblockstats hash_or_height\nCompute per block statistics for a given window."
+	case "help":                 return "help ( \"method\" )\nList all commands, or get help for a specified command."
+	case "getmininginfo":        return "getmininginfo\nReturns a json object containing mining-related information."
+	case "getnetworkhashps":     return "getnetworkhashps ( nblocks height )\nReturns the estimated network hashes per second."
+	case "getnettotals":         return "getnettotals\nReturns information about network traffic."
+	case "validateaddress":      return "validateaddress \"address\"\nReturn information about the given bitcoin address."
+	case "savemempool":          return "savemempool\nDumps the mempool to disk."
+	case "ping":                 return "ping\nRequests that a ping be sent to all other nodes."
+	}
+	return fmt.tprintf("%s\nNo detailed help available.", method)
+}
+
+// --- getblock verbosity=2 ---
+// (Handled in existing _handle_getblock by extending the verbosity check)
+
+// --- getmininginfo ---
+
+_handle_getmininginfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	tip_hash, height := chain.chain_tip(srv.chain)
+
+	obj := make(json.Object, 8, context.temp_allocator)
+	obj["blocks"] = json.Value(json.Integer(height))
+
+	entry, found := srv.chain.block_index.entries[tip_hash]
+	if found {
+		obj["difficulty"] = json.Value(json.Float(consensus.get_difficulty(entry.bits)))
+	} else {
+		obj["difficulty"] = json.Value(json.Float(0.0))
+	}
+
+	obj["networkhashps"] = json.Value(json.Float(_estimate_hashps(srv, 120, -1)))
+	obj["pooledtx"] = json.Value(json.Integer(mempool.mempool_count(srv.mp)))
+	obj["chain"] = json.Value(json.String(srv.params.name))
+	obj["warnings"] = json.Value(json.String(""))
+
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// --- getnetworkhashps ---
+
+_handle_getnetworkhashps :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	nblocks := 120
+	height := -1
+
+	nb, nb_ok := _get_int_param(params, 0)
+	if nb_ok { nblocks = nb }
+
+	h, h_ok := _get_int_param(params, 1)
+	if h_ok { height = h }
+
+	hashps := _estimate_hashps(srv, nblocks, height)
+	return _make_result(json.Value(json.Float(hashps)), srv._current_id)
+}
+
+// Estimate network hash rate over nblocks ending at height.
+_estimate_hashps :: proc(srv: ^RPC_Server, nblocks: int, height: int) -> f64 {
+	tip_height := chain.chain_height(srv.chain)
+	target_height := height < 0 ? tip_height : min(height, tip_height)
+
+	if target_height < 1 || nblocks < 1 {
+		return 0.0
+	}
+
+	// Walk back nblocks from target_height
+	lookback := min(nblocks, target_height)
+	start_height := target_height - lookback
+
+	// Get timestamps
+	end_hash := srv.chain.active_chain[target_height]
+	start_hash := srv.chain.active_chain[start_height]
+
+	end_entry, end_found := srv.chain.block_index.entries[end_hash]
+	start_entry, start_found := srv.chain.block_index.entries[start_hash]
+	if !end_found || !start_found {
+		return 0.0
+	}
+
+	time_span := i64(end_entry.timestamp) - i64(start_entry.timestamp)
+	if time_span <= 0 {
+		return 0.0
+	}
+
+	// hashps = difficulty * 2^32 / avg_block_time
+	// avg_block_time = time_span / lookback
+	// So: hashps = difficulty * 2^32 * lookback / time_span
+	diff := consensus.get_difficulty(end_entry.bits)
+	return diff * 4294967296.0 * f64(lookback) / f64(time_span)
+}
+
+// --- getnettotals ---
+
+_handle_getnettotals :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	total_recv: i64 = 0
+	total_sent: i64 = 0
+
+	if srv.cm != nil {
+		for _, peer in srv.cm.peers {
+			total_recv += peer.bytes_recv
+			total_sent += peer.bytes_sent
+		}
+	}
+
+	obj := make(json.Object, 4, context.temp_allocator)
+	obj["totalbytesrecv"] = json.Value(json.Integer(total_recv))
+	obj["totalbytessent"] = json.Value(json.Integer(total_sent))
+	obj["timemillis"] = json.Value(json.Integer(time.to_unix_seconds(time.now()) * 1000))
+
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// --- validateaddress ---
+
+_handle_validateaddress :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	addr_str, ok := _get_string_param(params, 0)
+	if !ok {
+		return _make_error(.Invalid_Params, "Missing address parameter", srv._current_id)
+	}
+
+	obj := make(json.Object, 8, context.temp_allocator)
+	obj["address"] = json.Value(json.String(addr_str))
+
+	// Try bech32 first
+	hrp, ver, prog, prog_len, bech_ok := crypto.bech32_decode(addr_str)
+	if bech_ok {
+		// Verify HRP matches network
+		if hrp != srv.params.bech32_hrp {
+			obj["isvalid"] = json.Value(json.Boolean(false))
+			return _make_result(json.Value(obj), srv._current_id)
+		}
+
+		obj["isvalid"] = json.Value(json.Boolean(true))
+		obj["iswitness"] = json.Value(json.Boolean(true))
+		obj["witness_version"] = json.Value(json.Integer(ver))
+		obj["witness_program"] = json.Value(json.String(_bytes_to_hex(prog[:prog_len])))
+
+		// Build scriptPubKey: OP_n <push prog_len> <program>
+		spk := make([]byte, 2 + prog_len, context.temp_allocator)
+		if ver == 0 {
+			spk[0] = 0x00 // OP_0
+		} else {
+			spk[0] = u8(0x50 + ver) // OP_1..OP_16
+		}
+		spk[1] = u8(prog_len)
+		copy(spk[2:], prog[:prog_len])
+		obj["scriptPubKey"] = json.Value(json.String(_bytes_to_hex(spk)))
+
+		obj["isscript"] = json.Value(json.Boolean(ver == 0 && prog_len == 32)) // P2WSH
+
+		return _make_result(json.Value(obj), srv._current_id)
+	}
+
+	// Try base58check
+	version, payload, b58_ok := crypto.base58check_decode(addr_str)
+	if b58_ok {
+		// Check version matches network
+		is_p2pkh := version == srv.params.p2pkh_prefix
+		is_p2sh := version == srv.params.p2sh_prefix
+		if !is_p2pkh && !is_p2sh {
+			obj["isvalid"] = json.Value(json.Boolean(false))
+			return _make_result(json.Value(obj), srv._current_id)
+		}
+
+		obj["isvalid"] = json.Value(json.Boolean(true))
+		obj["iswitness"] = json.Value(json.Boolean(false))
+		obj["isscript"] = json.Value(json.Boolean(is_p2sh))
+
+		if is_p2pkh {
+			// OP_DUP OP_HASH160 <20> <hash> OP_EQUALVERIFY OP_CHECKSIG
+			spk := make([]byte, 25, context.temp_allocator)
+			spk[0] = 0x76  // OP_DUP
+			spk[1] = 0xa9  // OP_HASH160
+			spk[2] = 0x14  // push 20
+			copy(spk[3:23], payload[:])
+			spk[23] = 0x88 // OP_EQUALVERIFY
+			spk[24] = 0xac // OP_CHECKSIG
+			obj["scriptPubKey"] = json.Value(json.String(_bytes_to_hex(spk)))
+		} else {
+			// OP_HASH160 <20> <hash> OP_EQUAL
+			spk := make([]byte, 23, context.temp_allocator)
+			spk[0] = 0xa9  // OP_HASH160
+			spk[1] = 0x14  // push 20
+			copy(spk[2:22], payload[:])
+			spk[22] = 0x87 // OP_EQUAL
+			obj["scriptPubKey"] = json.Value(json.String(_bytes_to_hex(spk)))
+		}
+
+		return _make_result(json.Value(obj), srv._current_id)
+	}
+
+	// Invalid address
+	obj["isvalid"] = json.Value(json.Boolean(false))
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// --- savemempool ---
+
+_handle_savemempool :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	ok := mempool.mempool_save(srv.mp, srv.data_dir)
+	if !ok {
+		return _make_error(.Misc_Error, "Failed to save mempool to disk", srv._current_id)
+	}
+	return _make_result(json.Value(json.Null(nil)), srv._current_id)
+}
+
+// --- ping ---
+
+_handle_ping :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	if srv.cm != nil {
+		for _, peer in srv.cm.peers {
+			p2p.peer_send_ping(peer)
+		}
+	}
+	return _make_result(json.Value(json.Null(nil)), srv._current_id)
 }

@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:log"
 import "core:mem"
 import tcp "core:net"
+import "core:strings"
 import "core:sync/chan"
 import "core:time"
 
@@ -333,7 +334,7 @@ _conn_manager_handle_version :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 
 	peer.version = ver.version
 	peer.services = ver.services
-	peer.user_agent = ver.user_agent
+	peer.user_agent = strings.clone(ver.user_agent)
 	peer.start_height = ver.start_height
 
 	log.debugf("Peer %d: version=%d, agent=%s, height=%d",

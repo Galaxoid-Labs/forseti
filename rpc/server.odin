@@ -22,16 +22,18 @@ RPC_Server :: struct {
 	running:     bool,
 	port:        int,
 	start_time:  i64,
+	data_dir:    string,
 	_current_id: json.Value, // tracks request id for current dispatch
 }
 
 // Initialize the RPC server with references to chain state and mempool.
-rpc_server_init :: proc(srv: ^RPC_Server, cs: ^chain.Chain_State, mp: ^mempool.Mempool, params: ^consensus.Chain_Params, port: int, cm: ^p2p.Conn_Manager = nil) {
+rpc_server_init :: proc(srv: ^RPC_Server, cs: ^chain.Chain_State, mp: ^mempool.Mempool, params: ^consensus.Chain_Params, port: int, cm: ^p2p.Conn_Manager = nil, data_dir: string = "") {
 	srv.chain = cs
 	srv.mp = mp
 	srv.params = params
 	srv.port = port
 	srv.cm = cm
+	srv.data_dir = data_dir
 	srv.running = false
 	srv.start_time = time.to_unix_seconds(time.now())
 }
@@ -223,6 +225,20 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_getchaintips(srv, req.params)
 	case "getblockstats":
 		return _handle_getblockstats(srv, req.params)
+	case "help":
+		return _handle_help(srv, req.params)
+	case "getmininginfo":
+		return _handle_getmininginfo(srv, req.params)
+	case "getnetworkhashps":
+		return _handle_getnetworkhashps(srv, req.params)
+	case "getnettotals":
+		return _handle_getnettotals(srv, req.params)
+	case "validateaddress":
+		return _handle_validateaddress(srv, req.params)
+	case "savemempool":
+		return _handle_savemempool(srv, req.params)
+	case "ping":
+		return _handle_ping(srv, req.params)
 	}
 
 	return _make_error(.Method_Not_Found, fmt.tprintf("Method not found: %s", req.method), srv._current_id)

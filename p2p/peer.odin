@@ -3,6 +3,7 @@ package p2p
 import "core:fmt"
 import "core:mem"
 import tcp "core:net"
+import "core:strings"
 import "core:sync"
 import "core:sync/chan"
 import "core:thread"
@@ -29,6 +30,11 @@ Peer :: struct {
 	send_mutex:     sync.Mutex,
 	network_magic:  u32,
 	recv_buf:       [dynamic]byte,
+	connected_at:   i64,   // unix timestamp when connection established
+	last_send:      i64,   // unix timestamp of last message sent
+	last_recv:      i64,   // unix timestamp of last message received
+	bytes_sent:     i64,   // total bytes sent
+	bytes_recv:     i64,   // total bytes received
 }
 
 // Connect to a peer, allocate Peer struct, start reader thread.
@@ -47,11 +53,12 @@ peer_connect :: proc(
 	peer = new(Peer)
 	peer.id = peer_id
 	peer.socket = socket
-	peer.address = address
+	peer.address = strings.clone(address)
 	peer.state = .Connecting
 	peer.network_magic = network_magic
 	peer.msg_chan = msg_chan
 	peer.recv_buf = make([dynamic]byte, 0, 8192)
+	peer.connected_at = time.to_unix_seconds(time.now())
 
 	// Start reader thread, passing peer pointer via data field.
 	peer.reader_thread = thread.create_and_start_with_data(
@@ -74,6 +81,12 @@ peer_destroy :: proc(peer: ^Peer) {
 		thread.destroy(peer.reader_thread)
 	}
 	delete(peer.recv_buf)
+	if len(peer.address) > 0 {
+		delete(peer.address)
+	}
+	if len(peer.user_agent) > 0 {
+		delete(peer.user_agent)
+	}
 	free(peer)
 }
 
@@ -87,6 +100,8 @@ peer_send_message :: proc(peer: ^Peer, command: string, payload: []byte) -> Net_
 		if send_err != nil {
 			return .Send_Failed
 		}
+		peer.bytes_sent += i64(len(msg))
+		peer.last_send = time.to_unix_seconds(time.now())
 	}
 	return .None
 }
@@ -193,6 +208,9 @@ _peer_reader_proc :: proc(data: rawptr) {
 			})
 			return
 		}
+
+		peer.bytes_recv += i64(bytes_read)
+		peer.last_recv = time.to_unix_seconds(time.now())
 
 		// Accumulate into recv_buf.
 		append(&peer.recv_buf, ..read_buf[:bytes_read])

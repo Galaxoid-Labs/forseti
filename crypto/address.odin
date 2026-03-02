@@ -147,6 +147,147 @@ _convert_bits :: proc(data: []byte, from, to: int, pad: bool) -> (result: [64]u8
 	return result, pos, true
 }
 
+// Decode a Base58Check-encoded address into version byte and 20-byte payload.
+base58check_decode :: proc(addr: string) -> (version: u8, payload: [20]u8, ok: bool) {
+	if len(addr) < 25 || len(addr) > 34 {
+		return 0, {}, false
+	}
+
+	// Build reverse lookup table
+	rev: [128]i8
+	for i in 0 ..< 128 {
+		rev[i] = -1
+	}
+	alpha := BASE58_ALPHABET
+	for i in 0 ..< 58 {
+		rev[alpha[i]] = i8(i)
+	}
+
+	// Decode base58 to big integer in 25-byte buffer
+	decoded: [25]byte
+	for i in 0 ..< len(addr) {
+		c := addr[i]
+		if c >= 128 {
+			return 0, {}, false
+		}
+		val := rev[c]
+		if val < 0 {
+			return 0, {}, false
+		}
+
+		carry := u32(val)
+		for j := 24; j >= 0; j -= 1 {
+			carry += u32(decoded[j]) * 58
+			decoded[j] = u8(carry & 0xff)
+			carry >>= 8
+		}
+		if carry != 0 {
+			return 0, {}, false
+		}
+	}
+
+	// Verify checksum: sha256d(first 21 bytes)[:4] == last 4 bytes
+	checksum := sha256d(decoded[:21])
+	if decoded[21] != checksum[0] || decoded[22] != checksum[1] ||
+	   decoded[23] != checksum[2] || decoded[24] != checksum[3] {
+		return 0, {}, false
+	}
+
+	version = decoded[0]
+	copy(payload[:], decoded[1:21])
+	return version, payload, true
+}
+
+// Decode a Bech32/Bech32m-encoded address into HRP, witness version, and program.
+bech32_decode :: proc(addr: string) -> (hrp: string, version: int, program: [40]u8, prog_len: int, ok: bool) {
+	// Find last '1' separator
+	sep_pos := -1
+	for i := len(addr) - 1; i >= 0; i -= 1 {
+		if addr[i] == '1' {
+			sep_pos = i
+			break
+		}
+	}
+	if sep_pos < 1 || sep_pos + 7 > len(addr) {
+		return "", 0, {}, 0, false
+	}
+
+	hrp = addr[:sep_pos]
+	data_part := addr[sep_pos + 1:]
+
+	if len(data_part) < 6 {
+		return "", 0, {}, 0, false
+	}
+
+	// Build reverse charset lookup
+	rev: [128]i8
+	for i in 0 ..< 128 {
+		rev[i] = -1
+	}
+	cs := BECH32_CHARSET
+	for i in 0 ..< 32 {
+		rev[cs[i]] = i8(i)
+	}
+
+	// Decode data characters to 5-bit values
+	data_values: [128]u8
+	for i in 0 ..< len(data_part) {
+		c := data_part[i]
+		// Convert to lowercase if uppercase
+		lc := c
+		if lc >= 'A' && lc <= 'Z' {
+			lc = lc + 32
+		}
+		if lc >= 128 {
+			return "", 0, {}, 0, false
+		}
+		val := rev[lc]
+		if val < 0 {
+			return "", 0, {}, 0, false
+		}
+		data_values[i] = u8(val)
+	}
+
+	// Verify checksum
+	hrp_exp, hrp_exp_len := _bech32_hrp_expand(hrp)
+	chk_input: [256]u8
+	pos := 0
+	copy(chk_input[pos:], hrp_exp[:hrp_exp_len])
+	pos += hrp_exp_len
+	copy(chk_input[pos:], data_values[:len(data_part)])
+	pos += len(data_part)
+
+	polymod := _bech32_polymod(chk_input[:pos])
+
+	// First data value is the witness version
+	version = int(data_values[0])
+
+	// Determine expected constant
+	expected_const := version == 0 ? BECH32_CONST : BECH32M_CONST
+	if polymod != expected_const {
+		return "", 0, {}, 0, false
+	}
+
+	// Convert remaining 5-bit values (excluding checksum) to 8-bit program
+	data_5bit_len := len(data_part) - 6 - 1 // exclude version and 6-byte checksum
+	if data_5bit_len <= 0 {
+		return "", 0, {}, 0, false
+	}
+
+	conv, conv_len, conv_ok := _convert_bits(data_values[1:len(data_part) - 6], 5, 8, false)
+	if !conv_ok {
+		return "", 0, {}, 0, false
+	}
+
+	// Witness programs must be 2-40 bytes
+	if conv_len < 2 || conv_len > 40 {
+		return "", 0, {}, 0, false
+	}
+
+	copy(program[:], conv[:conv_len])
+	return hrp, version, program, conv_len, true
+}
+
 // Encode a witness program as Bech32 (v0) or Bech32m (v1+).
 bech32_encode :: proc(hrp: string, version: int, program: []byte, allocator := context.temp_allocator) -> string {
 	// Convert 8-bit program to 5-bit groups

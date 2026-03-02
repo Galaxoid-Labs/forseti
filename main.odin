@@ -304,7 +304,7 @@ main :: proc() {
 
 	// Start RPC server (cm wired below after P2P init).
 	srv := new(rpc.RPC_Server)
-	rpc.rpc_server_init(srv, cs, mp, params, rpc_port)
+	rpc.rpc_server_init(srv, cs, mp, params, rpc_port, data_dir = cfg.data_dir)
 
 	if !rpc.rpc_server_start(srv) {
 		log.errorf("Failed to start RPC server on port %d", rpc_port)

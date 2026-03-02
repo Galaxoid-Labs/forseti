@@ -134,6 +134,61 @@ test_script_to_address :: proc(t: ^testing.T) {
 		fmt.tprintf("P2TR dispatch: got %s", addr3))
 }
 
+// Test Base58Check decode round-trip.
+@(test)
+test_base58check_decode :: proc(t: ^testing.T) {
+	// Decode known P2PKH address: 1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH
+	ver, payload, ok := base58check_decode("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH")
+	testing.expect(t, ok, "decode should succeed")
+	testing.expect_value(t, ver, u8(0x00))
+	expected_hash: [20]u8 = {
+		0x75, 0x1e, 0x76, 0xe8, 0x19, 0x91, 0x96, 0xd4,
+		0x54, 0x94, 0x1c, 0x45, 0xd1, 0xb3, 0xa3, 0x23,
+		0xf1, 0x43, 0x3b, 0xd6,
+	}
+	testing.expect(t, payload == expected_hash,
+		fmt.tprintf("payload mismatch"))
+
+	// Invalid checksum
+	_, _, bad_ok := base58check_decode("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMX")
+	testing.expect(t, !bad_ok, "bad checksum should fail")
+
+	// Invalid char
+	_, _, inv_ok := base58check_decode("1BgGZ9tcN4rm9KBzDn7KprQz87SZ260MH")
+	testing.expect(t, !inv_ok, "invalid char should fail")
+}
+
+// Test Bech32 decode round-trip.
+@(test)
+test_bech32_decode :: proc(t: ^testing.T) {
+	// Decode P2WPKH: bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4
+	hrp, ver, prog, prog_len, ok := bech32_decode("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
+	testing.expect(t, ok, "bech32 decode should succeed")
+	testing.expect(t, hrp == "bc", fmt.tprintf("hrp: got %s, want bc", hrp))
+	testing.expect_value(t, ver, 0)
+	testing.expect_value(t, prog_len, 20)
+	expected_prog: [20]u8 = {
+		0x75, 0x1e, 0x76, 0xe8, 0x19, 0x91, 0x96, 0xd4,
+		0x54, 0x94, 0x1c, 0x45, 0xd1, 0xb3, 0xa3, 0x23,
+		0xf1, 0x43, 0x3b, 0xd6,
+	}
+	for i in 0 ..< 20 {
+		testing.expect(t, prog[i] == expected_prog[i],
+			fmt.tprintf("program byte %d: got %02x, want %02x", i, prog[i], expected_prog[i]))
+	}
+
+	// Decode Bech32m P2TR
+	hrp2, ver2, _, prog_len2, ok2 := bech32_decode("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0")
+	testing.expect(t, ok2, "bech32m decode should succeed")
+	testing.expect(t, hrp2 == "bc", "hrp should be bc")
+	testing.expect_value(t, ver2, 1)
+	testing.expect_value(t, prog_len2, 32)
+
+	// Invalid checksum
+	_, _, _, _, bad_ok := bech32_decode("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t5")
+	testing.expect(t, !bad_ok, "bad checksum should fail")
+}
+
 // Test leading zero bytes produce leading '1' chars in Base58Check.
 @(test)
 test_base58check_leading_zeros :: proc(t: ^testing.T) {

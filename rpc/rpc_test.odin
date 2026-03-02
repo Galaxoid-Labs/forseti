@@ -1070,3 +1070,249 @@ test_getblockstats :: proc(t: ^testing.T) {
 	testing.expect(t, ts_ok, "total_size should be integer")
 	testing.expect(t, ts > 0, "total_size should be positive")
 }
+
+// --- New RPC method tests ---
+
+@(test)
+test_help :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "help", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+	resp := _handle_help(srv, nil)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	result, ok := resp.result.(json.String)
+	testing.expect(t, ok, "result should be string")
+	if ok {
+		testing.expect(t, _str_contains(result, "getblockcount"), "should contain getblockcount")
+		testing.expect(t, _str_contains(result, "getpeerinfo"), "should contain getpeerinfo")
+		testing.expect(t, _str_contains(result, "validateaddress"), "should contain validateaddress")
+	}
+}
+
+@(test)
+test_help_method :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "help_m", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+	p := _make_params(json.Value(json.String("getblockcount")))
+	resp := _handle_help(srv, p)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	result, ok := resp.result.(json.String)
+	testing.expect(t, ok, "result should be string")
+	if ok {
+		testing.expect(t, _str_contains(result, "getblockcount"), "help should mention method name")
+	}
+}
+
+@(test)
+test_getblock_verbose2 :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "blk_v2", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	block_hash_hex := _hash_to_hex(cs.active_chain[2])
+	p := _make_params(json.Value(json.String(block_hash_hex)), json.Value(json.Integer(2)))
+	resp := _handle_getblock(srv, p)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	obj, ok := resp.result.(json.Object)
+	testing.expect(t, ok, "result should be object")
+	if !ok { return }
+
+	tx_arr, tx_ok := obj["tx"].(json.Array)
+	testing.expect(t, tx_ok, "tx should be array")
+	if !tx_ok || len(tx_arr) == 0 { return }
+
+	// First tx should be an object (not a string txid)
+	tx_obj, is_obj := tx_arr[0].(json.Object)
+	testing.expect(t, is_obj, "tx[0] should be object for verbosity=2")
+	if is_obj {
+		_, txid_ok := tx_obj["txid"].(json.String)
+		testing.expect(t, txid_ok, "decoded tx should have txid field")
+	}
+}
+
+@(test)
+test_getmininginfo :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "mininginfo", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+	resp := _handle_getmininginfo(srv, nil)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	obj, ok := resp.result.(json.Object)
+	testing.expect(t, ok, "result should be object")
+	if !ok { return }
+
+	blocks, b_ok := obj["blocks"].(json.Integer)
+	testing.expect(t, b_ok, "blocks should be integer")
+	testing.expect_value(t, int(blocks), 4)
+
+	_, d_ok := obj["difficulty"].(json.Float)
+	testing.expect(t, d_ok, "difficulty should be float")
+
+	chain_name, c_ok := obj["chain"].(json.String)
+	testing.expect(t, c_ok, "chain should be string")
+	testing.expect(t, chain_name == "regtest", "chain should be regtest")
+
+	_, nh_ok := obj["networkhashps"].(json.Float)
+	testing.expect(t, nh_ok, "networkhashps should be float")
+
+	ptx, ptx_ok := obj["pooledtx"].(json.Integer)
+	testing.expect(t, ptx_ok, "pooledtx should be integer")
+	testing.expect_value(t, int(ptx), 0)
+}
+
+@(test)
+test_getnetworkhashps :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "nethashps", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+	resp := _handle_getnetworkhashps(srv, nil)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	result, ok := resp.result.(json.Float)
+	testing.expect(t, ok, "result should be float")
+	testing.expect(t, result >= 0, "hashps should be non-negative")
+}
+
+@(test)
+test_getnettotals :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "nettotals", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+	resp := _handle_getnettotals(srv, nil)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	obj, ok := resp.result.(json.Object)
+	testing.expect(t, ok, "result should be object")
+	if !ok { return }
+
+	recv, recv_ok := obj["totalbytesrecv"].(json.Integer)
+	testing.expect(t, recv_ok, "totalbytesrecv should be integer")
+	testing.expect_value(t, int(recv), 0) // no peers
+
+	sent, sent_ok := obj["totalbytessent"].(json.Integer)
+	testing.expect(t, sent_ok, "totalbytessent should be integer")
+	testing.expect_value(t, int(sent), 0)
+
+	_, tm_ok := obj["timemillis"].(json.Integer)
+	testing.expect(t, tm_ok, "timemillis should be integer")
+}
+
+@(test)
+test_validateaddress_valid :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "valaddr_v", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	// Regtest bech32 P2WPKH address
+	program: [20]byte = {
+		0x75, 0x1e, 0x76, 0xe8, 0x19, 0x91, 0x96, 0xd4,
+		0x54, 0x94, 0x1c, 0x45, 0xd1, 0xb3, 0xa3, 0x23,
+		0xf1, 0x43, 0x3b, 0xd6,
+	}
+	addr := crypto.bech32_encode("bcrt", 0, program[:])
+
+	p := _make_params(json.Value(json.String(addr)))
+	resp := _handle_validateaddress(srv, p)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	obj, ok := resp.result.(json.Object)
+	testing.expect(t, ok, "result should be object")
+	if !ok { return }
+
+	valid, v_ok := obj["isvalid"].(json.Boolean)
+	testing.expect(t, v_ok, "isvalid should be bool")
+	testing.expect(t, valid, "should be valid")
+
+	is_witness, w_ok := obj["iswitness"].(json.Boolean)
+	testing.expect(t, w_ok, "iswitness should be bool")
+	testing.expect(t, is_witness, "should be witness")
+
+	wv, wv_ok := obj["witness_version"].(json.Integer)
+	testing.expect(t, wv_ok, "witness_version should be integer")
+	testing.expect_value(t, int(wv), 0)
+
+	_, spk_ok := obj["scriptPubKey"].(json.String)
+	testing.expect(t, spk_ok, "scriptPubKey should be string")
+}
+
+@(test)
+test_validateaddress_invalid :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "valaddr_i", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	p := _make_params(json.Value(json.String("not-a-valid-address")))
+	resp := _handle_validateaddress(srv, p)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error (invalid address returns isvalid=false)")
+
+	obj, ok := resp.result.(json.Object)
+	testing.expect(t, ok, "result should be object")
+	if !ok { return }
+
+	valid, v_ok := obj["isvalid"].(json.Boolean)
+	testing.expect(t, v_ok, "isvalid should be bool")
+	testing.expect(t, !valid, "should be invalid")
+}
+
+@(test)
+test_savemempool :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "savemp", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+	srv.data_dir = dir
+
+	resp := _handle_savemempool(srv, nil)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	_, is_null := resp.result.(json.Null)
+	testing.expect(t, is_null, "result should be null")
+}
+
+@(test)
+test_ping :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "ping", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	// cm is nil, should return null without error
+	resp := _handle_ping(srv, nil)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	_, is_null := resp.result.(json.Null)
+	testing.expect(t, is_null, "result should be null")
+}

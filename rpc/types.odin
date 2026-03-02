@@ -145,7 +145,7 @@ _json_escape :: proc(s: string) -> string {
 	// Fast path: no escaping needed for most strings
 	needs_escape := false
 	for c in s {
-		if c == '"' || c == '\\' || c == '\n' || c == '\r' || c == '\t' {
+		if c < 0x20 || c == '"' || c == '\\' {
 			needs_escape = true
 			break
 		}
@@ -168,7 +168,11 @@ _json_escape :: proc(s: string) -> string {
 		case '\t':
 			strings.write_string(&b, `\t`)
 		case:
-			strings.write_rune(&b, c)
+			if c < 0x20 {
+				// Skip control characters (including null bytes)
+			} else {
+				strings.write_rune(&b, c)
+			}
 		}
 	}
 	return strings.to_string(b)
