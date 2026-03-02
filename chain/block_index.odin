@@ -4,7 +4,7 @@ import "core:mem"
 import "../storage"
 import "../wire"
 
-SKIP_LIST_MAX :: 32
+SKIP_LIST_MAX :: 20
 
 Block_Index_Entry :: struct {
 	hash:       Hash256,

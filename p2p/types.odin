@@ -70,6 +70,7 @@ STALE_TIP_SECS              :: 600
 BLOCK_STALL_TIMEOUT_SECS    :: 30
 STALL_CHECK_INTERVAL_SECS   :: 5
 HEADER_REQUEST_TIMEOUT_SECS :: 60
+HEADER_REFRESH_SECS         :: 120  // Periodic getheaders while In_Sync
 
 // Services flags.
 NODE_NETWORK         :: u64(1)

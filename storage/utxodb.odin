@@ -1,8 +1,7 @@
 package storage
 
+import "core:c"
 import "../wire"
-
-UTXO_MAX_VALUE_SIZE :: 10240 // 17-byte header + up to ~10k script (consensus max)
 
 UTXO_Coin :: struct {
 	height:      u32,
@@ -12,28 +11,22 @@ UTXO_Coin :: struct {
 }
 
 UTXO_DB :: struct {
-	lmdb: ^LMDB_Store,
+	store: ^LDB_Store,
 }
 
-// Initialize UTXO database backed by shared LMDB store.
-utxo_db_init :: proc(lmdb: ^LMDB_Store) -> UTXO_DB {
-	return UTXO_DB{lmdb = lmdb}
+// Initialize UTXO database backed by shared LevelDB store.
+utxo_db_init :: proc(store: ^LDB_Store) -> UTXO_DB {
+	return UTXO_DB{store = store}
 }
 
-// No-op — LMDB environment is closed centrally.
+// No-op — store is closed centrally.
 utxo_db_close :: proc(db: ^UTXO_DB) {
 }
 
 // Retrieve a UTXO coin. Caller owns the returned script slice.
 utxo_db_get :: proc(db: ^UTXO_DB, outpoint: wire.Outpoint, allocator := context.allocator) -> (coin: UTXO_Coin, found: bool) {
-	txn, terr := lmdb_begin_read(db.lmdb)
-	if terr != .None {
-		return {}, false
-	}
-	defer lmdb_abort(txn)
-
 	key := _utxo_key(outpoint)
-	value, ok := lmdb_get(txn, db.lmdb.utxo_dbi, key[:])
+	value, ok := ldb_get(db.store.chainstate_db, db.store.read_opts, key[:], context.temp_allocator)
 	if !ok {
 		return {}, false
 	}
@@ -46,80 +39,70 @@ utxo_db_get :: proc(db: ^UTXO_DB, outpoint: wire.Outpoint, allocator := context.
 	return decoded, true
 }
 
-// Store a UTXO coin (auto-commit).
+// Store a UTXO coin.
 utxo_db_put :: proc(db: ^UTXO_DB, outpoint: wire.Outpoint, coin: UTXO_Coin) -> Storage_Error {
-	txn, terr := lmdb_begin_write(db.lmdb)
-	if terr != .None {
-		return .IO_Error
-	}
-
 	key := _utxo_key(outpoint)
-	value_buf: [UTXO_MAX_VALUE_SIZE]byte
-	value_len := _utxo_encode_value(&value_buf, coin)
-	if value_len < 0 {
-		lmdb_abort(txn)
-		return .Value_Too_Large
+	total_size := 13 + 5 + len(coin.script)
+	value_buf: [10240]byte
+	if total_size <= 10240 {
+		value_len := _utxo_encode_value_into(value_buf[:], coin)
+		return ldb_put(db.store.chainstate_db, db.store.write_opts, key[:], value_buf[:value_len])
+	} else {
+		heap_buf := make([]byte, total_size, context.temp_allocator)
+		value_len := _utxo_encode_value_into(heap_buf, coin)
+		return ldb_put(db.store.chainstate_db, db.store.write_opts, key[:], heap_buf[:value_len])
 	}
-
-	perr := lmdb_put(txn, db.lmdb.utxo_dbi, key[:], value_buf[:value_len])
-	if perr != .None {
-		lmdb_abort(txn)
-		return perr
-	}
-
-	return lmdb_commit(txn)
 }
 
-// Delete a UTXO (auto-commit).
+// Delete a UTXO.
 utxo_db_delete :: proc(db: ^UTXO_DB, outpoint: wire.Outpoint) -> Storage_Error {
-	txn, terr := lmdb_begin_write(db.lmdb)
-	if terr != .None {
-		return .IO_Error
-	}
-
 	key := _utxo_key(outpoint)
-	derr := lmdb_del(txn, db.lmdb.utxo_dbi, key[:])
-	if derr != .None && derr != .Not_Found {
-		lmdb_abort(txn)
-		return derr
-	}
-
-	return lmdb_commit(txn)
+	return ldb_del(db.store.chainstate_db, db.store.write_opts, key[:])
 }
 
-// Flush to disk (mdb_env_sync).
+// No-op — sync handled by write options.
 utxo_db_flush :: proc(db: ^UTXO_DB) -> Storage_Error {
-	rc := mdb_env_sync(db.lmdb.env, 1)
-	if rc != MDB_SUCCESS {
-		return .IO_Error
-	}
 	return .None
 }
 
-// Return the number of UTXOs stored.
+// Return the number of UTXOs stored (iterator scan).
 utxo_db_count :: proc(db: ^UTXO_DB) -> u32 {
-	return lmdb_count(db.lmdb, db.lmdb.utxo_dbi)
+	iter := leveldb_create_iterator(db.store.chainstate_db, db.store.read_opts)
+	defer leveldb_iter_destroy(iter)
+
+	count: u32 = 0
+	leveldb_iter_seek_to_first(iter)
+	for leveldb_iter_valid(iter) != 0 {
+		// Skip the "tip" meta key — only count UTXO entries (36-byte keys)
+		klen: c.size_t
+		_ = leveldb_iter_key(iter, &klen)
+		if klen == 36 {
+			count += 1
+		}
+		leveldb_iter_next(iter)
+	}
+	return count
 }
 
-// Batch put within caller's transaction (for coins_cache_flush).
-utxo_db_batch_put :: proc(db: ^UTXO_DB, txn: MDB_txn, outpoint: wire.Outpoint, coin: UTXO_Coin) -> Storage_Error {
+// Add a put to a WriteBatch (for coins_cache_flush).
+utxo_db_batch_put :: proc(db: ^UTXO_DB, batch: LDB_WriteBatch, outpoint: wire.Outpoint, coin: UTXO_Coin) {
 	key := _utxo_key(outpoint)
-	value_buf: [UTXO_MAX_VALUE_SIZE]byte
-	value_len := _utxo_encode_value(&value_buf, coin)
-	if value_len < 0 {
-		return .Value_Too_Large
+	total_size := 13 + 5 + len(coin.script)
+	value_buf: [10240]byte
+	if total_size <= 10240 {
+		value_len := _utxo_encode_value_into(value_buf[:], coin)
+		ldb_batch_put(batch, key[:], value_buf[:value_len])
+	} else {
+		heap_buf := make([]byte, total_size, context.temp_allocator)
+		value_len := _utxo_encode_value_into(heap_buf, coin)
+		ldb_batch_put(batch, key[:], heap_buf[:value_len])
 	}
-	return lmdb_put(txn, db.lmdb.utxo_dbi, key[:], value_buf[:value_len])
 }
 
-// Batch delete within caller's transaction (for coins_cache_flush).
-utxo_db_batch_delete :: proc(db: ^UTXO_DB, txn: MDB_txn, outpoint: wire.Outpoint) -> Storage_Error {
+// Add a delete to a WriteBatch (for coins_cache_flush).
+utxo_db_batch_delete :: proc(db: ^UTXO_DB, batch: LDB_WriteBatch, outpoint: wire.Outpoint) {
 	key := _utxo_key(outpoint)
-	derr := lmdb_del(txn, db.lmdb.utxo_dbi, key[:])
-	if derr == .Not_Found {
-		return .None // Already deleted, not an error
-	}
-	return derr
+	ldb_batch_delete(batch, key[:])
 }
 
 // --- Key/Value encoding ---
@@ -139,7 +122,7 @@ _utxo_key :: proc(outpoint: wire.Outpoint) -> [36]byte {
 }
 
 // Value: height[4 LE] || is_coinbase[1] || amount[8 LE] || script_len[CompactSize] || script[...]
-_utxo_encode_value :: proc(buf: ^[UTXO_MAX_VALUE_SIZE]byte, coin: UTXO_Coin) -> int {
+_utxo_encode_value_into :: proc(buf: []byte, coin: UTXO_Coin) -> int {
 	off := 0
 
 	// height (4 LE)
@@ -164,7 +147,7 @@ _utxo_encode_value :: proc(buf: ^[UTXO_MAX_VALUE_SIZE]byte, coin: UTXO_Coin) -> 
 
 	// script_len (CompactSize) + script
 	cs_buf, cs_size := wire.compact_size_encode(u64(len(coin.script)))
-	if off + cs_size + len(coin.script) > UTXO_MAX_VALUE_SIZE {
+	if off + cs_size + len(coin.script) > len(buf) {
 		return -1
 	}
 	for i in 0 ..< cs_size {

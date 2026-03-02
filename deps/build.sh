@@ -12,12 +12,31 @@ ar rcs "$LIB_DIR/libripemd160.a" "$SCRIPT_DIR/ripemd160/ripemd160.o"
 rm "$SCRIPT_DIR/ripemd160/ripemd160.o"
 echo "Built libripemd160.a"
 
-echo "=== Building LMDB ==="
-cc -c -O2 -o "$SCRIPT_DIR/lmdb/mdb.o" "$SCRIPT_DIR/lmdb/mdb.c"
-cc -c -O2 -o "$SCRIPT_DIR/lmdb/midl.o" "$SCRIPT_DIR/lmdb/midl.c"
-ar rcs "$LIB_DIR/liblmdb.a" "$SCRIPT_DIR/lmdb/mdb.o" "$SCRIPT_DIR/lmdb/midl.o"
-rm -f "$SCRIPT_DIR/lmdb/mdb.o" "$SCRIPT_DIR/lmdb/midl.o"
-echo "Built liblmdb.a"
+echo "=== Building LevelDB ==="
+LEVELDB_DIR="$SCRIPT_DIR/leveldb"
+CXX="${CXX:-c++}"
+CXXFLAGS="-O2 -DNDEBUG -DLEVELDB_PLATFORM_POSIX -I$LEVELDB_DIR -I$LEVELDB_DIR/include"
+
+SOURCES="db/builder.cc db/c.cc db/db_impl.cc db/db_iter.cc db/dbformat.cc
+  db/dumpfile.cc db/filename.cc db/log_reader.cc db/log_writer.cc
+  db/memtable.cc db/repair.cc db/table_cache.cc db/version_edit.cc
+  db/version_set.cc db/write_batch.cc table/block.cc table/block_builder.cc
+  table/filter_block.cc table/format.cc table/iterator.cc table/merger.cc
+  table/table.cc table/table_builder.cc table/two_level_iterator.cc
+  util/arena.cc util/bloom.cc util/cache.cc util/coding.cc util/comparator.cc
+  util/crc32c.cc util/env.cc util/env_posix.cc util/filter_policy.cc
+  util/hash.cc util/logging.cc util/options.cc util/status.cc"
+
+OBJS=""
+for src in $SOURCES; do
+    obj="$LEVELDB_DIR/${src%.cc}.o"
+    mkdir -p "$(dirname "$obj")"
+    $CXX $CXXFLAGS -std=c++11 -c "$LEVELDB_DIR/$src" -o "$obj"
+    OBJS="$OBJS $obj"
+done
+ar rcs "$LIB_DIR/libleveldb.a" $OBJS
+for obj in $OBJS; do rm -f "$obj"; done
+echo "Built libleveldb.a"
 
 echo "=== Building libsecp256k1 ==="
 cd "$SCRIPT_DIR/libsecp256k1"

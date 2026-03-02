@@ -1,7 +1,6 @@
 package wire
 
 import "../crypto"
-import "core:strings"
 
 // P2P message header: 24 bytes
 // [magic:4][command:12][payload_size:4][checksum:4]
@@ -32,6 +31,7 @@ CMD_FEEFILTER   :: "feefilter"
 CMD_REJECT      :: "reject"
 CMD_WTXIDRELAY  :: "wtxidrelay"
 CMD_ADDRV2      :: "addrv2"
+CMD_UNKNOWN     :: "unknown"
 
 // Computes the 4-byte checksum (first 4 bytes of SHA256d of payload).
 compute_checksum :: proc(payload: []byte) -> [4]byte {
@@ -87,8 +87,10 @@ command_from_bytes :: proc(cmd: [COMMAND_SIZE]byte) -> string {
 	case CMD_ADDRV2:      return CMD_ADDRV2
 	}
 
-	// Unknown command — clone via temp allocator.
-	return strings.clone(s, context.temp_allocator)
+	// Unknown command — return static string (must not use temp_allocator;
+	// reader thread's temp allocator is freed on disconnect, but messages
+	// referencing this string may still be in the channel).
+	return CMD_UNKNOWN
 }
 
 // Serializes a message header.

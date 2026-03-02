@@ -1,26 +1,33 @@
 .PHONY: all deps build test clean
 
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    CXX_LINK := -lc++
+else
+    CXX_LINK := -lstdc++
+endif
+
 all: deps build
 
 deps:
 	./deps/build.sh
 
 build: deps
-	odin build . -out:btcnode
+	odin build . -out:btcnode -extra-linker-flags:"$(CXX_LINK)"
 
 test: deps
 	odin test crypto
 	odin test wire
 	odin test script -define:ODIN_TEST_THREADS=1
 	odin test consensus
-	odin test storage
-	odin test chain
-	odin test p2p
-	odin test mempool
-	odin test rpc
+	odin test storage -extra-linker-flags:"$(CXX_LINK)"
+	odin test chain -extra-linker-flags:"$(CXX_LINK)"
+	odin test p2p -extra-linker-flags:"$(CXX_LINK)"
+	odin test mempool -extra-linker-flags:"$(CXX_LINK)"
+	odin test rpc -extra-linker-flags:"$(CXX_LINK)"
 
 debug: deps
-	odin build . -out:btcnode -debug
+	odin build . -out:btcnode -debug -extra-linker-flags:"$(CXX_LINK)"
 
 clean:
 	rm -f btcnode

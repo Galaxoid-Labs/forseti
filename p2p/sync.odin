@@ -159,9 +159,12 @@ sync_handle_headers :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, headers: []wire
 
 	sm.headers_received += accepted
 
-	// If we're not actively syncing headers, just accept them and return.
-	// This handles unsolicited header announcements (BIP130) during block download.
+	// If we're not actively syncing headers, handle as a steady-state announcement.
+	// BIP130: peers announce new blocks via headers messages. Request the blocks.
 	if sm.state != .Syncing_Headers {
+		if accepted > 0 {
+			_request_announced_blocks(sm, peer_id, headers, peers)
+		}
 		return
 	}
 
@@ -671,6 +674,31 @@ build_block_locator :: proc(cs: ^chain.Chain_State) -> []Hash256 {
 	copy(result, locator[:])
 	delete(locator)
 	return result
+}
+
+// Request blocks for newly announced headers (BIP130 steady-state).
+// Called when headers arrive while In_Sync or Downloading_Blocks.
+_request_announced_blocks :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, headers: []wire.Block_Header, peers: ^map[Peer_Id]^Peer) {
+	peer, found := peers[peer_id]
+	if !found || peer.state != .Active {
+		return
+	}
+
+	// Build getdata for headers that we now know about but don't have block data for.
+	inv := make([dynamic]wire.Inv_Vector, 0, len(headers), context.temp_allocator)
+	for i in 0 ..< len(headers) {
+		hdr := headers[i]
+		hash := wire.block_header_hash(&hdr)
+		entry, known := sm.chain.block_index.entries[hash]
+		if known && .Valid_Header in entry.status && .Has_Data not_in entry.status {
+			append(&inv, wire.Inv_Vector{type = .Witness_Block, hash = hash})
+		}
+	}
+
+	if len(inv) > 0 {
+		log.infof("Requesting %d announced block(s) from peer %d", len(inv), peer_id)
+		peer_send_getdata(peer, inv[:])
+	}
 }
 
 // Build the download queue: all block index entries that have Valid_Header but not Has_Data.

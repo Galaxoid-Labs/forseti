@@ -14,6 +14,7 @@ MAX_STANDARD_TX_VERSION :: i32(2)
 MAX_STANDARD_SIGOPS :: 4000
 MAX_SCRIPT_SIZE :: 10_000
 MAX_STANDARD_SCRIPTPUBKEY_SIZE :: 10_000
+MAX_OP_RETURN_SIZE :: 83                   // Bitcoin Core -datacarriersize default (OP_RETURN + push + 80 bytes data)
 
 // Check transaction against standard relay policy.
 check_tx_policy :: proc(tx: ^wire.Tx) -> Mempool_Error {
@@ -40,6 +41,11 @@ check_tx_policy :: proc(tx: ^wire.Tx) -> Mempool_Error {
 		// Must be a standard output type
 		stype := script.classify_script(spk)
 		if stype == .Non_Standard {
+			return .Non_Standard
+		}
+
+		// OP_RETURN: enforce datacarrier size limit (Bitcoin Core -datacarriersize=83)
+		if stype == .Null_Data && len(spk) > MAX_OP_RETURN_SIZE {
 			return .Non_Standard
 		}
 

@@ -14,5 +14,5 @@ Storage_Error :: enum {
 	Value_Too_Large,
 	Bad_Magic,
 	Bad_Version,
-	LMDB_Error,
+	DB_Error,
 }

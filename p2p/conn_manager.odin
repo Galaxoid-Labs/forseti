@@ -203,6 +203,7 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 	}
 
 	last_ping_check: i64 = time.to_unix_seconds(time.now())
+	last_header_refresh: i64 = time.to_unix_seconds(time.now())
 
 	// Main message loop.
 	for !cm.shutdown {
@@ -210,23 +211,57 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 		// inv messages, etc.) to prevent unbounded memory growth during IBD.
 		free_all(context.temp_allocator)
 
-		msg, ok := chan.recv(cm.msg_chan)
-		if !ok {
-			break // Channel closed.
+		// Use non-blocking recv when there are pending blocks to connect,
+		// so the loop keeps making progress instead of stalling on the channel.
+		has_pending := _has_pending_blocks(cm)
+		msg: Peer_Message
+		got_msg: bool
+
+		if has_pending {
+			msg, got_msg = chan.try_recv(cm.msg_chan)
+		} else {
+			msg, got_msg = chan.recv(cm.msg_chan)
+			if !got_msg {
+				break // Channel closed.
+			}
 		}
 
-		_conn_manager_process_message(cm, msg)
+		if got_msg {
+			_conn_manager_process_message(cm, msg)
 
-		// Free payload after processing.
-		if msg.payload != nil {
-			delete(msg.payload)
+			// Free payload after processing.
+			if msg.payload != nil {
+				delete(msg.payload)
+			}
 		}
 
 		// Check for stalled block/header requests.
 		sync_check_stalls(&cm.sync_mgr, &cm.peers)
 
-		// Periodic ping check.
+		// Connect any pending stored blocks (recovery catch-up).
+		// During normal operation this is a no-op. After crash recovery,
+		// thousands of stored blocks need connecting.
+		_conn_manager_connect_pending(cm)
+
 		now := time.to_unix_seconds(time.now())
+
+		// Periodic getheaders while in sync — safety net for missed BIP130 announcements.
+		// Bitcoin Core does this every ~15 minutes; we do it every 2 minutes since we
+		// have fewer peers and signet block times are ~10 minutes.
+		if now - last_header_refresh >= HEADER_REFRESH_SECS && cm.sync_mgr.state == .In_Sync {
+			last_header_refresh = now
+			locator := build_block_locator(cm.sync_mgr.chain)
+			// Send to first active peer we find.
+			for _, peer in cm.peers {
+				if peer.state == .Active {
+					peer_send_getheaders(peer, locator, HASH_ZERO)
+					break
+				}
+			}
+			delete(locator)
+		}
+
+		// Periodic ping check.
 		if now - last_ping_check >= PING_INTERVAL_SECS {
 			last_ping_check = now
 			for _, peer in cm.peers {
@@ -388,6 +423,7 @@ _conn_manager_handle_inv :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: [
 	}
 
 	wanted := make([dynamic]wire.Inv_Vector, 0, len(inv_msg.inventory), context.temp_allocator)
+	has_unknown_block := false
 	for iv in inv_msg.inventory {
 		#partial switch iv.type {
 		case .Block, .Witness_Block:
@@ -395,6 +431,7 @@ _conn_manager_handle_inv :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: [
 			if cm.sync_mgr.state == .In_Sync {
 				_, known := cm.chain.block_index.entries[iv.hash]
 				if !known {
+					has_unknown_block = true
 					append(&wanted, wire.Inv_Vector{type = .Witness_Block, hash = iv.hash})
 				}
 			}
@@ -404,6 +441,15 @@ _conn_manager_handle_inv :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: [
 				append(&wanted, wire.Inv_Vector{type = .Witness_Tx, hash = iv.hash})
 			}
 		}
+	}
+
+	// If we got inv for unknown blocks, send getheaders to discover the chain.
+	// This handles multi-block gaps (e.g., node was offline) where the peer
+	// doesn't support sendheaders or we missed the headers announcement.
+	if has_unknown_block {
+		locator := build_block_locator(cm.sync_mgr.chain)
+		defer delete(locator)
+		peer_send_getheaders(peer, locator, HASH_ZERO)
 	}
 
 	if len(wanted) > 0 {
@@ -517,6 +563,40 @@ _conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid: Hash256, from_peer: Peer
 // Exported relay for RPC thread (no sender to exclude).
 conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid: Hash256) {
 	_conn_manager_relay_tx(cm, txid, Peer_Id(0))
+}
+
+// Check if there are stored blocks awaiting connection.
+_has_pending_blocks :: proc(cm: ^Conn_Manager) -> bool {
+	_, tip_height := chain.chain_tip(cm.chain)
+	return tip_height < cm.sync_mgr.best_header_height
+}
+
+// Connect stored-but-not-connected blocks (recovery catch-up).
+// After crash recovery, thousands of blocks may be on disk awaiting connection.
+// This drains the backlog without waiting for new block arrivals from peers.
+_conn_manager_connect_pending :: proc(cm: ^Conn_Manager) {
+	_, tip_height := chain.chain_tip(cm.chain)
+	best_header := cm.sync_mgr.best_header_height
+	if tip_height >= best_header {
+		return
+	}
+
+	prev_height := tip_height
+	connected, cerr := chain.connect_pending_blocks(cm.chain)
+	if connected > 0 {
+		_, new_height := chain.chain_tip(cm.chain)
+		cm.sync_mgr.last_tip_update = time.to_unix_seconds(time.now())
+
+		// Periodic UTXO flush during catch-up.
+		if new_height / 1000 > prev_height / 1000 {
+			tip_hash, tip_h := chain.chain_tip(cm.chain)
+			chain.coins_cache_flush(&cm.chain.coins, tip_hash, tip_h)
+		}
+
+		if new_height / 1000 > prev_height / 1000 || new_height >= best_header {
+			log.infof("Recovery catch-up: height %d / %d", new_height, best_header)
+		}
+	}
 }
 
 // Short hex for log messages (first 8 chars).

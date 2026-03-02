@@ -33,42 +33,31 @@ Block_Index_Record :: struct {
 BLOCK_INDEX_RECORD_SIZE :: 101
 
 Index_DB :: struct {
-	lmdb:    ^LMDB_Store,
+	store:   ^LDB_Store,
 	records: map[Hash256]Block_Index_Record,
 }
 
-// Initialize index database, loading all records from LMDB into memory.
-index_db_init :: proc(lmdb: ^LMDB_Store, allocator := context.allocator) -> (db: Index_DB, err: Storage_Error) {
-	db.lmdb = lmdb
+// Initialize index database, loading all records from LevelDB into memory.
+index_db_init :: proc(store: ^LDB_Store, allocator := context.allocator) -> (db: Index_DB, err: Storage_Error) {
+	db.store = store
 	db.records = make(map[Hash256]Block_Index_Record, 1024, allocator)
 
-	// Load all records via cursor scan
-	txn: MDB_txn
-	rc := mdb_txn_begin(lmdb.env, nil, MDB_RDONLY, &txn)
-	if rc != MDB_SUCCESS {
-		return db, .IO_Error
-	}
-	defer mdb_txn_abort(txn)
+	// Load all records via iterator scan
+	iter := leveldb_create_iterator(store.index_db, store.read_opts)
+	defer leveldb_iter_destroy(iter)
 
-	cursor: MDB_cursor
-	rc = mdb_cursor_open(txn, lmdb.index_dbi, &cursor)
-	if rc != MDB_SUCCESS {
-		return db, .IO_Error
-	}
-	defer mdb_cursor_close(cursor)
-
-	key: MDB_val
-	val: MDB_val
-	rc = mdb_cursor_get(cursor, &key, &val, MDB_FIRST)
-	for rc == MDB_SUCCESS {
-		if val.mv_size >= c.size_t(BLOCK_INDEX_RECORD_SIZE) {
-			data := ([^]byte)(val.mv_data)[:val.mv_size]
+	leveldb_iter_seek_to_first(iter)
+	for leveldb_iter_valid(iter) != 0 {
+		vlen: c.size_t
+		vptr := leveldb_iter_value(iter, &vlen)
+		if vlen >= c.size_t(BLOCK_INDEX_RECORD_SIZE) {
+			data := vptr[:vlen]
 			rec, ok := _deserialize_index_record(data)
 			if ok {
 				db.records[rec.hash] = rec
 			}
 		}
-		rc = mdb_cursor_get(cursor, &key, &val, MDB_NEXT)
+		leveldb_iter_next(iter)
 	}
 
 	return db, .None
@@ -79,43 +68,37 @@ index_db_close :: proc(db: ^Index_DB) {
 	delete(db.records)
 }
 
-// Write a record to LMDB and update the in-memory map.
+// Clear the in-memory records map to free memory after block_index_load
+// has copied all data into Block_Index.entries. Subsequent index_db_put/
+// index_db_batch_put calls still update the map (for test compatibility),
+// but it only holds entries from the current session.
+index_db_clear_records :: proc(db: ^Index_DB) {
+	delete(db.records)
+	db.records = make(map[Hash256]Block_Index_Record, 64)
+}
+
+// Write a record to LevelDB and update the in-memory map.
 index_db_put :: proc(db: ^Index_DB, record: Block_Index_Record) -> Storage_Error {
-	// Serialize to fixed-size buffer
 	buf: [BLOCK_INDEX_RECORD_SIZE]byte
 	_serialize_index_record(&buf, record)
 
-	txn, terr := lmdb_begin_write(db.lmdb)
-	if terr != .None {
-		return terr
-	}
-
 	hash := record.hash
-	perr := lmdb_put(txn, db.lmdb.index_dbi, hash[:], buf[:])
+	perr := ldb_put(db.store.index_db, db.store.write_opts, hash[:], buf[:])
 	if perr != .None {
-		lmdb_abort(txn)
 		return perr
 	}
 
-	cerr := lmdb_commit(txn)
-	if cerr != .None {
-		return cerr
-	}
-
-	// Update in-memory map
 	db.records[record.hash] = record
 	return .None
 }
 
-// Write a record within a caller-provided write transaction (for batch header sync).
-index_db_batch_put :: proc(db: ^Index_DB, txn: MDB_txn, record: Block_Index_Record) -> Storage_Error {
+// Add a record to a WriteBatch and update the in-memory map (for batch header sync).
+index_db_batch_put :: proc(db: ^Index_DB, batch: LDB_WriteBatch, record: Block_Index_Record) {
 	buf: [BLOCK_INDEX_RECORD_SIZE]byte
 	_serialize_index_record(&buf, record)
 	hash := record.hash
-	perr := lmdb_put(txn, db.lmdb.index_dbi, hash[:], buf[:])
-	if perr != .None { return perr }
+	ldb_batch_put(batch, hash[:], buf[:])
 	db.records[record.hash] = record
-	return .None
 }
 
 // Lookup a record by block hash (from in-memory map).

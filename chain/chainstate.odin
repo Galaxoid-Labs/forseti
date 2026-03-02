@@ -11,7 +11,7 @@ import "../wire"
 
 Chain_State :: struct {
 	block_index:  Block_Index,
-	lmdb:         storage.LMDB_Store,
+	store:        storage.LDB_Store,
 	index_db:     storage.Index_DB,
 	block_db:     storage.Block_DB,
 	utxo_db:      storage.UTXO_DB,
@@ -19,6 +19,10 @@ Chain_State :: struct {
 	active_chain: [dynamic]Hash256,
 	undo_files:   storage.Flat_File_Manager,
 	params:       ^consensus.Chain_Params,
+	// Per-input verification arena: heap-allocated once, reset between inputs.
+	verify_buf:   []byte,
+	verify_arena: mem.Arena,
+	verify_alloc: mem.Allocator,
 }
 
 // Initialize chain state. Caller allocates Chain_State and passes pointer.
@@ -28,17 +32,17 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	// Ensure data_dir exists
 	os.make_directory(data_dir)
 
-	// Open shared LMDB environment
-	lmdb, lmdb_err := storage.lmdb_open(data_dir)
-	if lmdb_err != .None {
+	// Open shared LevelDB store (chainstate + block index)
+	store, store_err := storage.ldb_open(data_dir)
+	if store_err != .None {
 		return .Storage_Error
 	}
-	cs.lmdb = lmdb
+	cs.store = store
 
-	// Init Index DB (backed by LMDB)
-	idx_db, idx_err := storage.index_db_init(&cs.lmdb)
+	// Init Index DB (backed by LevelDB)
+	idx_db, idx_err := storage.index_db_init(&cs.store)
 	if idx_err != .None {
-		storage.lmdb_close(&cs.lmdb)
+		storage.ldb_close(&cs.store)
 		return .Storage_Error
 	}
 	cs.index_db = idx_db
@@ -47,13 +51,13 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	blk_db, blk_err := storage.block_db_open(data_dir, params.network_magic)
 	if blk_err != .None {
 		storage.index_db_close(&cs.index_db)
-		storage.lmdb_close(&cs.lmdb)
+		storage.ldb_close(&cs.store)
 		return .Storage_Error
 	}
 	cs.block_db = blk_db
 
-	// Init UTXO DB (backed by LMDB)
-	cs.utxo_db = storage.utxo_db_init(&cs.lmdb)
+	// Init UTXO DB (backed by LevelDB)
+	cs.utxo_db = storage.utxo_db_init(&cs.store)
 
 	// Initialize coins cache (pointer to cs.utxo_db stays valid)
 	cs.coins = coins_cache_init(&cs.utxo_db)
@@ -63,7 +67,7 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	if undo_err != .None {
 		storage.index_db_close(&cs.index_db)
 		storage.block_db_close(&cs.block_db)
-		storage.lmdb_close(&cs.lmdb)
+		storage.ldb_close(&cs.store)
 		return .Storage_Error
 	}
 	cs.undo_files = undo_files
@@ -71,6 +75,9 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	// Build in-memory block index
 	cs.block_index = block_index_init()
 	block_index_load(&cs.block_index, &cs.index_db)
+
+	// Free the redundant in-memory records map — all data is now in block_index.entries.
+	storage.index_db_clear_records(&cs.index_db)
 
 	// Seed genesis block header if not already in index
 	if cs.block_index.genesis == nil {
@@ -83,10 +90,15 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	// Rebuild active chain from genesis to tip
 	cs.active_chain = make([dynamic]Hash256, 0, 1024)
 
-	// Crash recovery: read meta tip from LMDB and truncate active chain if needed
+	// Crash recovery: read meta tip and truncate active chain if needed
 	_recover_from_meta(cs)
 
 	_rebuild_active_chain(cs)
+
+	// Allocate persistent per-input verification arena (2 MB, reused across blocks)
+	cs.verify_buf = make([]byte, 2 * 1024 * 1024)
+	mem.arena_init(&cs.verify_arena, cs.verify_buf)
+	cs.verify_alloc = mem.arena_allocator(&cs.verify_arena)
 
 	// Connect any stored-but-not-connected blocks from a previous session.
 	pending_connected, _ := connect_pending_blocks(cs)
@@ -106,10 +118,13 @@ chain_state_destroy :: proc(cs: ^Chain_State) {
 	storage.utxo_db_close(&cs.utxo_db)
 	storage.block_db_close(&cs.block_db)
 	storage.index_db_close(&cs.index_db)
-	storage.lmdb_close(&cs.lmdb)
+	storage.ldb_close(&cs.store)
 	storage.flat_file_close(&cs.undo_files)
 	block_index_destroy(&cs.block_index)
 	delete(cs.active_chain)
+	if cs.verify_buf != nil {
+		delete(cs.verify_buf)
+	}
 }
 
 // Get current tip hash and height.
@@ -179,17 +194,11 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 
 	// Per-input verification arena: sighash computation allocates wire writers
 	// on temp_allocator. For txs with hundreds of inputs, these accumulate and
-	// exhaust the block arena. This 2MB scratch arena (heap-allocated, shared
-	// across all txs) is reset between inputs to bound memory usage.
-	verify_buf: []byte
-	verify_arena: mem.Arena
-	verify_alloc: mem.Allocator
+	// exhaust the block arena. The Chain_State's persistent 2MB scratch arena
+	// is reset between inputs to bound memory usage.
 	if !skip_scripts {
-		verify_buf = make([]byte, 2 * 1024 * 1024)
-		mem.arena_init(&verify_arena, verify_buf)
-		verify_alloc = mem.arena_allocator(&verify_arena)
+		mem.arena_free_all(&cs.verify_arena)
 	}
-	defer if verify_buf != nil { delete(verify_buf) }
 
 	for tx_idx in 0 ..< len(block.txs) {
 		tx := block.txs[tx_idx]
@@ -230,8 +239,8 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 			saved_temp := context.temp_allocator
 
 			for in_idx in 0 ..< len(tx.inputs) {
-				mem.arena_free_all(&verify_arena)
-				context.temp_allocator = verify_alloc
+				mem.arena_free_all(&cs.verify_arena)
+				context.temp_allocator = cs.verify_alloc
 
 				verifier := script.Script_Verifier {
 					tx            = &block.txs[tx_idx],
@@ -427,7 +436,7 @@ accept_block_header :: proc(cs: ^Chain_State, header: ^wire.Block_Header) -> (^B
 	return entry, .None
 }
 
-// Accept a batch of block headers in a single LMDB write transaction.
+// Accept a batch of block headers in a single atomic WriteBatch.
 // Returns the number accepted and the best new header height.
 accept_block_headers_batch :: proc(cs: ^Chain_State, headers: []wire.Block_Header) -> (accepted: int, best_height: int) {
 	best_height = cs.block_index.best_header != nil ? cs.block_index.best_header.height : -1
@@ -436,12 +445,8 @@ accept_block_headers_batch :: proc(cs: ^Chain_State, headers: []wire.Block_Heade
 		return 0, best_height
 	}
 
-	// Open one write transaction for the entire batch.
-	txn, terr := storage.lmdb_begin_write(&cs.lmdb)
-	if terr != .None {
-		log.errorf("Failed to begin batch write txn for headers: %v", terr)
-		return 0, best_height
-	}
+	batch := storage.ldb_batch_create()
+	defer storage.ldb_batch_destroy(batch)
 
 	for i in 0 ..< len(headers) {
 		hdr := headers[i]
@@ -474,11 +479,7 @@ accept_block_headers_batch :: proc(cs: ^Chain_State, headers: []wire.Block_Heade
 		entry := block_index_add(&cs.block_index, &hdr, new_height, status)
 		rec := block_index_to_record(entry)
 
-		perr := storage.index_db_batch_put(&cs.index_db, txn, rec)
-		if perr != .None {
-			log.errorf("Failed to batch-write header at height %d: %v", new_height, perr)
-			continue
-		}
+		storage.index_db_batch_put(&cs.index_db, batch, rec)
 
 		accepted += 1
 		if new_height > best_height {
@@ -486,15 +487,13 @@ accept_block_headers_batch :: proc(cs: ^Chain_State, headers: []wire.Block_Heade
 		}
 	}
 
-	// Commit the entire batch in one fsync.
+	// Commit the entire batch atomically.
 	if accepted > 0 {
-		cerr := storage.lmdb_commit(txn)
+		cerr := storage.ldb_batch_write(cs.store.index_db, cs.store.sync_opts, batch)
 		if cerr != .None {
 			log.errorf("Failed to commit header batch: %v", cerr)
 			return 0, best_height
 		}
-	} else {
-		storage.lmdb_abort(txn)
 	}
 
 	return accepted, best_height
@@ -550,7 +549,7 @@ store_block :: proc(cs: ^Chain_State, block: ^wire.Block) -> Chain_Error {
 	entry.data_size = loc.data_size
 	entry.status += {.Has_Data}
 
-	// In-memory index is updated; LMDB persist deferred to connect_block
+	// In-memory index is updated; LevelDB persist deferred to connect_block
 	// which writes the final status (Has_Data + Valid_Chain). On crash,
 	// un-persisted blocks are re-downloaded — connect_pending_blocks handles this.
 
@@ -672,11 +671,11 @@ _rollback_applied_txs :: proc(cs: ^Chain_State, block: ^wire.Block, applied: []i
 	}
 }
 
-// Read the meta tip (hash + height) from LMDB. On crash recovery, if the
+// Read the meta tip (hash + height) from LevelDB. On crash recovery, if the
 // block index has entries marked Valid_Chain beyond the meta tip, strip
 // those flags so connect_pending_blocks can replay them.
 _recover_from_meta :: proc(cs: ^Chain_State) {
-	meta_hash, meta_height, ok := _read_meta_tip(&cs.lmdb)
+	meta_hash, meta_height, ok := _read_meta_tip(&cs.store)
 	if !ok {
 		// No meta tip yet (fresh DB) — nothing to recover.
 		return
@@ -710,18 +709,12 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 	}
 }
 
-// Read chain tip metadata from LMDB meta database.
+// Read chain tip metadata from LevelDB chainstate database.
 // Returns (hash, height, ok).
-_read_meta_tip :: proc(lmdb: ^storage.LMDB_Store) -> (Hash256, int, bool) {
-	txn, terr := storage.lmdb_begin_read(lmdb)
-	if terr != .None {
-		return HASH_ZERO, -1, false
-	}
-	defer storage.lmdb_abort(txn)
-
+_read_meta_tip :: proc(store: ^storage.LDB_Store) -> (Hash256, int, bool) {
 	key_str := "tip"
 	key := transmute([]byte)key_str
-	data, found := storage.lmdb_get(txn, lmdb.meta_dbi, key)
+	data, found := storage.ldb_get(store.chainstate_db, store.read_opts, key, context.temp_allocator)
 	if !found || len(data) < 36 {
 		return HASH_ZERO, -1, false
 	}
@@ -734,8 +727,8 @@ _read_meta_tip :: proc(lmdb: ^storage.LMDB_Store) -> (Hash256, int, bool) {
 	return hash, height, true
 }
 
-// Write chain tip metadata within an existing LMDB write transaction.
-write_meta_tip :: proc(lmdb: ^storage.LMDB_Store, txn: storage.MDB_txn, tip_hash: Hash256, tip_height: int) -> storage.Storage_Error {
+// Add chain tip metadata to a WriteBatch (committed atomically with UTXOs).
+write_meta_tip :: proc(store: ^storage.LDB_Store, batch: storage.LDB_WriteBatch, tip_hash: Hash256, tip_height: int) {
 	key_str := "tip"
 	key := transmute([]byte)key_str
 
@@ -751,7 +744,7 @@ write_meta_tip :: proc(lmdb: ^storage.LMDB_Store, txn: storage.MDB_txn, tip_hash
 	val[34] = byte(ht >> 16)
 	val[35] = byte(ht >> 24)
 
-	return storage.lmdb_put(txn, lmdb.meta_dbi, key, val[:])
+	storage.ldb_batch_put(batch, key, val[:])
 }
 
 // Rebuild active chain by walking from genesis through prev pointers.

@@ -26,19 +26,19 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 - `wire/` — Protocol types, CompactSize, tx/block serialization, message framing
 - `script/` — Script interpreter, opcodes, standard types, Taproot (BIP341/342)
 - `consensus/` — Chain params, PoW, difficulty, block/tx validation, BIP325 signet
-- `storage/` — LMDB bindings + wrapper, flat files, block DB, index DB, UTXO DB (8 files)
+- `storage/` — LevelDB bindings + wrapper, flat files, block DB, index DB, UTXO DB (8 files)
 - `chain/` — UTXO cache, block index with skip list, undo data, chain state (6 files)
 - `p2p/` — Peer connections, sync manager, connection manager (5 files)
 - `mempool/` — Fee rates, relay policy, validation pipeline, persistence (6 files)
 - `rpc/` — JSON-RPC server, 23 methods, HTTP server (4 files)
-- `deps/` — libsecp256k1 (submodule), ripemd160 (vendored C), lmdb (vendored C), static libs in deps/lib/
+- `deps/` — libsecp256k1 (submodule), ripemd160 (vendored C), leveldb (vendored C++), static libs in deps/lib/
 
 ## Key Architecture
 
-- **Storage**: LMDB with 3 named DBs (utxo, index, meta) in `<datadir>/chainstate/`. Blocks stored in flat files (`blk*.dat`, `rev*.dat`).
-- **Crash consistency**: Atomic LMDB write transaction commits UTXO changes + chain tip metadata together. Recovery strips Valid_Chain from blocks above the last flush point and replays from flat files.
+- **Storage**: Two LevelDB instances — `<datadir>/chainstate/` (UTXOs + meta tip) and `<datadir>/blocks/index/` (block index). 256MB LRU cache, bloom filter, no Snappy. Blocks stored in flat files (`blk*.dat`, `rev*.dat`).
+- **Crash consistency**: Atomic WriteBatch commits UTXO changes + chain tip metadata together. Recovery strips Valid_Chain from blocks above the last flush point and replays from flat files.
 - **UTXO cache**: Write-back with Dirty/Fresh flags. Flushed every 1000 blocks during sync and at shutdown. Rollback on block validation failure.
-- **Sync**: Headers-first with batched LMDB writes, then multi-peer block download (getdata with Witness_Block, up to 64 blocks per peer). Bandwidth-based scoring allocates more slots to faster peers. Stall detection requeues blocks after 30s.
+- **Sync**: Headers-first with batched WriteBatch, then multi-peer block download (getdata with Witness_Block, up to 64 blocks per peer). Bandwidth-based scoring allocates more slots to faster peers. Stall detection requeues blocks after 30s.
 - **Sighash cache**: BIP143 + BIP341 intermediate hashes cached per-tx. Per-input 2MB verification arena prevents arena exhaustion for large txs.
 - **Thread model**: Main (setup+wait), RPC thread, P2P thread, one reader thread per peer.
 

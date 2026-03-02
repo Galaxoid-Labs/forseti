@@ -196,79 +196,56 @@ test_block_db_multiple_blocks :: proc(t: ^testing.T) {
 	}
 }
 
-// --- LMDB tests ---
+// --- LevelDB tests ---
 
 @(test)
-test_lmdb_open_close :: proc(t: ^testing.T) {
-	dir := make_test_dir("lmdb_oc")
+test_ldb_open_close :: proc(t: ^testing.T) {
+	dir := make_test_dir("ldb_oc")
 	defer remove_test_dir(dir)
 
-	store, err := lmdb_open(dir)
+	store, err := ldb_open(dir)
 	testing.expect_value(t, err, Storage_Error.None)
-	testing.expect(t, store.env != nil, "env should not be nil")
-	lmdb_close(&store)
+	testing.expect(t, store.chainstate_db != nil, "chainstate_db should not be nil")
+	testing.expect(t, store.index_db != nil, "index_db should not be nil")
+	ldb_close(&store)
 }
 
 @(test)
-test_lmdb_put_get_del :: proc(t: ^testing.T) {
-	dir := make_test_dir("lmdb_pgd")
+test_ldb_put_get_del :: proc(t: ^testing.T) {
+	dir := make_test_dir("ldb_pgd")
 	defer remove_test_dir(dir)
 
-	store, err := lmdb_open(dir)
+	store, err := ldb_open(dir)
 	testing.expect_value(t, err, Storage_Error.None)
-	defer lmdb_close(&store)
+	defer ldb_close(&store)
 
 	key := []byte{0x01, 0x02, 0x03, 0x04}
 	value := []byte{0xDE, 0xAD, 0xBE, 0xEF}
 
 	// Put
-	{
-		txn, terr := lmdb_begin_write(&store)
-		testing.expect_value(t, terr, Storage_Error.None)
-		perr := lmdb_put(txn, store.utxo_dbi, key, value)
-		testing.expect_value(t, perr, Storage_Error.None)
-		cerr := lmdb_commit(txn)
-		testing.expect_value(t, cerr, Storage_Error.None)
-	}
+	perr := ldb_put(store.chainstate_db, store.write_opts, key, value)
+	testing.expect_value(t, perr, Storage_Error.None)
 
 	// Get
-	{
-		txn, terr := lmdb_begin_read(&store)
-		testing.expect_value(t, terr, Storage_Error.None)
-		defer lmdb_abort(txn)
-
-		got, found := lmdb_get(txn, store.utxo_dbi, key)
-		testing.expect(t, found, "key should be found")
-		testing.expect_value(t, len(got), 4)
-		for i in 0 ..< 4 {
-			testing.expect(t, got[i] == value[i], fmt.tprintf("value byte %d", i))
-		}
+	got, found := ldb_get(store.chainstate_db, store.read_opts, key, context.temp_allocator)
+	testing.expect(t, found, "key should be found")
+	testing.expect_value(t, len(got), 4)
+	for i in 0 ..< 4 {
+		testing.expect(t, got[i] == value[i], fmt.tprintf("value byte %d", i))
 	}
 
 	// Delete
-	{
-		txn, terr := lmdb_begin_write(&store)
-		testing.expect_value(t, terr, Storage_Error.None)
-		derr := lmdb_del(txn, store.utxo_dbi, key)
-		testing.expect_value(t, derr, Storage_Error.None)
-		cerr := lmdb_commit(txn)
-		testing.expect_value(t, cerr, Storage_Error.None)
-	}
+	derr := ldb_del(store.chainstate_db, store.write_opts, key)
+	testing.expect_value(t, derr, Storage_Error.None)
 
 	// Verify gone
-	{
-		txn, terr := lmdb_begin_read(&store)
-		testing.expect_value(t, terr, Storage_Error.None)
-		defer lmdb_abort(txn)
-
-		_, found := lmdb_get(txn, store.utxo_dbi, key)
-		testing.expect(t, !found, "key should be gone after delete")
-	}
+	_, found2 := ldb_get(store.chainstate_db, store.read_opts, key, context.temp_allocator)
+	testing.expect(t, !found2, "key should be gone after delete")
 }
 
 @(test)
-test_lmdb_persistence :: proc(t: ^testing.T) {
-	dir := make_test_dir("lmdb_persist")
+test_ldb_persistence :: proc(t: ^testing.T) {
+	dir := make_test_dir("ldb_persist")
 	defer remove_test_dir(dir)
 
 	key := []byte{0xAA, 0xBB}
@@ -276,28 +253,20 @@ test_lmdb_persistence :: proc(t: ^testing.T) {
 
 	// Write and close
 	{
-		store, err := lmdb_open(dir)
+		store, err := ldb_open(dir)
 		testing.expect_value(t, err, Storage_Error.None)
 
-		txn, terr := lmdb_begin_write(&store)
-		testing.expect_value(t, terr, Storage_Error.None)
-		lmdb_put(txn, store.utxo_dbi, key, value)
-		lmdb_commit(txn)
-
-		lmdb_close(&store)
+		ldb_put(store.chainstate_db, store.sync_opts, key, value)
+		ldb_close(&store)
 	}
 
 	// Reopen and verify
 	{
-		store, err := lmdb_open(dir)
+		store, err := ldb_open(dir)
 		testing.expect_value(t, err, Storage_Error.None)
-		defer lmdb_close(&store)
+		defer ldb_close(&store)
 
-		txn, terr := lmdb_begin_read(&store)
-		testing.expect_value(t, terr, Storage_Error.None)
-		defer lmdb_abort(txn)
-
-		got, found := lmdb_get(txn, store.utxo_dbi, key)
+		got, found := ldb_get(store.chainstate_db, store.read_opts, key, context.temp_allocator)
 		testing.expect(t, found, "key should persist after reopen")
 		testing.expect_value(t, len(got), 3)
 		testing.expect(t, got[0] == 0x11 && got[1] == 0x22 && got[2] == 0x33, "value mismatch")
@@ -311,9 +280,9 @@ test_index_db_put_get :: proc(t: ^testing.T) {
 	dir := make_test_dir("indexdb_pg")
 	defer remove_test_dir(dir)
 
-	store, serr := lmdb_open(dir)
+	store, serr := ldb_open(dir)
 	testing.expect_value(t, serr, Storage_Error.None)
-	defer lmdb_close(&store)
+	defer ldb_close(&store)
 
 	db, err := index_db_init(&store)
 	testing.expect_value(t, err, Storage_Error.None)
@@ -360,7 +329,7 @@ test_index_db_persistence :: proc(t: ^testing.T) {
 	hash2: Hash256
 	hash2[0] = 0x02
 
-	store, serr := lmdb_open(dir)
+	store, serr := ldb_open(dir)
 	testing.expect_value(t, serr, Storage_Error.None)
 
 	// Open, write, close
@@ -375,12 +344,12 @@ test_index_db_persistence :: proc(t: ^testing.T) {
 		index_db_close(&db)
 	}
 
-	lmdb_close(&store)
+	ldb_close(&store)
 
 	// Reopen and verify
-	store2, serr2 := lmdb_open(dir)
+	store2, serr2 := ldb_open(dir)
 	testing.expect_value(t, serr2, Storage_Error.None)
-	defer lmdb_close(&store2)
+	defer ldb_close(&store2)
 
 	{
 		db, err := index_db_init(&store2)
@@ -405,9 +374,9 @@ test_index_db_overwrite :: proc(t: ^testing.T) {
 	dir := make_test_dir("indexdb_ow")
 	defer remove_test_dir(dir)
 
-	store, serr := lmdb_open(dir)
+	store, serr := ldb_open(dir)
 	testing.expect_value(t, serr, Storage_Error.None)
-	defer lmdb_close(&store)
+	defer ldb_close(&store)
 
 	db, err := index_db_init(&store)
 	testing.expect_value(t, err, Storage_Error.None)
@@ -438,9 +407,9 @@ test_utxo_db_put_get :: proc(t: ^testing.T) {
 	dir := make_test_dir("utxodb_pg")
 	defer remove_test_dir(dir)
 
-	store, serr := lmdb_open(dir)
+	store, serr := ldb_open(dir)
 	testing.expect_value(t, serr, Storage_Error.None)
-	defer lmdb_close(&store)
+	defer ldb_close(&store)
 
 	db := utxo_db_init(&store)
 	defer utxo_db_close(&db)
@@ -476,9 +445,9 @@ test_utxo_db_delete :: proc(t: ^testing.T) {
 	dir := make_test_dir("utxodb_del")
 	defer remove_test_dir(dir)
 
-	store, serr := lmdb_open(dir)
+	store, serr := ldb_open(dir)
 	testing.expect_value(t, serr, Storage_Error.None)
-	defer lmdb_close(&store)
+	defer ldb_close(&store)
 
 	db := utxo_db_init(&store)
 	defer utxo_db_close(&db)
@@ -503,9 +472,9 @@ test_utxo_db_bulk :: proc(t: ^testing.T) {
 	dir := make_test_dir("utxodb_bulk")
 	defer remove_test_dir(dir)
 
-	store, serr := lmdb_open(dir)
+	store, serr := ldb_open(dir)
 	testing.expect_value(t, serr, Storage_Error.None)
-	defer lmdb_close(&store)
+	defer ldb_close(&store)
 
 	db := utxo_db_init(&store)
 	defer utxo_db_close(&db)

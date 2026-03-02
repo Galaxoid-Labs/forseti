@@ -95,6 +95,8 @@ coins_cache_add :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: storage
 }
 
 // Spend a UTXO. Returns the spent coin for undo data.
+// The returned coin's script is cloned to context.temp_allocator (block arena)
+// so callers don't need to free it — it's reclaimed when the arena resets.
 coins_cache_spend :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage.UTXO_Coin, bool) {
 	entry, found := &cc.cache[outpoint]
 	if found {
@@ -103,6 +105,16 @@ coins_cache_spend :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage
 		}
 
 		spent_coin := entry.coin
+
+		// Clone script to temp allocator before discarding the heap copy.
+		// The caller (connect_block/disconnect_block/_rollback) uses the script
+		// only within the current block's arena lifetime.
+		if len(spent_coin.script) > 0 {
+			temp_script := make([]byte, len(spent_coin.script), context.temp_allocator)
+			copy(temp_script, spent_coin.script)
+			delete(entry.coin.script, cc.allocator)
+			spent_coin.script = temp_script
+		}
 
 		if .Fresh in entry.flags {
 			// Never reached DB — just remove from cache entirely
@@ -116,10 +128,18 @@ coins_cache_spend :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage
 		return spent_coin, true
 	}
 
-	// Not in cache — check DB
+	// Not in cache — check DB (allocates script on heap)
 	coin, db_found := storage.utxo_db_get(cc.db, outpoint, cc.allocator)
 	if !db_found {
 		return {}, false
+	}
+
+	// Clone script to temp allocator and free the heap copy
+	if len(coin.script) > 0 {
+		temp_script := make([]byte, len(coin.script), context.temp_allocator)
+		copy(temp_script, coin.script)
+		delete(coin.script, cc.allocator)
+		coin.script = temp_script
 	}
 
 	// Mark as spent sentinel in cache
@@ -157,16 +177,13 @@ coins_cache_restore :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: sto
 }
 
 // Flush dirty entries to DB atomically. All UTXO changes + metadata are
-// committed in a single LMDB write transaction for crash consistency.
+// committed in a single WriteBatch for crash consistency.
 coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) -> Chain_Error {
 	cache_size := len(cc.cache)
 	log.infof("UTXO flush at height %d: %d cache entries", tip_height, cache_size)
 
-	txn, terr := storage.lmdb_begin_write(cc.db.lmdb)
-	if terr != .None {
-		log.errorf("UTXO flush: failed to begin write txn")
-		return .Storage_Error
-	}
+	batch := storage.ldb_batch_create()
+	defer storage.ldb_batch_destroy(batch)
 
 	written, deleted := 0, 0
 	for outpoint, entry in cc.cache {
@@ -175,43 +192,27 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 		}
 
 		if _is_spent_sentinel_val(entry) {
-			serr := storage.utxo_db_batch_delete(cc.db, txn, outpoint)
-			if serr != .None {
-				log.errorf("UTXO flush: batch_delete failed: %v", serr)
-				storage.lmdb_abort(txn)
-				return .Storage_Error
-			}
+			storage.utxo_db_batch_delete(cc.db, batch, outpoint)
 			deleted += 1
 		} else {
-			serr := storage.utxo_db_batch_put(cc.db, txn, outpoint, entry.coin)
-			if serr != .None {
-				log.errorf("UTXO flush: batch_put failed for script_len=%d: %v", len(entry.coin.script), serr)
-				storage.lmdb_abort(txn)
-				return .Storage_Error
-			}
+			storage.utxo_db_batch_put(cc.db, batch, outpoint, entry.coin)
 			written += 1
 		}
 	}
 
-	// Write chain tip metadata in the same transaction
-	merr := write_meta_tip(cc.db.lmdb, txn, tip_hash, tip_height)
-	if merr != .None {
-		log.errorf("UTXO flush: write_meta_tip failed")
-		storage.lmdb_abort(txn)
-		return .Storage_Error
-	}
+	// Add chain tip metadata to the same batch
+	write_meta_tip(cc.db.store, batch, tip_hash, tip_height)
 
 	// ATOMIC: UTXOs + metadata committed together
-	cerr := storage.lmdb_commit(txn)
-	if cerr != .None {
-		log.errorf("UTXO flush: commit failed")
+	berr := storage.ldb_batch_write(cc.db.store.chainstate_db, cc.db.store.sync_opts, batch)
+	if berr != .None {
+		log.errorf("UTXO flush: batch write failed")
 		return .Storage_Error
 	}
 
 	log.infof("UTXO flush OK: wrote %d, deleted %d, evicting cache", written, deleted)
 
 	// Evict entire cache after flush to bound memory usage.
-	// All entries have been written to LMDB and can be re-read on demand.
 	for _, entry in cc.cache {
 		if len(entry.coin.script) > 0 {
 			delete(entry.coin.script, cc.allocator)
