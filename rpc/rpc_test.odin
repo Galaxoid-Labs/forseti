@@ -283,9 +283,42 @@ test_getblockchaininfo :: proc(t: ^testing.T) {
 	testing.expect(t, blocks_ok, "blocks should be integer")
 	testing.expect_value(t, int(blocks), 4)
 
+	// Check headers >= blocks
+	headers, headers_ok := obj["headers"].(json.Integer)
+	testing.expect(t, headers_ok, "headers should be integer")
+	testing.expect(t, headers >= blocks, fmt.tprintf("headers (%d) should be >= blocks (%d)", headers, blocks))
+
 	// Check best block hash present
 	_, hash_ok := obj["bestblockhash"].(json.String)
 	testing.expect(t, hash_ok, "bestblockhash should be string")
+
+	// Check difficulty present and positive
+	diff, diff_ok := obj["difficulty"].(json.Float)
+	testing.expect(t, diff_ok, "difficulty should be float")
+	testing.expect(t, diff > 0, "difficulty should be positive")
+
+	// Check time present
+	_, time_ok := obj["time"].(json.Integer)
+	testing.expect(t, time_ok, "time should be integer")
+
+	// Check mediantime present
+	_, mt_ok := obj["mediantime"].(json.Integer)
+	testing.expect(t, mt_ok, "mediantime should be integer")
+
+	// Check verificationprogress present
+	vp, vp_ok := obj["verificationprogress"].(json.Float)
+	testing.expect(t, vp_ok, "verificationprogress should be float")
+	testing.expect(t, vp > 0.0 && vp <= 1.0, fmt.tprintf("verificationprogress should be 0..1, got %f", vp))
+
+	// Check initialblockdownload present (should be false for regtest with 5 blocks)
+	ibd, ibd_ok := obj["initialblockdownload"].(json.Boolean)
+	testing.expect(t, ibd_ok, "initialblockdownload should be boolean")
+	testing.expect(t, !ibd, "should not be in IBD for regtest with 5 blocks")
+
+	// Check pruned present
+	pruned, pruned_ok := obj["pruned"].(json.Boolean)
+	testing.expect(t, pruned_ok, "pruned should be boolean")
+	testing.expect(t, !pruned, "should not be pruned")
 }
 
 @(test)
@@ -333,6 +366,20 @@ test_getblock_verbose :: proc(t: ^testing.T) {
 	ntx, ntx_ok := obj["nTx"].(json.Integer)
 	testing.expect(t, ntx_ok, "nTx should be integer")
 	testing.expect_value(t, int(ntx), 1) // just coinbase
+
+	// Check new fields
+	_, vh_ok := obj["versionHex"].(json.String)
+	testing.expect(t, vh_ok, "versionHex should be string")
+
+	_, diff_ok := obj["difficulty"].(json.Float)
+	testing.expect(t, diff_ok, "difficulty should be float")
+
+	_, mt_ok := obj["mediantime"].(json.Integer)
+	testing.expect(t, mt_ok, "mediantime should be integer")
+
+	ss, ss_ok := obj["strippedsize"].(json.Integer)
+	testing.expect(t, ss_ok, "strippedsize should be integer")
+	testing.expect(t, ss > 0, "strippedsize should be positive")
 }
 
 @(test)
@@ -439,6 +486,20 @@ test_getmempoolinfo :: proc(t: ^testing.T) {
 	size, size_ok := obj["size"].(json.Integer)
 	testing.expect(t, size_ok, "size should be integer")
 	testing.expect_value(t, int(size), 2)
+
+	// Check new fields
+	maxmp, maxmp_ok := obj["maxmempool"].(json.Integer)
+	testing.expect(t, maxmp_ok, "maxmempool should be integer")
+	testing.expect(t, maxmp > 0, "maxmempool should be positive")
+
+	_, mfee_ok := obj["mempoolminfee"].(json.Float)
+	testing.expect(t, mfee_ok, "mempoolminfee should be float")
+
+	_, rfee_ok := obj["minrelaytxfee"].(json.Float)
+	testing.expect(t, rfee_ok, "minrelaytxfee should be float")
+
+	_, fullrbf_ok := obj["fullrbf"].(json.Boolean)
+	testing.expect(t, fullrbf_ok, "fullrbf should be boolean")
 }
 
 @(test)

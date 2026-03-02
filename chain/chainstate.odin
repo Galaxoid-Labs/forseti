@@ -141,6 +141,14 @@ chain_height :: proc(cs: ^Chain_State) -> int {
 	return len(cs.active_chain) - 1
 }
 
+// Get the best header height (may be ahead of validated blocks during sync).
+chain_header_height :: proc(cs: ^Chain_State) -> int {
+	if cs.block_index.best_header != nil {
+		return cs.block_index.best_header.height
+	}
+	return chain_height(cs)
+}
+
 // Connect a block to the active chain tip.
 connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_Entry) -> Chain_Error {
 	height := entry.height

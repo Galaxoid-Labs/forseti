@@ -17,12 +17,37 @@ import "../wire"
 
 _handle_getblockchaininfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 	tip_hash, height := chain.chain_tip(srv.chain)
+	header_height := chain.chain_header_height(srv.chain)
 
-	obj := make(json.Object, 8, context.temp_allocator)
+	obj := make(json.Object, 16, context.temp_allocator)
 	obj["chain"] = json.Value(json.String(srv.params.name))
 	obj["blocks"] = json.Value(json.Integer(height))
-	obj["headers"] = json.Value(json.Integer(height))
+	obj["headers"] = json.Value(json.Integer(header_height))
 	obj["bestblockhash"] = json.Value(json.String(_hash_to_hex(tip_hash)))
+
+	// Difficulty and time from tip block
+	tip_entry, tip_found := srv.chain.block_index.entries[tip_hash]
+	if tip_found {
+		obj["difficulty"] = json.Value(json.Float(consensus.get_difficulty(tip_entry.bits)))
+		obj["time"] = json.Value(json.Integer(i64(tip_entry.timestamp)))
+		obj["mediantime"] = json.Value(json.Integer(i64(_get_median_time(srv, tip_entry))))
+	} else {
+		obj["difficulty"] = json.Value(json.Float(0.0))
+		obj["time"] = json.Value(json.Integer(0))
+		obj["mediantime"] = json.Value(json.Integer(0))
+	}
+
+	// Verification progress: blocks / headers (0.0 to 1.0)
+	if header_height > 0 {
+		obj["verificationprogress"] = json.Value(json.Float(f64(height) / f64(header_height)))
+	} else {
+		obj["verificationprogress"] = json.Value(json.Float(0.0))
+	}
+
+	// Initial block download: consider IBD if headers are significantly ahead of blocks
+	obj["initialblockdownload"] = json.Value(json.Boolean(header_height - height > 24))
+	obj["pruned"] = json.Value(json.Boolean(false))
+	obj["warnings"] = json.Value(json.String(""))
 
 	// BIP activation heights
 	bips := make(json.Object, 6, context.temp_allocator)
@@ -133,10 +158,13 @@ _handle_getblock :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 	obj["confirmations"] = json.Value(json.Integer(confirmations))
 	obj["height"] = json.Value(json.Integer(entry.height))
 	obj["version"] = json.Value(json.Integer(i64(entry.version)))
+	obj["versionHex"] = json.Value(json.String(fmt.tprintf("%08x", u32(entry.version))))
 	obj["merkleroot"] = json.Value(json.String(_hash_to_hex(block.header.merkle_root)))
 	obj["time"] = json.Value(json.Integer(i64(entry.timestamp)))
+	obj["mediantime"] = json.Value(json.Integer(i64(_get_median_time(srv, entry))))
 	obj["nonce"] = json.Value(json.Integer(i64(entry.nonce)))
 	obj["bits"] = json.Value(json.String(fmt.tprintf("%08x", entry.bits)))
+	obj["difficulty"] = json.Value(json.Float(consensus.get_difficulty(entry.bits)))
 	obj["nTx"] = json.Value(json.Integer(len(block.txs)))
 
 	// Previous block hash
@@ -159,10 +187,11 @@ _handle_getblock :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 	}
 	obj["tx"] = json.Value(tx_arr)
 
-	// Weight and size
+	// Weight, size, and strippedsize
 	weight := consensus.get_block_weight(&block)
 	obj["weight"] = json.Value(json.Integer(weight))
 	obj["size"] = json.Value(json.Integer(i64(entry.data_size)))
+	obj["strippedsize"] = json.Value(json.Integer(_get_block_stripped_size(&block)))
 
 	return _make_result(json.Value(obj), srv._current_id)
 }
@@ -281,10 +310,17 @@ _handle_getmempoolinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Resp
 		total_vsize += entry.vsize
 	}
 
-	obj := make(json.Object, 4, context.temp_allocator)
+	obj := make(json.Object, 8, context.temp_allocator)
 	obj["loaded"] = json.Value(json.Boolean(true))
 	obj["size"] = json.Value(json.Integer(count))
 	obj["bytes"] = json.Value(json.Integer(total_vsize))
+	obj["usage"] = json.Value(json.Integer(total_vsize)) // approximate
+	obj["maxmempool"] = json.Value(json.Integer(mempool.MAX_MEMPOOL_SIZE * 1_000_000))
+	obj["mempoolminfee"] = json.Value(json.Float(_satoshi_to_btc(mempool.MIN_RELAY_TX_FEE)))
+	obj["minrelaytxfee"] = json.Value(json.Float(_satoshi_to_btc(mempool.MIN_RELAY_TX_FEE)))
+	obj["incrementalrelayfee"] = json.Value(json.Float(_satoshi_to_btc(mempool.MIN_RELAY_TX_FEE)))
+	obj["unbroadcastcount"] = json.Value(json.Integer(0))
+	obj["fullrbf"] = json.Value(json.Boolean(false))
 
 	return _make_result(json.Value(obj), srv._current_id)
 }
@@ -374,6 +410,20 @@ _handle_gettxout :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 
 _satoshi_to_btc :: proc(satoshi: i64) -> f64 {
 	return f64(satoshi) / 100_000_000.0
+}
+
+// Block size excluding witness data.
+_get_block_stripped_size :: proc(block: ^wire.Block) -> int {
+	size := wire.BLOCK_HEADER_SIZE
+	_, cs_size := wire.compact_size_encode(u64(len(block.txs)))
+	size += cs_size
+	for i in 0 ..< len(block.txs) {
+		tx := block.txs[i]
+		w := wire.writer_init(context.temp_allocator)
+		wire.serialize_tx_no_witness(&w, &tx)
+		size += wire.writer_len(&w)
+	}
+	return size
 }
 
 _tx_to_json :: proc(tx: ^wire.Tx, entry: ^mempool.Mempool_Entry) -> json.Object {
