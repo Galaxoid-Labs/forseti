@@ -311,9 +311,10 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 		sync_decay_stall_timeout(sm)
 
 		// Budget-based UTXO flush: flush when coins cache exceeds its memory budget,
-		// or every 5000 blocks as a durability safety net.
+		// or every 5000 blocks as a durability safety net (only when budget < 1 GiB,
+		// since large caches benefit from fewer flushes during IBD).
 		should_flush := chain.coins_cache_should_flush(&sm.chain.coins)
-		safety_flush := height / 5000 > prev_height / 5000
+		safety_flush := height / 5000 > prev_height / 5000 && sm.chain.coins.budget < 1024 * 1024 * 1024
 		if should_flush || safety_flush {
 			tip_hash, tip_h := chain.chain_tip(sm.chain)
 			chain.coins_cache_flush(&sm.chain.coins, tip_hash, tip_h)
