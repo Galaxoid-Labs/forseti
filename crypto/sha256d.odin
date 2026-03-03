@@ -24,6 +24,25 @@ sha256d :: proc(data: []byte) -> Hash256 {
 	return result
 }
 
+// Computes SHA-256d over multiple byte slices without concatenation (zero allocation).
+sha256d_multi :: proc(parts: ..[]byte) -> Hash256 {
+	first: Hash256
+	ctx: sha2.Context_256
+
+	sha2.init_256(&ctx)
+	for p in parts {
+		sha2.update(&ctx, p)
+	}
+	sha2.final(&ctx, first[:])
+
+	result: Hash256
+	sha2.init_256(&ctx)
+	sha2.update(&ctx, first[:])
+	sha2.final(&ctx, result[:])
+
+	return result
+}
+
 // Single SHA-256 hash (used as first step of HASH160 and elsewhere).
 sha256_hash :: proc(data: []byte) -> Hash256 {
 	result: Hash256

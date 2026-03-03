@@ -32,6 +32,7 @@ Script_Check_Control :: struct {
 	wg:              ^sync.Wait_Group,
 	first_error:     i32, // 0 = no error, >0 = Script_Error ordinal (atomic)
 	error_check_idx: i32, // index into checks[] that caused first error (atomic)
+	cs:              ^Chain_State, // for arena pool access
 }
 
 // Per-block batch of script checks collected during Phase 1.
@@ -44,11 +45,9 @@ Script_Check_Batch :: struct {
 script_check_worker :: proc(task: thread.Task) {
 	check := cast(^Script_Check)task.data
 
-	// Allocate a per-check arena for temp allocations (wire writers, script stacks).
-	// 4 MB covers legacy sighash serialization of max-size txs (~1 MB) with room
-	// for Wire_Writer doubling overhead and script stacks.
-	arena_buf := make([]byte, 4 * 1024 * 1024)
-	defer delete(arena_buf)
+	// Acquire a pre-allocated 4 MB arena buffer from the pool.
+	arena_buf := _arena_pool_acquire(check.control.cs)
+	defer _arena_pool_release(check.control.cs, arena_buf)
 
 	arena: mem.Arena
 	mem.arena_init(&arena, arena_buf)
@@ -77,8 +76,37 @@ script_check_worker :: proc(task: thread.Task) {
 	sync.wait_group_done(check.control.wg)
 }
 
+// Acquire a pre-allocated arena buffer from the pool. Spins if none available.
+_arena_pool_acquire :: proc(cs: ^Chain_State) -> []byte {
+	for {
+		sync.mutex_lock(&cs.arena_pool_mu)
+		if len(cs.arena_pool_stack) > 0 {
+			idx := pop(&cs.arena_pool_stack)
+			sync.mutex_unlock(&cs.arena_pool_mu)
+			return cs.arena_pool_bufs[idx]
+		}
+		sync.mutex_unlock(&cs.arena_pool_mu)
+		// All buffers in use — brief yield and retry.
+		thread.yield()
+	}
+}
+
+// Return an arena buffer to the pool.
+_arena_pool_release :: proc(cs: ^Chain_State, buf: []byte) {
+	sync.mutex_lock(&cs.arena_pool_mu)
+	// Find the index by pointer identity.
+	for i in 0 ..< len(cs.arena_pool_bufs) {
+		if raw_data(cs.arena_pool_bufs[i]) == raw_data(buf) {
+			append(&cs.arena_pool_stack, i)
+			break
+		}
+	}
+	sync.mutex_unlock(&cs.arena_pool_mu)
+}
+
 // Dispatch all checks to the thread pool for parallel verification.
 verify_checks_parallel :: proc(
+	cs: ^Chain_State,
 	pool: ^thread.Pool,
 	wg: ^sync.Wait_Group,
 	checks: []Script_Check,
@@ -91,6 +119,7 @@ verify_checks_parallel :: proc(
 	ctrl := Script_Check_Control {
 		wg          = wg,
 		first_error = 0,
+		cs          = cs,
 	}
 
 	// Wire control into each check.

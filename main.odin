@@ -42,6 +42,7 @@ CLI_Flag :: enum {
 	Mempool_Full_RBF,
 	DbCache,
 	Par,
+	Assume_Valid,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
 
@@ -55,6 +56,7 @@ CLI_Config :: struct {
 	mempool_fullrbf: bool,
 	db_cache_mb:     int,
 	par_threads:     int, // 0 = auto, 1 = serial, >= 2 = N threads
+	assumevalid:     int, // -1 = use default, 0 = disable, >0 = override height
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -66,6 +68,7 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 	cfg.mempool_fullrbf = true
 	cfg.db_cache_mb = 450
 	cfg.par_threads = 0  // auto-detect
+	cfg.assumevalid = -1 // use network default
 
 	for arg in os.args[1:] {
 		if arg == "--help" || arg == "-h" {
@@ -119,6 +122,14 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 			}
 			cfg.par_threads = max(val, 0)
 			flags_set += {.Par}
+		} else if strings.has_prefix(arg, "--assumevalid=") {
+			val, parse_ok := strconv.parse_int(arg[len("--assumevalid="):])
+			if !parse_ok {
+				fmt.eprintln("Error: invalid --assumevalid value")
+				return cfg, flags_set, false
+			}
+			cfg.assumevalid = max(val, 0)
+			flags_set += {.Assume_Valid}
 		} else {
 			fmt.eprintln("Error: unknown flag:", arg)
 			_print_usage()
@@ -142,6 +153,7 @@ _print_usage :: proc() {
 	fmt.println("  --mempoolfullrbf=<0|1> Allow full RBF replacement (default: 1)")
 	fmt.println("  --dbcache=<MB>        Database cache size in MiB (default: 450, min: 4)")
 	fmt.println("  --par=<N>             Script verification threads (0=auto, 1=serial, 2+=parallel; default: 0)")
+	fmt.println("  --assumevalid=<height> Skip script verification below height (0=disable; default: network-specific)")
 	fmt.println("  --help, -h            Show this help message")
 }
 
@@ -236,6 +248,14 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 		if val, found := _ini_get(&m, cfg.network, "par"); found {
 			if n, parse_ok := strconv.parse_int(val); parse_ok {
 				cfg.par_threads = max(n, 0)
+			}
+		}
+	}
+
+	if .Assume_Valid not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "assumevalid"); found {
+			if n, parse_ok := strconv.parse_int(val); parse_ok {
+				cfg.assumevalid = max(n, 0)
 			}
 		}
 	}
@@ -339,6 +359,11 @@ main :: proc() {
 		rpc_port = cfg.rpc_port
 	}
 
+	// Apply assumevalid override (0 = disable, >0 = override, -1 = use default).
+	if cfg.assumevalid >= 0 {
+		params.assumevalid_height = cfg.assumevalid
+	}
+
 	// Resolve parallel script verification threads.
 	script_threads := _resolve_par_threads(cfg.par_threads)
 
@@ -349,6 +374,11 @@ main :: proc() {
 		log.infof("Script verification: %d threads", script_threads)
 	} else {
 		log.info("Script verification: serial")
+	}
+	if params.assumevalid_height > 0 {
+		log.infof("Assumevalid: skip script verification below height %d", params.assumevalid_height)
+	} else {
+		log.info("Assumevalid: disabled (verifying all scripts)")
 	}
 
 	// Initialize chain state.

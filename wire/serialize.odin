@@ -447,3 +447,103 @@ deserialize_block :: proc(r: ^Wire_Reader, allocator := context.allocator) -> (b
 	}
 	return blk, nil
 }
+
+// Deserialize a block and compute all txids from raw bytes (avoids re-serialization).
+// txids are allocated from the given allocator.
+deserialize_block_with_txids :: proc(r: ^Wire_Reader, allocator := context.allocator) -> (blk: Block, txids: []crypto.Hash256, err: Wire_Error) {
+	blk.header = deserialize_block_header(r) or_return
+	tx_count := read_compact_size(r) or_return
+	blk.txs = make([]Tx, int(tx_count), allocator)
+	txids = make([]crypto.Hash256, int(tx_count), allocator)
+	for i in 0 ..< int(tx_count) {
+		txids[i] = _deserialize_tx_with_txid(r, &blk.txs[i], allocator) or_return
+	}
+	return blk, txids, nil
+}
+
+// Deserialize a single tx and compute its txid from the raw stream bytes.
+// For non-witness txs: hash raw bytes directly (zero re-serialization).
+// For witness txs: hash version + inputs + outputs + locktime (skip marker/flag/witness).
+_deserialize_tx_with_txid :: proc(r: ^Wire_Reader, tx: ^Tx, allocator := context.allocator) -> (txid: crypto.Hash256, err: Wire_Error) {
+	tx_start := r.pos
+
+	tx.version = read_i32le(r) or_return
+	version_end := r.pos
+
+	// Read first byte — could be input count or SegWit marker.
+	marker := read_byte(r) or_return
+
+	has_witness := false
+	input_count: u64
+
+	body_start: int // start of input_count for witness txid computation
+
+	if marker == 0x00 {
+		flag := read_byte(r) or_return
+		if flag != 0x01 {
+			return {}, .Invalid_Witness_Flag
+		}
+		has_witness = true
+		body_start = r.pos // BEFORE reading input_count — include it in txid hash
+		input_count = read_compact_size(r) or_return
+	} else {
+		if marker < 0xFD {
+			input_count = u64(marker)
+		} else {
+			switch marker {
+			case 0xFD:
+				lo := read_byte(r) or_return
+				hi := read_byte(r) or_return
+				input_count = u64(lo) | u64(hi) << 8
+				if input_count < 0xFD { return {}, .Non_Canonical_Compact_Size }
+			case 0xFE:
+				b0 := read_byte(r) or_return
+				b1 := read_byte(r) or_return
+				b2 := read_byte(r) or_return
+				b3 := read_byte(r) or_return
+				input_count = u64(b0) | u64(b1) << 8 | u64(b2) << 16 | u64(b3) << 24
+				if input_count <= 0xFFFF { return {}, .Non_Canonical_Compact_Size }
+			case 0xFF:
+				v := read_u64le(r) or_return
+				input_count = v
+				if input_count <= 0xFFFF_FFFF { return {}, .Non_Canonical_Compact_Size }
+			}
+		}
+	}
+
+	tx.inputs = make([]Tx_In, int(input_count), allocator)
+	for i in 0 ..< int(input_count) {
+		tx.inputs[i] = deserialize_tx_in(r, allocator) or_return
+	}
+
+	output_count := read_compact_size(r) or_return
+	tx.outputs = make([]Tx_Out, int(output_count), allocator)
+	for i in 0 ..< int(output_count) {
+		tx.outputs[i] = deserialize_tx_out(r, allocator) or_return
+	}
+
+	body_end := r.pos // end of outputs, before witness
+
+	if has_witness {
+		tx.witness = deserialize_witness(r, int(input_count), allocator) or_return
+	}
+
+	tx.locktime = read_u32le(r) or_return
+	tx_end := r.pos
+
+	// Compute txid from raw bytes (non-witness serialization).
+	if !has_witness {
+		// Non-witness: raw bytes [tx_start:tx_end] are the txid preimage.
+		txid = crypto.sha256d(r.data[tx_start:tx_end])
+	} else {
+		// Witness: txid = sha256d(version + input_count + inputs + outputs + locktime).
+		// Feed 3 slices directly to incremental SHA-256d — zero allocation.
+		txid = crypto.sha256d_multi(
+			r.data[tx_start:version_end],    // version (4 bytes)
+			r.data[body_start:body_end],     // input_count + inputs + outputs
+			r.data[tx_end - 4:tx_end],       // locktime (4 bytes)
+		)
+	}
+
+	return txid, nil
+}

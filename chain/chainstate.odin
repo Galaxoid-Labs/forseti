@@ -5,6 +5,7 @@ import "core:mem"
 import "core:os"
 import "core:sync"
 import "core:thread"
+import "core:time"
 import "../consensus"
 import "../crypto"
 import "../script"
@@ -29,6 +30,23 @@ Chain_State :: struct {
 	verify_pool:    thread.Pool,
 	verify_wg:      sync.Wait_Group,
 	script_threads: int, // >= 2 = parallel (pool active), < 2 = serial (no pool)
+	// Arena buffer pool for parallel workers (avoids alloc/free per check)
+	arena_pool_bufs:  [][]byte,    // pre-allocated 8MB buffers, one per worker thread
+	arena_pool_stack: [dynamic]int, // indices of available buffers (protected by mutex)
+	arena_pool_mu:    sync.Mutex,
+	// Performance profiling counters (cumulative, logged every 1000 blocks)
+	prof: Block_Profile,
+}
+
+Block_Profile :: struct {
+	blocks:      int,          // blocks since last log
+	t_read:      time.Duration, // disk read + deserialize
+	t_txid:      time.Duration, // txid computation
+	t_utxo:      time.Duration, // Phase 1: UTXO lookups + spends + adds
+	t_scripts:   time.Duration, // Phase 2: script verification
+	t_undo:      time.Duration, // undo data write
+	t_index:     time.Duration, // index update + chain append
+	t_total:     time.Duration, // total connect_block time
 }
 
 // Initialize chain state. Caller allocates Chain_State and passes pointer.
@@ -115,6 +133,14 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	if script_threads >= 2 {
 		thread.pool_init(&cs.verify_pool, context.allocator, script_threads)
 		thread.pool_start(&cs.verify_pool)
+
+		// Pre-allocate arena buffers for workers (avoids alloc/free per check).
+		cs.arena_pool_bufs = make([][]byte, script_threads)
+		cs.arena_pool_stack = make([dynamic]int, 0, script_threads)
+		for i in 0 ..< script_threads {
+			cs.arena_pool_bufs[i] = make([]byte, 8 * 1024 * 1024)
+			append(&cs.arena_pool_stack, i)
+		}
 	}
 
 	// Connect any stored-but-not-connected blocks from a previous session.
@@ -133,6 +159,11 @@ chain_state_destroy :: proc(cs: ^Chain_State) {
 	if cs.script_threads >= 2 {
 		thread.pool_join(&cs.verify_pool)
 		thread.pool_destroy(&cs.verify_pool)
+		for buf in cs.arena_pool_bufs {
+			delete(buf)
+		}
+		delete(cs.arena_pool_bufs)
+		delete(cs.arena_pool_stack)
 	}
 
 	tip_hash, tip_height := chain_tip(cs)
@@ -173,26 +204,40 @@ chain_header_height :: proc(cs: ^Chain_State) -> int {
 }
 
 // Connect a block to the active chain tip.
-connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_Entry) -> Chain_Error {
+connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_Entry, precomputed_txids: []Hash256 = nil) -> Chain_Error {
 	height := entry.height
+	t_start := time.tick_now()
 
-	// 1. Context-free validation
+	// Use pre-computed txids (from raw-byte hashing during deserialization) when available.
+	// Otherwise, compute by re-serializing each tx (slower fallback for accept_block path).
+	txids: []Hash256
+	if len(precomputed_txids) > 0 && len(precomputed_txids) == len(block.txs) {
+		txids = precomputed_txids
+	} else {
+		computed := make([]Hash256, len(block.txs), context.temp_allocator)
+		for i in 0 ..< len(block.txs) {
+			tx := block.txs[i]
+			computed[i] = wire.tx_id(&tx)
+		}
+		txids = computed
+	}
+
+	// 1. Context-free validation (pass txids to avoid recomputing for Merkle root)
 	block_val := block^
-	cerr := consensus.check_block(&block_val, height, cs.params)
+	cerr := consensus.check_block(&block_val, height, cs.params, txids)
 	if cerr != .None {
 		return .Consensus_Error
 	}
+	t_txid := time.tick_now()
 
 	// 2. Check duplicate txids within block
 	{
 		seen := make(map[Hash256]bool, len(block.txs), context.temp_allocator)
 		for i in 0 ..< len(block.txs) {
-			tx := block.txs[i]
-			txid := wire.tx_id(&tx)
-			if txid in seen {
+			if txids[i] in seen {
 				return .Duplicate_Tx
 			}
-			seen[txid] = true
+			seen[txids[i]] = true
 		}
 	}
 
@@ -204,9 +249,8 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 	if enforce_bip30 {
 		for i in 0 ..< len(block.txs) {
 			tx := block.txs[i]
-			txid := wire.tx_id(&tx)
 			for j in 0 ..< len(tx.outputs) {
-				op := wire.Outpoint{hash = txid, index = u32(j)}
+				op := wire.Outpoint{hash = txids[i], index = u32(j)}
 				if coins_cache_has(&cs.coins, op) {
 					return .Bip30_Violation
 				}
@@ -318,9 +362,8 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 		}
 
 		// 4e. Add outputs (available for later txs in same block)
-		txid := wire.tx_id(&tx)
 		for out_idx in 0 ..< len(tx.outputs) {
-			op := wire.Outpoint{hash = txid, index = u32(out_idx)}
+			op := wire.Outpoint{hash = txids[tx_idx], index = u32(out_idx)}
 			coin := storage.UTXO_Coin {
 				height      = u32(height),
 				is_coinbase = false,
@@ -333,11 +376,13 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 		append(&applied_tx_indices, tx_idx)
 	}
 
+	t_utxo := time.tick_now()
+
 	// --- Phase 2: Script verification (all checks at once) ---
 	if !skip_scripts && len(batch.checks) > 0 {
 		serr: script.Script_Error
 		if cs.script_threads >= 2 && len(batch.checks) >= PARALLEL_THRESHOLD {
-			serr = verify_checks_parallel(&cs.verify_pool, &cs.verify_wg, batch.checks[:], height)
+			serr = verify_checks_parallel(cs, &cs.verify_pool, &cs.verify_wg, batch.checks[:], height)
 		} else {
 			serr = verify_checks_serial(cs, batch.checks[:], height)
 		}
@@ -346,6 +391,8 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 			return .Bad_Script
 		}
 	}
+
+	t_scripts := time.tick_now()
 
 	// 5. Verify coinbase value <= subsidy + total_fees
 	{
@@ -363,9 +410,8 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 	// 6. Add coinbase outputs
 	{
 		coinbase := block.txs[0]
-		coinbase_txid := wire.tx_id(&coinbase)
 		for out_idx in 0 ..< len(coinbase.outputs) {
-			op := wire.Outpoint{hash = coinbase_txid, index = u32(out_idx)}
+			op := wire.Outpoint{hash = txids[0], index = u32(out_idx)}
 			coin := storage.UTXO_Coin {
 				height      = u32(height),
 				is_coinbase = true,
@@ -383,6 +429,8 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 		return uerr
 	}
 
+	t_undo := time.tick_now()
+
 	// 8. Update entry status and append to active chain
 	entry.status += {.Valid_Transactions, .Valid_Chain}
 	entry.num_tx = u32(len(block.txs))
@@ -397,6 +445,17 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 	storage.index_db_put(&cs.index_db, rec)
 
 	append(&cs.active_chain, entry.hash)
+
+	t_end := time.tick_now()
+
+	// Accumulate profiling data.
+	cs.prof.blocks += 1
+	cs.prof.t_txid    += time.tick_diff(t_start, t_txid)
+	cs.prof.t_utxo    += time.tick_diff(t_txid, t_utxo)
+	cs.prof.t_scripts += time.tick_diff(t_utxo, t_scripts)
+	cs.prof.t_undo    += time.tick_diff(t_scripts, t_undo)
+	cs.prof.t_index   += time.tick_diff(t_undo, t_end)
+	cs.prof.t_total   += time.tick_diff(t_start, t_end)
 
 	return .None
 }
@@ -699,13 +758,14 @@ connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 =
 		mem.arena_free_all(&block_arena)
 		context.temp_allocator = block_alloc
 
-		// Read block from disk.
+		// Read block from disk (with pre-computed txids from raw bytes).
+		t_read_start := time.tick_now()
 		loc := storage.Block_Location{
 			file_num    = next_entry.file_num,
 			data_offset = next_entry.data_offset,
 			data_size   = next_entry.data_size,
 		}
-		block, rerr := storage.block_db_read(&cs.block_db, loc, block_alloc)
+		block, txids, rerr := storage.block_db_read_with_txids(&cs.block_db, loc, block_alloc)
 		if rerr != .None {
 			// Corrupt/truncated flat file data — strip Has_Data so it gets re-downloaded.
 			log.warnf("Pending block at height %d unreadable — marking for re-download", next_entry.height)
@@ -717,8 +777,9 @@ connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 =
 			}
 			return connected, .None
 		}
+		cs.prof.t_read += time.tick_diff(t_read_start, time.tick_now())
 
-		cerr := connect_block(cs, &block, next_entry)
+		cerr := connect_block(cs, &block, next_entry, txids)
 		if cerr != .None {
 			if cerr == .Storage_Error {
 				// Storage/read error — strip Has_Data so it gets re-downloaded.
@@ -738,6 +799,40 @@ connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 =
 		}
 
 		connected += 1
+
+		// Log profiling data every 1000 blocks.
+		if cs.prof.blocks >= 1000 {
+			p := &cs.prof
+			// Wall time = read (disk+deserialize+txid) + connect_block phases.
+			wall_ms := time.duration_milliseconds(p.t_read + p.t_total)
+			if wall_ms > 0 {
+				read_ms    := time.duration_milliseconds(p.t_read)
+				valid_ms   := time.duration_milliseconds(p.t_txid) // check_block + txid (near-zero with precomputed)
+				utxo_ms    := time.duration_milliseconds(p.t_utxo)
+				scripts_ms := time.duration_milliseconds(p.t_scripts)
+				undo_ms    := time.duration_milliseconds(p.t_undo)
+				index_ms   := time.duration_milliseconds(p.t_index)
+				log.infof(
+					"PROFILE %d blks @ height %d: wall=%.0fms (%.1fms/blk) | read=%.0fms (%.0f%%) valid=%.0fms (%.0f%%) utxo=%.0fms (%.0f%%) scripts=%.0fms (%.0f%%) undo=%.0fms (%.0f%%) index=%.0fms (%.0f%%)",
+					p.blocks, next_entry.height,
+					wall_ms, wall_ms / f64(p.blocks),
+					read_ms, read_ms / wall_ms * 100,
+					valid_ms, valid_ms / wall_ms * 100,
+					utxo_ms, utxo_ms / wall_ms * 100,
+					scripts_ms, scripts_ms / wall_ms * 100,
+					undo_ms, undo_ms / wall_ms * 100,
+					index_ms, index_ms / wall_ms * 100,
+				)
+			}
+			p.blocks = 0
+			p.t_read = {}
+			p.t_txid = {}
+			p.t_utxo = {}
+			p.t_scripts = {}
+			p.t_undo = {}
+			p.t_index = {}
+			p.t_total = {}
+		}
 	}
 
 	return connected, .None

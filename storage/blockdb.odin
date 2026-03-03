@@ -1,5 +1,6 @@
 package storage
 
+import "../crypto"
 import "../wire"
 
 Block_Location :: struct {
@@ -76,6 +77,21 @@ block_db_read :: proc(db: ^Block_DB, loc: Block_Location, allocator := context.a
 		return {}, .Corrupt_Data
 	}
 	return blk, .None
+}
+
+// Read, deserialize a block, and compute all txids from raw bytes (avoids re-serialization).
+block_db_read_with_txids :: proc(db: ^Block_DB, loc: Block_Location, allocator := context.allocator) -> (block: wire.Block, txids: []crypto.Hash256, err: Storage_Error) {
+	raw, rerr := block_db_read_raw(db, loc, context.temp_allocator)
+	if rerr != .None {
+		return {}, nil, rerr
+	}
+
+	r := wire.reader_init(raw)
+	blk, tids, wire_err := wire.deserialize_block_with_txids(&r, allocator)
+	if wire_err != nil {
+		return {}, nil, .Corrupt_Data
+	}
+	return blk, tids, .None
 }
 
 // Read raw block bytes from the given location.

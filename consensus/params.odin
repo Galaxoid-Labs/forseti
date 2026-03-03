@@ -64,6 +64,10 @@ _init_params :: proc "contextless" () {
 		p2sh_prefix              = 0x05,
 		bech32_hrp               = "bc",
 	}
+	// Assumevalid: skip script verification below this height.
+	// Height 880,000 is well-established mainnet (mined early 2024).
+	MAINNET_PARAMS.assumevalid_height = 880_000
+
 	// mainnet pow_limit: 00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 	for i in 4 ..< 32 {
 		MAINNET_PARAMS.pow_limit[i] = 0xff
@@ -99,6 +103,7 @@ _init_params :: proc "contextless" () {
 		bech32_hrp               = "tb",
 	}
 	TESTNET3_PARAMS.pow_limit = MAINNET_PARAMS.pow_limit
+	TESTNET3_PARAMS.assumevalid_height = 2_100_000
 
 	TESTNET4_PARAMS = Chain_Params {
 		name                     = "testnet4",
@@ -123,6 +128,7 @@ _init_params :: proc "contextless" () {
 		bech32_hrp               = "tb",
 	}
 	TESTNET4_PARAMS.pow_limit = MAINNET_PARAMS.pow_limit
+	TESTNET4_PARAMS.assumevalid_height = 200_000
 
 	SIGNET_PARAMS = Chain_Params {
 		name                     = "signet",

@@ -43,7 +43,7 @@ check_block_header :: proc(header: ^wire.Block_Header, params: ^Chain_Params) ->
 }
 
 // Full context-free block validation.
-check_block :: proc(block: ^wire.Block, height: int, params: ^Chain_Params) -> Consensus_Error {
+check_block :: proc(block: ^wire.Block, height: int, params: ^Chain_Params, precomputed_txids: []crypto.Hash256 = nil) -> Consensus_Error {
 	// 1. Check header PoW
 	header := block.header
 	err := check_block_header(&header, params)
@@ -88,10 +88,16 @@ check_block :: proc(block: ^wire.Block, height: int, params: ^Chain_Params) -> C
 	}
 
 	// 6. Verify merkle root
-	tx_ids := make([]crypto.Hash256, len(block.txs), context.temp_allocator)
-	for i in 0 ..< len(block.txs) {
-		tx := block.txs[i]
-		tx_ids[i] = wire.tx_id(&tx)
+	tx_ids: []crypto.Hash256
+	if len(precomputed_txids) > 0 && len(precomputed_txids) == len(block.txs) {
+		tx_ids = precomputed_txids
+	} else {
+		computed_ids := make([]crypto.Hash256, len(block.txs), context.temp_allocator)
+		for i in 0 ..< len(block.txs) {
+			tx := block.txs[i]
+			computed_ids[i] = wire.tx_id(&tx)
+		}
+		tx_ids = computed_ids
 	}
 	computed_root := crypto.merkle_root(tx_ids)
 	if computed_root != block.header.merkle_root {
