@@ -518,7 +518,10 @@ _conn_manager_handle_tx :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []
 	txid := wire.tx_id(&tx)
 	mp_err := mempool.mempool_add(cm.mp, &tx)
 	if mp_err != .None {
-		log.debugf("Rejected tx %s from peer %d: %v", _hash_to_hex_short(txid), peer_id, mp_err)
+		// Missing_Inputs (orphan txs) and Tx_Already_Exists are normal during tx relay — don't log.
+		if mp_err != .Missing_Inputs && mp_err != .Tx_Already_Exists {
+			log.debugf("Rejected tx %s from peer %d: %v", _hash_to_hex_short(txid), peer_id, mp_err)
+		}
 		return
 	}
 
