@@ -72,26 +72,78 @@ The binary is output as `btcnode` in the project root.
 ## Running
 
 ```bash
-# Sync the signet network
-./btcnode --network=signet --datadir=/tmp/btcnode-signet
-
-# Start in regtest mode (default, no peers needed)
-./btcnode --network=regtest --no-p2p
-
-# Start with all options
-./btcnode --network=regtest \
-          --datadir=/tmp/btcnode-data \
-          --rpcport=18443 \
-          --no-p2p
-
-# Sync with reduced memory (64 MiB DB cache)
-./btcnode --network=signet --dbcache=64
-
-# Connect to a specific peer
-./btcnode --network=mainnet --connect=127.0.0.1:8333
-
 # Show help
 ./btcnode --help
+
+# Start in regtest mode (no peers needed, good for RPC testing)
+./btcnode --network=regtest --no-p2p
+```
+
+### Syncing a Network
+
+Each network syncs via P2P and stores data in its own directory. Run in the background with `nohup` and monitor via the log file:
+
+**Mainnet:**
+```bash
+# Start syncing mainnet (full validation, ~939k blocks)
+nohup ./btcnode --network=mainnet --datadir=/tmp/btcnode-mainnet \
+  > /tmp/btcnode-mainnet.log 2>&1 &
+
+# Monitor sync progress
+tail -f /tmp/btcnode-mainnet.log | grep "Blocks:"
+
+# Check current block height via RPC
+curl -s --data '{"method":"getblockcount","params":[],"id":1}' http://127.0.0.1:8332/
+
+# Stop gracefully (saves mempool, flushes UTXO cache)
+curl -s --data '{"method":"stop","params":[],"id":1}' http://127.0.0.1:8332/
+# or: kill -SIGINT $(pgrep -f "btcnode.*mainnet")
+```
+
+**Signet:**
+```bash
+nohup ./btcnode --network=signet --datadir=/tmp/btcnode-signet \
+  > /tmp/btcnode-signet.log 2>&1 &
+
+tail -f /tmp/btcnode-signet.log | grep "Blocks:"
+curl -s --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:38332/
+```
+
+**Testnet4:**
+```bash
+nohup ./btcnode --network=testnet4 --datadir=/tmp/btcnode-testnet4 \
+  > /tmp/btcnode-testnet4.log 2>&1 &
+
+tail -f /tmp/btcnode-testnet4.log | grep "Blocks:"
+curl -s --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:48332/
+```
+
+**Testnet3:**
+```bash
+nohup ./btcnode --network=testnet3 --datadir=/tmp/btcnode-testnet3 \
+  > /tmp/btcnode-testnet3.log 2>&1 &
+
+tail -f /tmp/btcnode-testnet3.log | grep "Blocks:"
+curl -s --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:18332/
+```
+
+### Monitoring
+
+```bash
+# Watch block progress (any network)
+tail -f /tmp/btcnode-mainnet.log | grep "Blocks:"
+
+# Check for validation errors
+grep -iE "FAIL|Bad_Script|halting|consensus" /tmp/btcnode-mainnet.log
+
+# Check peer connections
+curl -s --data '{"method":"getpeerinfo","params":[],"id":1}' http://127.0.0.1:8332/ | python3 -m json.tool
+
+# Check memory/resource usage
+ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "$6/1024"MB"}'
+
+# Reduce memory usage on constrained machines
+./btcnode --network=signet --dbcache=64
 ```
 
 ### CLI Flags
