@@ -337,10 +337,11 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 		}
 
 		remaining := sm.best_header_height - height
+		progress_pct := f64(height) / f64(max(sm.best_header_height, 1)) * 100.0
 		progress_interval := height / 1000 > prev_height / 1000
 		if should_flush || safety_flush || remaining == 0 || progress_interval {
-			log.infof("Blocks: %d (remaining: %d, in-flight: %d)",
-				height, remaining, len(sm.blocks_in_flight))
+			log.infof("Blocks: %d / %d (%.2f%%), remaining: %d, in-flight: %d",
+				height, sm.best_header_height, progress_pct, remaining, len(sm.blocks_in_flight))
 
 			// Log per-peer throughput stats at 5000-block intervals.
 			if height / 5000 > prev_height / 5000 && height > 5000 {
