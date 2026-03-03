@@ -198,7 +198,10 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 
 	// 3. BIP30: Check no unspent UTXOs with same txids. After BIP34 activation,
 	// duplicate txids are impossible (coinbase includes height), so skip the check.
-	if height < cs.params.bip34_height {
+	// Exception: blocks 91842 and 91880 on mainnet contain known duplicate coinbase
+	// txids (duplicating blocks 91722 and 91812). Bitcoin Core exempts these two blocks.
+	enforce_bip30 := height < cs.params.bip34_height && height != 91842 && height != 91880
+	if enforce_bip30 {
 		for i in 0 ..< len(block.txs) {
 			tx := block.txs[i]
 			txid := wire.tx_id(&tx)
