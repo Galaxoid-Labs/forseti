@@ -325,7 +325,7 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 			mempool.mempool_remove_for_block(sm.mp, block)
 		}
 
-		remaining := len(sm.blocks_to_download) - sm.download_cursor
+		remaining := sm.best_header_height - height
 		progress_interval := height / 1000 > prev_height / 1000
 		if should_flush || safety_flush || remaining == 0 || progress_interval {
 			log.infof("Blocks: %d (remaining: %d, in-flight: %d)",
