@@ -86,7 +86,7 @@ Each network syncs via P2P and stores data in its own directory. Run in the back
 **Mainnet:**
 ```bash
 # Start syncing mainnet (full validation, ~939k blocks)
-nohup ./btcnode --network=mainnet --datadir=/tmp/btcnode-mainnet \
+nohup ./btcnode --network=mainnet --datadir=/tmp/btcnode-mainnet --dbcache=4096 \
   > /tmp/btcnode-mainnet.log 2>&1 &
 
 # Monitor sync progress
@@ -102,7 +102,7 @@ curl -s --data '{"method":"stop","params":[],"id":1}' http://127.0.0.1:8332/
 
 **Signet:**
 ```bash
-nohup ./btcnode --network=signet --datadir=/tmp/btcnode-signet \
+nohup ./btcnode --network=signet --datadir=/tmp/btcnode-signet --dbcache=4096 \
   > /tmp/btcnode-signet.log 2>&1 &
 
 tail -f /tmp/btcnode-signet.log | grep "Blocks:"
@@ -111,7 +111,7 @@ curl -s --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.
 
 **Testnet4:**
 ```bash
-nohup ./btcnode --network=testnet4 --datadir=/tmp/btcnode-testnet4 \
+nohup ./btcnode --network=testnet4 --datadir=/tmp/btcnode-testnet4 --dbcache=4096 \
   > /tmp/btcnode-testnet4.log 2>&1 &
 
 tail -f /tmp/btcnode-testnet4.log | grep "Blocks:"
@@ -120,7 +120,7 @@ curl -s --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.
 
 **Testnet3:**
 ```bash
-nohup ./btcnode --network=testnet3 --datadir=/tmp/btcnode-testnet3 \
+nohup ./btcnode --network=testnet3 --datadir=/tmp/btcnode-testnet3 --dbcache=4096 \
   > /tmp/btcnode-testnet3.log 2>&1 &
 
 tail -f /tmp/btcnode-testnet3.log | grep "Blocks:"
