@@ -36,11 +36,13 @@ This is an educational/experimental project. It implements the core components o
 | 23 | Mainnet Sync (BIP30, adaptive stall detection, peer management) | Complete |
 | 24 | Assumevalid + Txid Optimization | Complete |
 | 25 | nbio Async I/O Migration | Complete |
+| 26 | Cross-thread RPC Relay Safety | Complete |
 
 ## Dependencies
 
 **Build tools:**
 - [Odin compiler](https://odin-lang.org/) (latest dev build recommended)
+- LLVM 15+ (required by `core:nbio` for atomic pointer operations — Ubuntu 24.04+ or install via [apt.llvm.org](https://apt.llvm.org))
 - C/C++ compiler (`cc` / `clang` / `g++`)
 - `make`
 - `autoconf`, `automake`, `libtool` (for building libsecp256k1)
@@ -389,6 +391,10 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 
 ## What's Left to Build
 
+### Correctness
+
+- **Crash consistency on fresh DB** — If node is killed before first UTXO flush, recovery fails due to absent meta tip
+
 ### Performance
 
 - **Snappy compression for LevelDB** — Would reduce disk usage for mainnet
@@ -397,6 +403,11 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 
 - **Compact blocks (BIP152)** — Bandwidth-efficient block relay
 - **Ancestor/descendant limits** — No CPFP chain depth limits (Bitcoin Core uses 25/25)
+
+### Features
+
+- **`generatetoaddress` RPC** — Regtest block generation for self-contained testing
+- **Block pruning** — Discard old block data to reduce disk usage on mainnet
 
 ## Architecture Notes
 
@@ -413,7 +424,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Parallel script verification**: Two-phase block validation — Phase 1 processes UTXO updates sequentially (single-threaded, no locking), Phase 2 dispatches all script checks to a persistent thread pool (`--par=N`). Sighash caches are eagerly pre-computed before dispatch so workers read immutable data without synchronization. Serial fallback for small blocks (<16 inputs) or `--par=1`. Workers use pre-allocated 8MB arena buffers from a mutex-protected pool (avoids per-check heap allocation)
 - **Per-input verification arena**: A 4MB heap-allocated scratch arena is reset between each input's script verification (serial path), preventing sighash writer accumulation from exhausting the 64MB block arena on large transactions
 - **Mempool persistence**: Mempool is saved to `<datadir>/mempool.dat` on shutdown and reloaded/revalidated on startup
-- **Transaction relay**: P2P `inv`/`tx`/`getdata` handling for propagating mempool transactions to peers
+- **Transaction relay**: P2P `inv`/`tx`/`getdata` handling for propagating mempool transactions to peers. Cross-thread safety: RPC thread pushes txids to a mutex-protected relay queue, P2P event loop drains it — no direct cross-thread access to peer state
 - **RBF (BIP125)**: Full replace-by-fee support — signaling check (opt-in or fullrbf), no new unconfirmed parents, higher absolute fee, bandwidth fee, max 100 evictions
 - **Lax DER signature parsing**: Pre-BIP66 transactions may contain non-strictly-encoded DER signatures. The verification path uses a lax DER parser (matching Bitcoin Core's `ecdsa_signature_parse_der_lax`), while strict DER validation is enforced separately by the script interpreter when BIP66 is active
 - **Address encoding**: Base58Check (P2PKH, P2SH) and Bech32/Bech32m (P2WPKH, P2WSH, P2TR) for both encoding and decoding, with network-aware validation

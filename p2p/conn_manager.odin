@@ -5,6 +5,7 @@ import "core:log"
 import "core:nbio"
 import tcp "core:net"
 import "core:strings"
+import "core:sync"
 import "core:time"
 
 import "../chain"
@@ -35,6 +36,9 @@ Conn_Manager :: struct {
 	last_header_refresh: i64,
 	// Zombie peers: destroyed but not yet freed (deferred to avoid use-after-free in nbio callbacks).
 	zombie_peers:       [dynamic]^Peer,
+	// Cross-thread tx relay queue (RPC thread pushes, P2P thread drains).
+	relay_mutex:        sync.Mutex,
+	relay_queue:        [dynamic]Hash256,
 }
 
 conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) -> Net_Error {
@@ -57,6 +61,7 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 
 	cm.peers = make(map[Peer_Id]^Peer, MAX_OUTBOUND_PEERS * 2)
 	cm.zombie_peers = make([dynamic]^Peer, 0, 8)
+	cm.relay_queue = make([dynamic]Hash256, 0, 16)
 	cm.last_ping_check = time.to_unix_seconds(time.now())
 	cm.last_header_refresh = time.to_unix_seconds(time.now())
 
@@ -79,6 +84,7 @@ conn_manager_destroy :: proc(cm: ^Conn_Manager) {
 	}
 	delete(cm.peers)
 	delete(cm.address_pool)
+	delete(cm.relay_queue)
 
 	sync_manager_destroy(&cm.sync_mgr)
 }
@@ -181,6 +187,14 @@ _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 		_peer_free(peer)
 	}
 	clear(&cm.zombie_peers)
+
+	// Drain cross-thread tx relay queue (pushed by RPC thread).
+	sync.mutex_lock(&cm.relay_mutex)
+	for txid in cm.relay_queue {
+		_conn_manager_relay_tx(cm, txid, Peer_Id(0))
+	}
+	clear(&cm.relay_queue)
+	sync.mutex_unlock(&cm.relay_mutex)
 
 	now := time.to_unix_seconds(time.now())
 
@@ -585,12 +599,14 @@ _conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid: Hash256, from_peer: Peer
 	}
 }
 
-// Exported relay for RPC thread. Queues work to the event loop thread.
+// Exported relay for RPC thread. Queues txid for the P2P event loop thread to relay.
 conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid: Hash256) {
-	// For now, call directly. The RPC thread's access to cm.peers is a pre-existing
-	// race condition that exists in the current code too. The sends are queued to
-	// nbio which is safe. A proper fix would use nbio cross-thread queueing.
-	_conn_manager_relay_tx(cm, txid, Peer_Id(0))
+	sync.mutex_lock(&cm.relay_mutex)
+	append(&cm.relay_queue, txid)
+	sync.mutex_unlock(&cm.relay_mutex)
+	if cm.event_loop != nil {
+		nbio.wake_up(cm.event_loop)
+	}
 }
 
 
