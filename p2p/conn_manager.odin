@@ -38,6 +38,7 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 	switch params.network_magic {
 	case wire.MAINNET_MAGIC:  cm.default_port = DEFAULT_PORT_MAINNET
 	case wire.TESTNET3_MAGIC: cm.default_port = DEFAULT_PORT_TESTNET3
+	case wire.TESTNET4_MAGIC: cm.default_port = DEFAULT_PORT_TESTNET4
 	case wire.SIGNET_MAGIC:   cm.default_port = DEFAULT_PORT_SIGNET
 	case wire.REGTEST_MAGIC:  cm.default_port = DEFAULT_PORT_REGTEST
 	case:                     cm.default_port = DEFAULT_PORT_MAINNET
@@ -119,6 +120,9 @@ conn_manager_discover_peers :: proc(cm: ^Conn_Manager) -> [dynamic]string {
 		seeds = s[:]
 	case wire.TESTNET3_MAGIC:
 		s := TESTNET3_SEEDS
+		seeds = s[:]
+	case wire.TESTNET4_MAGIC:
+		s := TESTNET4_SEEDS
 		seeds = s[:]
 	case wire.SIGNET_MAGIC:
 		s := SIGNET_SEEDS

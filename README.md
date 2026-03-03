@@ -6,15 +6,15 @@ This is an educational/experimental project. It implements the core components o
 
 ## Status
 
-**204 tests passing** across 9 packages. Successfully syncs the full signet blockchain (~294k blocks) with script verification.
+**208 tests passing** across 9 packages. Successfully syncs signet (~294k blocks) and testnet4 (~124k blocks) with full script verification.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
 | 0 | Crypto + C Bindings | Complete (24 tests) |
 | 1 | Wire Protocol + Serialization | Complete (24 tests) |
-| 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH, Taproot) | Complete (47 tests) |
+| 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH, Taproot) | Complete (49 tests) |
 | 3 | Consensus Rules + Block Validation | Complete (15 tests) |
-| 4 | UTXO Set + Chain State | Complete (8 tests) |
+| 4 | UTXO Set + Chain State | Complete (10 tests) |
 | 5 | Persistent Storage (LevelDB) | Complete (13 tests) |
 | 6 | P2P Networking | Complete (6 tests) |
 | 7 | Mempool + Persistence + RBF | Complete (20 tests) |
@@ -31,6 +31,7 @@ This is an educational/experimental project. It implements the core components o
 | 18 | Configurable `--dbcache` (Bitcoin Core style) | Complete |
 | 19 | Parallel Script Verification (`--par`) | Complete |
 | 20 | Control + Raw Transaction RPCs | Complete |
+| 21 | Testnet4 Support (BIP94) | Complete |
 
 ## Dependencies
 

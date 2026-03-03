@@ -23,6 +23,7 @@ Chain_Error :: enum {
 	Undo_Data_Missing,
 	Undo_Data_Corrupt,
 	Storage_Error,
+	Bad_Difficulty,
 	Consensus_Error,
 	Invalid_State,
 }

@@ -105,8 +105,8 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	// Compute cumulative chain_tx for the active chain
 	_compute_chain_tx(cs)
 
-	// Allocate persistent per-input verification arena (2 MB, reused across blocks)
-	cs.verify_buf = make([]byte, 2 * 1024 * 1024)
+	// Allocate persistent per-input verification arena (4 MB, reused across blocks)
+	cs.verify_buf = make([]byte, 4 * 1024 * 1024)
 	mem.arena_init(&cs.verify_arena, cs.verify_buf)
 	cs.verify_alloc = mem.arena_allocator(&cs.verify_arena)
 
@@ -430,6 +430,61 @@ disconnect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Ind
 	return .None
 }
 
+// Compute the expected nBits for a new block on top of parent_entry.
+// Implements Bitcoin Core's GetNextWorkRequired logic including the testnet
+// 20-minute minimum difficulty rule and BIP94 (testnet4) variant.
+get_next_work_required :: proc(cs: ^Chain_State, parent_entry: ^Block_Index_Entry, block_timestamp: u32) -> u32 {
+	params := cs.params
+	new_height := parent_entry.height + 1
+
+	if params.pow_no_retargeting {
+		return parent_entry.bits
+	}
+
+	// At a retarget boundary (new_height % retarget_interval == 0)?
+	at_retarget := new_height % params.retarget_interval == 0
+
+	if !at_retarget {
+		// Not at retarget — check testnet 20-minute rule
+		if params.allow_min_difficulty {
+			// If >20 minutes since parent, allow minimum difficulty
+			if block_timestamp > parent_entry.timestamp + params.target_spacing * 2 {
+				return params.pow_limit_bits
+			}
+			// Otherwise, walk back to find last non-min-difficulty block
+			current := parent_entry
+			for current.prev != nil && current.height % params.retarget_interval != 0 && current.bits == params.pow_limit_bits {
+				current = current.prev
+			}
+			return current.bits
+		}
+		return parent_entry.bits
+	}
+
+	// At a retarget boundary. Compute new difficulty.
+	// Find the first block of the current retarget period.
+	first_height := new_height - params.retarget_interval
+	first_entry := block_index_get_ancestor(parent_entry, first_height)
+	if first_entry == nil {
+		return parent_entry.bits
+	}
+
+	// BIP94 (testnet4): use the first block of the period's nBits
+	// (which is always real difficulty, never min-difficulty) instead of
+	// the last block's nBits (which could be min-difficulty).
+	reference_bits := parent_entry.bits
+	if params.enforce_bip94 {
+		reference_bits = first_entry.bits
+	}
+
+	return consensus.calculate_next_work_required(
+		first_entry.timestamp,
+		parent_entry.timestamp,
+		reference_bits,
+		params,
+	)
+}
+
 // Accept a block header: validate and add to block index.
 accept_block_header :: proc(cs: ^Chain_State, header: ^wire.Block_Header) -> (^Block_Index_Entry, Chain_Error) {
 	hash := wire.block_header_hash(header)
@@ -449,12 +504,23 @@ accept_block_header :: proc(cs: ^Chain_State, header: ^wire.Block_Header) -> (^B
 
 	// Link to parent
 	parent_height := -1
+	parent_entry: ^Block_Index_Entry
 	if header.prev_hash != HASH_ZERO {
 		parent, parent_found := cs.block_index.entries[header.prev_hash]
 		if !parent_found {
 			return nil, .Invalid_Prev_Block
 		}
+		parent_entry = parent
 		parent_height = parent.height
+	}
+
+	// Validate difficulty (skip genesis block which has no parent)
+	if parent_entry != nil {
+		expected_bits := get_next_work_required(cs, parent_entry, header.timestamp)
+		if header.bits != expected_bits {
+			log.warnf("Bad difficulty at height %d: expected %08x, got %08x", parent_height + 1, expected_bits, header.bits)
+			return nil, .Bad_Difficulty
+		}
 	}
 
 	new_height := parent_height + 1
@@ -498,12 +564,23 @@ accept_block_headers_batch :: proc(cs: ^Chain_State, headers: []wire.Block_Heade
 
 		// Link to parent.
 		parent_height := -1
+		batch_parent: ^Block_Index_Entry
 		if hdr.prev_hash != HASH_ZERO {
 			parent, parent_found := cs.block_index.entries[hdr.prev_hash]
 			if !parent_found {
 				continue
 			}
+			batch_parent = parent
 			parent_height = parent.height
+		}
+
+		// Validate difficulty (skip genesis).
+		if batch_parent != nil {
+			expected_bits := get_next_work_required(cs, batch_parent, hdr.timestamp)
+			if hdr.bits != expected_bits {
+				log.warnf("Bad difficulty at height %d: expected %08x, got %08x", parent_height + 1, expected_bits, hdr.bits)
+				continue
+			}
 		}
 
 		new_height := parent_height + 1

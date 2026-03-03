@@ -47,6 +47,10 @@ TESTNET3_SEEDS :: [3]string {
 	"seed.tbtc.petertodd.net",
 	"seed.testnet.bitcoin.sprovoost.nl",
 }
+TESTNET4_SEEDS :: [2]string{
+	"seed.testnet4.bitcoin.sprovoost.nl",
+	"seed.testnet4.wiz.biz",
+}
 REGTEST_SEEDS :: [0]string{}
 SIGNET_SEEDS :: [2]string{
 	"seed.signet.bitcoin.sprovoost.nl",
@@ -55,6 +59,7 @@ SIGNET_SEEDS :: [2]string{
 
 DEFAULT_PORT_MAINNET  :: 8333
 DEFAULT_PORT_TESTNET3 :: 18333
+DEFAULT_PORT_TESTNET4 :: 48333
 DEFAULT_PORT_REGTEST  :: 18444
 DEFAULT_PORT_SIGNET   :: 38333
 

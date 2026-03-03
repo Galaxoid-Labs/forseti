@@ -4,7 +4,7 @@
 
 ```bash
 make              # Build deps + binary
-make test         # Run all 204 tests (9 packages)
+make test         # Run all 208 tests (9 packages)
 make debug        # Build with debug symbols
 odin build . -out:btcnode   # Build binary only
 odin test <pkg>   # Test single package (crypto, wire, script, consensus, storage, chain, p2p, mempool, rpc)
@@ -43,6 +43,7 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 - **Parallel script verification**: Two-phase `connect_block` — Phase 1 processes UTXOs sequentially, Phase 2 dispatches script checks to a persistent thread pool (`--par=N`, auto-detect by default). Serial fallback for small blocks (<16 inputs). Workers get 2MB heap arenas.
 - **Thread model**: Main (setup+wait), RPC thread, P2P thread, one reader thread per peer, N script verification worker threads (`--par`).
 - **RBF (BIP125)**: Full replace-by-fee with fullrbf=true default. `--mempoolfullrbf=0|1` CLI flag.
+- **Difficulty validation**: Header nBits verified against `get_next_work_required` (Bitcoin Core's GetNextWorkRequired). Testnet 20-minute minimum difficulty rule (`allow_min_difficulty`). BIP94 testnet4 retarget fix (`enforce_bip94`): uses first block of retarget period's nBits instead of parent's.
 - **RPC**: 37 methods including getpeerinfo (18 fields), getmininginfo, getnetworkhashps, getnettotals, validateaddress, savemempool, ping, help, getmemoryinfo, getrpcinfo, logging, createrawtransaction, combinerawtransaction, signrawtransactionwithkey, getchaintxstats.
 
 ## Conventions

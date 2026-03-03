@@ -1322,3 +1322,172 @@ test_signet_250447_tapscript_op_roll :: proc(t: ^testing.T) {
 	serr := verify_script(&verifier, tx.inputs[0].script_sig, script_pubkey, tx.witness[0])
 	testing.expect(t, serr == .None, fmt.tprintf("Tapscript with OP_ROLL should pass: got %v", serr))
 }
+
+// Regression: testnet4 block 100497, tx index 27.
+// P2PKH tx with 1 input and 10001 outputs (~960 KB raw). Legacy sighash
+// serializes the entire tx (~960 KB) via Wire_Writer which doubles its buffer
+// from 256 bytes. Each doubling on an arena allocator wastes the old buffer.
+// Total arena usage: ~2 MB just from Wire_Writer doubling + the final 1 MB buffer.
+// With a 2 MB arena this exhausted memory → wrong sighash → Sig_Null_Fail.
+// Fix: increased worker arena from 2 MB to 4 MB.
+@(test)
+test_testnet4_100497_p2pkh_large :: proc(t: ^testing.T) {
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	src_dir := #location().file_path
+	base_dir := src_dir[:strings.last_index(src_dir, "/")]
+	tx_hex_raw, tx_ok := os.read_entire_file(fmt.tprintf("%s/testdata/testnet4_100497_tx27.hex", base_dir))
+	if !tx_ok {
+		testing.expect(t, false, "failed to read testdata/testnet4_100497_tx27.hex")
+		return
+	}
+	defer delete(tx_hex_raw)
+
+	tx_hex_str := strings.trim_space(string(tx_hex_raw))
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str)
+	if !hex_ok {
+		testing.expect(t, false, "failed to hex-decode tx")
+		return
+	}
+	defer delete(tx_bytes)
+
+	r := wire.reader_init(tx_bytes)
+	tx, tx_err := wire.deserialize_tx(&r)
+	if tx_err != nil {
+		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
+		return
+	}
+
+	testing.expect_value(t, len(tx.inputs), 1)
+	testing.expect_value(t, len(tx.outputs), 10001)
+
+	// Read prevout data
+	prevout_raw, prev_ok := os.read_entire_file(fmt.tprintf("%s/testdata/testnet4_100497_tx27_prevouts.txt", base_dir))
+	if !prev_ok {
+		testing.expect(t, false, "failed to read prevouts file")
+		return
+	}
+	defer delete(prevout_raw)
+
+	spent_outputs := make([]wire.Tx_Out, 1)
+	defer delete(spent_outputs)
+
+	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n")
+	defer delete(lines)
+	parts := strings.split(lines[0], " ")
+	defer delete(parts)
+	value, _ := strconv.parse_i64(parts[0])
+	spk, _ := hex.decode(transmute([]u8)parts[1])
+	spent_outputs[0] = wire.Tx_Out{value = value, script_pubkey = spk}
+
+	// Use a 4 MB arena (matching the fix) — 2 MB would cause Sig_Null_Fail.
+	arena_buf := make([]byte, 4 * 1024 * 1024)
+	defer delete(arena_buf)
+	arena: mem.Arena
+	mem.arena_init(&arena, arena_buf)
+	alloc := mem.arena_allocator(&arena)
+
+	prev_temp := context.temp_allocator
+	context.temp_allocator = alloc
+	defer { context.temp_allocator = prev_temp }
+
+	flags := Verify_Flags{.P2SH, .DER_Sig, .Strict_Enc, .Check_Locktime, .Check_Sequence,
+	                       .Witness, .Null_Dummy, .Low_S, .Null_Fail, .Witness_Pub_Key_Compressed}
+
+	verifier := Script_Verifier{
+		tx            = &tx,
+		input_idx     = 0,
+		amount        = value,
+		flags         = flags,
+		spent_outputs = spent_outputs,
+	}
+
+	serr := verify_script(&verifier, tx.inputs[0].script_sig, spk, nil)
+	testing.expect(t, serr == .None, fmt.tprintf("P2PKH with 10001 outputs should pass: got %v", serr))
+}
+
+// Regression: testnet4 block 118555, tx index 3.
+// 2-input tx where input 1 has a 7904-byte bare script (OP_DEPTH + hash checks + 9-of-9 CHECKMULTISIG).
+// This is a non-standard custom script that is valid on testnet.
+@(test)
+test_testnet4_118555_bare_script :: proc(t: ^testing.T) {
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	src_dir := #location().file_path
+	base_dir := src_dir[:strings.last_index(src_dir, "/")]
+	tx_hex_raw, tx_ok := os.read_entire_file(fmt.tprintf("%s/testdata/testnet4_118555_tx3.hex", base_dir))
+	if !tx_ok {
+		testing.expect(t, false, "failed to read testdata/testnet4_118555_tx3.hex")
+		return
+	}
+	defer delete(tx_hex_raw)
+
+	tx_hex_str := strings.trim_space(string(tx_hex_raw))
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str)
+	if !hex_ok {
+		testing.expect(t, false, "failed to hex-decode tx")
+		return
+	}
+	defer delete(tx_bytes)
+
+	r := wire.reader_init(tx_bytes)
+	tx, tx_err := wire.deserialize_tx(&r)
+	if tx_err != nil {
+		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
+		return
+	}
+
+	testing.expect_value(t, len(tx.inputs), 2)
+	testing.expect_value(t, len(tx.outputs), 1)
+
+	// Read prevout data (2 lines, one per input)
+	prevout_raw, prev_ok := os.read_entire_file(fmt.tprintf("%s/testdata/testnet4_118555_tx3_prevouts.txt", base_dir))
+	if !prev_ok {
+		testing.expect(t, false, "failed to read prevouts file")
+		return
+	}
+	defer delete(prevout_raw)
+
+	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n")
+	defer delete(lines)
+	testing.expect(t, len(lines) >= 2, "expected at least 2 prevout lines")
+
+	spent_outputs := make([]wire.Tx_Out, 2)
+	defer delete(spent_outputs)
+
+	for i in 0 ..< 2 {
+		parts := strings.split(lines[i], " ")
+		defer delete(parts)
+		value, _ := strconv.parse_i64(parts[0])
+		spk, _ := hex.decode(transmute([]u8)parts[1])
+		spent_outputs[i] = wire.Tx_Out{value = value, script_pubkey = spk}
+	}
+
+	// Use a 4 MB arena
+	arena_buf := make([]byte, 4 * 1024 * 1024)
+	defer delete(arena_buf)
+	arena: mem.Arena
+	mem.arena_init(&arena, arena_buf)
+	alloc := mem.arena_allocator(&arena)
+
+	prev_temp := context.temp_allocator
+	context.temp_allocator = alloc
+	defer { context.temp_allocator = prev_temp }
+
+	flags := Verify_Flags{.P2SH, .DER_Sig, .Strict_Enc, .Check_Locktime, .Check_Sequence,
+	                       .Witness, .Null_Dummy, .Low_S, .Null_Fail, .Witness_Pub_Key_Compressed}
+
+	// Test input 1 (the bare script) — this was failing with Sig_Null_Fail
+	verifier := Script_Verifier{
+		tx            = &tx,
+		input_idx     = 1,
+		amount        = spent_outputs[1].value,
+		flags         = flags,
+		spent_outputs = spent_outputs,
+	}
+
+	serr := verify_script(&verifier, tx.inputs[1].script_sig, spent_outputs[1].script_pubkey, nil)
+	testing.expect(t, serr == .None, fmt.tprintf("Bare script input should pass: got %v", serr))
+}

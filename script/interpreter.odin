@@ -799,6 +799,10 @@ execute_script :: proc(
 					}
 
 					sub_script := script[code_sep_pos:]
+					// FindAndDelete: remove signature from subscript for legacy sighash
+					if !is_witness {
+						sub_script = _find_and_delete(sub_script, sig_data)
+					}
 					sighash: Hash256
 					if is_witness {
 						sighash = compute_sighash_witness_v0(verifier.tx, verifier.input_idx, sub_script, verifier.amount, hash_type, verifier.sighash_cache)
@@ -884,6 +888,14 @@ execute_script :: proc(
 			}
 
 			sub_script := script[code_sep_pos:]
+
+			// FindAndDelete: remove all signatures from subscript for legacy sighash.
+			// Bitcoin Core does this before the verification loop.
+			if !is_witness {
+				for si in 0 ..< int(n_sigs) {
+					sub_script = _find_and_delete(sub_script, sigs[si])
+				}
+			}
 
 			success := true
 			key_idx := 0
@@ -1413,6 +1425,95 @@ _remove_codeseparator :: proc(script: []byte) -> []byte {
 			i = end
 		} else if op == u8(Opcode.OP_CODESEPARATOR) {
 			i += 1 // skip it
+		} else {
+			append(&result, op)
+			i += 1
+		}
+	}
+	return result[:]
+}
+
+// FindAndDelete: remove all occurrences of a serialized push of sig_data from the script.
+// Used in legacy sighash computation (pre-segwit) to strip signatures from the subscript.
+// Pattern is constructed as: <push_opcode(len)><sig_data> using minimal push encoding.
+_find_and_delete :: proc(scr: []byte, sig_data: []byte) -> []byte {
+	if len(sig_data) == 0 { return scr }
+
+	// Build the serialized push pattern
+	pattern := make([dynamic]byte, 0, len(sig_data) + 5, context.temp_allocator)
+	if len(sig_data) < 0x4c {
+		append(&pattern, u8(len(sig_data)))
+	} else if len(sig_data) <= 0xff {
+		append(&pattern, 0x4c) // OP_PUSHDATA1
+		append(&pattern, u8(len(sig_data)))
+	} else if len(sig_data) <= 0xffff {
+		append(&pattern, 0x4d) // OP_PUSHDATA2
+		append(&pattern, u8(len(sig_data) & 0xff))
+		append(&pattern, u8((len(sig_data) >> 8) & 0xff))
+	} else {
+		append(&pattern, 0x4e) // OP_PUSHDATA4
+		append(&pattern, u8(len(sig_data) & 0xff))
+		append(&pattern, u8((len(sig_data) >> 8) & 0xff))
+		append(&pattern, u8((len(sig_data) >> 16) & 0xff))
+		append(&pattern, u8((len(sig_data) >> 24) & 0xff))
+	}
+	append(&pattern, ..sig_data)
+
+	pat := pattern[:]
+	pat_len := len(pat)
+
+	// Quick check: does the pattern appear at all?
+	found := false
+	outer: for i in 0 ..= len(scr) - pat_len {
+		for j in 0 ..< pat_len {
+			if scr[i + j] != pat[j] { continue outer }
+		}
+		found = true
+		break
+	}
+	if !found { return scr }
+
+	// Walk script opcode by opcode, checking for pattern match at each opcode boundary
+	result := make([dynamic]byte, 0, len(scr), context.temp_allocator)
+	i := 0
+	for i < len(scr) {
+		// Check for pattern match at this opcode boundary
+		if i + pat_len <= len(scr) {
+			match := true
+			for j in 0 ..< pat_len {
+				if scr[i + j] != pat[j] { match = false; break }
+			}
+			if match {
+				i += pat_len
+				continue
+			}
+		}
+		// Copy current opcode (with data if push)
+		op := scr[i]
+		if op >= 0x01 && op <= 0x4b {
+			n := int(op)
+			end := i + 1 + n
+			if end > len(scr) { end = len(scr) }
+			append(&result, ..scr[i:end])
+			i = end
+		} else if op == 0x4c && i + 1 < len(scr) {
+			n := int(scr[i + 1])
+			end := i + 2 + n
+			if end > len(scr) { end = len(scr) }
+			append(&result, ..scr[i:end])
+			i = end
+		} else if op == 0x4d && i + 2 < len(scr) {
+			n := int(scr[i + 1]) | int(scr[i + 2]) << 8
+			end := i + 3 + n
+			if end > len(scr) { end = len(scr) }
+			append(&result, ..scr[i:end])
+			i = end
+		} else if op == 0x4e && i + 4 < len(scr) {
+			n := int(scr[i + 1]) | int(scr[i + 2]) << 8 | int(scr[i + 3]) << 16 | int(scr[i + 4]) << 24
+			end := i + 5 + n
+			if end > len(scr) { end = len(scr) }
+			append(&result, ..scr[i:end])
+			i = end
 		} else {
 			append(&result, op)
 			i += 1

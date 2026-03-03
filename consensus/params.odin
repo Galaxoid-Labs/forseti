@@ -9,6 +9,8 @@ Chain_Params :: struct {
 	pow_limit:                 [32]byte, // big-endian 256-bit target
 	pow_limit_bits:            u32,
 	pow_no_retargeting:        bool,
+	allow_min_difficulty:      bool,  // Testnet 20-minute min-difficulty rule
+	enforce_bip94:             bool,  // Testnet4: don't allow min-difficulty at retarget boundaries
 	target_timespan:           u32, // seconds
 	target_spacing:            u32, // seconds
 	retarget_interval:         int,
@@ -79,6 +81,7 @@ _init_params :: proc "contextless" () {
 		network_magic            = wire.TESTNET3_MAGIC,
 		pow_limit_bits           = 0x1d00ffff,
 		pow_no_retargeting       = false,
+		allow_min_difficulty     = true,
 		target_timespan          = 14 * 24 * 60 * 60,
 		target_spacing           = 10 * 60,
 		retarget_interval        = 2016,
@@ -100,6 +103,8 @@ _init_params :: proc "contextless" () {
 		network_magic            = wire.TESTNET4_MAGIC,
 		pow_limit_bits           = 0x1d00ffff,
 		pow_no_retargeting       = false,
+		allow_min_difficulty     = true,
+		enforce_bip94            = true,
 		target_timespan          = 14 * 24 * 60 * 60,
 		target_spacing           = 10 * 60,
 		retarget_interval        = 2016,
@@ -255,7 +260,7 @@ _init_params :: proc "contextless" () {
 	REGTEST_PARAMS.pow_limit[2] = 0xff
 
 	// Genesis block headers (version=1, prev_hash=zeros for all networks)
-	// Merkle root is same for all: Satoshi's coinbase tx
+	// Merkle root is Satoshi's coinbase tx for all except testnet4 (BIP94)
 	// Display: 4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b
 	genesis_merkle := [32]byte{
 		0x3b, 0xa3, 0xed, 0xfd, 0x7a, 0x7b, 0x12, 0xb2,
@@ -276,11 +281,20 @@ _init_params :: proc "contextless" () {
 	TESTNET3_PARAMS.genesis_header.bits = 0x1d00ffff
 	TESTNET3_PARAMS.genesis_header.nonce = 414098458
 
+	// Testnet4 has a different genesis coinbase (BIP94).
+	// Display: 7aa0a7ae1e223414cb807e40cd57e667b718e42aaf9306db9102fe28912b7b4e
+	testnet4_genesis_merkle := [32]byte{
+		0x4e, 0x7b, 0x2b, 0x91, 0x28, 0xfe, 0x02, 0x91,
+		0xdb, 0x06, 0x93, 0xaf, 0x2a, 0xe4, 0x18, 0xb7,
+		0x67, 0xe6, 0x57, 0xcd, 0x40, 0x7e, 0x80, 0xcb,
+		0x14, 0x34, 0x22, 0x1e, 0xae, 0xa7, 0xa0, 0x7a,
+	}
+
 	TESTNET4_PARAMS.genesis_header.version = 1
-	TESTNET4_PARAMS.genesis_header.merkle_root = genesis_merkle
+	TESTNET4_PARAMS.genesis_header.merkle_root = testnet4_genesis_merkle
 	TESTNET4_PARAMS.genesis_header.timestamp = 1714777860
 	TESTNET4_PARAMS.genesis_header.bits = 0x1d00ffff
-	TESTNET4_PARAMS.genesis_header.nonce = 393743
+	TESTNET4_PARAMS.genesis_header.nonce = 393743547
 
 	SIGNET_PARAMS.genesis_header.version = 1
 	SIGNET_PARAMS.genesis_header.merkle_root = genesis_merkle

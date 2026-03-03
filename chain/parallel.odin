@@ -45,7 +45,9 @@ script_check_worker :: proc(task: thread.Task) {
 	check := cast(^Script_Check)task.data
 
 	// Allocate a per-check arena for temp allocations (wire writers, script stacks).
-	arena_buf := make([]byte, 2 * 1024 * 1024)
+	// 4 MB covers legacy sighash serialization of max-size txs (~1 MB) with room
+	// for Wire_Writer doubling overhead and script stacks.
+	arena_buf := make([]byte, 4 * 1024 * 1024)
 	defer delete(arena_buf)
 
 	arena: mem.Arena

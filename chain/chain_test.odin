@@ -444,3 +444,83 @@ test_accept_block_end_to_end :: proc(t: ^testing.T) {
 	read_hash := wire.block_header_hash(&read_block.header)
 	testing.expect(t, read_hash == hash, "read block hash should match")
 }
+
+// Test that accept_block_header rejects headers with wrong difficulty bits.
+@(test)
+test_bad_difficulty_rejected :: proc(t: ^testing.T) {
+	dir := make_test_dir("bad_diff")
+	defer remove_test_dir(dir)
+
+	// Use regtest-like params but with difficulty retargeting enabled.
+	params := consensus.REGTEST_PARAMS
+	params.pow_no_retargeting = false
+
+	cs: Chain_State
+	err := chain_state_init(&cs, dir, &params)
+	testing.expect_value(t, err, Chain_Error.None)
+	defer chain_state_destroy(&cs)
+
+	// Accept genesis (height 0)
+	block0 := make_chain_block(0, HASH_ZERO, &params)
+	aerr := accept_block(&cs, &block0)
+	testing.expect(t, aerr == .None, fmt.tprintf("accept block 0: %v", aerr))
+	hash0 := wire.block_header_hash(&block0.header)
+
+	// Build a block at height 1 with wrong bits. Use a slightly harder difficulty
+	// (0x207ffffe) that's still within pow_limit but != expected (0x207fffff).
+	// Mine it so the hash meets the declared (harder) target.
+	block1 := make_chain_block(1, hash0, &params)
+	block1.header.bits = 0x207ffffe
+	consensus.mine_block(&block1, &params) // Re-mine with new bits
+
+	_, herr := accept_block_header(&cs, &block1.header)
+	testing.expect_value(t, herr, Chain_Error.Bad_Difficulty)
+}
+
+// Test the testnet 20-minute minimum difficulty rule.
+@(test)
+test_testnet_min_difficulty :: proc(t: ^testing.T) {
+	dir := make_test_dir("min_diff")
+	defer remove_test_dir(dir)
+
+	// Use regtest-like params with min difficulty enabled (like testnet).
+	params := consensus.REGTEST_PARAMS
+	params.pow_no_retargeting = false
+	params.allow_min_difficulty = true
+
+	cs: Chain_State
+	err := chain_state_init(&cs, dir, &params)
+	testing.expect_value(t, err, Chain_Error.None)
+	defer chain_state_destroy(&cs)
+
+	// Accept genesis (height 0)
+	block0 := make_chain_block(0, HASH_ZERO, &params)
+	aerr := accept_block(&cs, &block0)
+	testing.expect(t, aerr == .None, fmt.tprintf("accept block 0: %v", aerr))
+	hash0 := wire.block_header_hash(&block0.header)
+
+	// Build block at height 1 with timestamp > prev + 20min.
+	// This should accept pow_limit_bits via the 20-minute rule.
+	base_time := u32(1231006505)
+	delayed_time := base_time + params.target_spacing * 2 + 1 // >20 minutes after block 0
+
+	block1 := make_chain_block(1, hash0, &params)
+	block1.header.timestamp = delayed_time
+	// block already has pow_limit_bits — re-mine with new timestamp
+	consensus.mine_block(&block1, &params)
+
+	aerr1 := accept_block(&cs, &block1)
+	testing.expect(t, aerr1 == .None, fmt.tprintf("accept delayed block 1: %v", aerr1))
+	hash1 := wire.block_header_hash(&block1.header)
+
+	// Now build block 2 with normal timestamp (not delayed).
+	// Should still accept pow_limit_bits because parent had pow_limit_bits
+	// and the walk-back finds genesis which also has pow_limit_bits.
+	normal_time := delayed_time + 60 // 1 minute later, not delayed
+	block2 := make_chain_block(2, hash1, &params)
+	block2.header.timestamp = normal_time
+	consensus.mine_block(&block2, &params)
+
+	aerr2 := accept_block(&cs, &block2)
+	testing.expect(t, aerr2 == .None, fmt.tprintf("accept normal block 2: %v", aerr2))
+}
