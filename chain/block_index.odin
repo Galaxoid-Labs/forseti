@@ -29,6 +29,7 @@ Block_Index_Entry :: struct {
 
 Block_Index :: struct {
 	entries:     map[Hash256]^Block_Index_Entry,
+	by_prev:     map[Hash256]^Block_Index_Entry, // prev_hash -> child entry (for O(1) next-block lookup)
 	genesis:     ^Block_Index_Entry,
 	best_header: ^Block_Index_Entry,
 	allocator:   mem.Allocator,
@@ -37,6 +38,7 @@ Block_Index :: struct {
 block_index_init :: proc(allocator := context.allocator) -> Block_Index {
 	idx: Block_Index
 	idx.entries = make(map[Hash256]^Block_Index_Entry, 1024, allocator)
+	idx.by_prev = make(map[Hash256]^Block_Index_Entry, 1024, allocator)
 	idx.allocator = allocator
 	return idx
 }
@@ -46,6 +48,7 @@ block_index_destroy :: proc(idx: ^Block_Index) {
 		free(entry, idx.allocator)
 	}
 	delete(idx.entries)
+	delete(idx.by_prev)
 }
 
 // Load all records from Index_DB, link prev pointers, build skip lists.
@@ -68,7 +71,7 @@ block_index_load :: proc(idx: ^Block_Index, db: ^storage.Index_DB) {
 		idx.entries[hash] = entry
 	}
 
-	// Second pass: link prev pointers and find genesis
+	// Second pass: link prev pointers, find genesis, build by_prev index
 	for _, entry in idx.entries {
 		if entry.prev_hash == HASH_ZERO {
 			idx.genesis = entry
@@ -77,6 +80,7 @@ block_index_load :: proc(idx: ^Block_Index, db: ^storage.Index_DB) {
 			if found {
 				entry.prev = parent
 			}
+			idx.by_prev[entry.prev_hash] = entry
 		}
 	}
 
@@ -122,6 +126,7 @@ block_index_add :: proc(idx: ^Block_Index, header: ^wire.Block_Header, height: i
 	}
 
 	idx.entries[hash] = entry
+	idx.by_prev[header.prev_hash] = entry
 
 	// Set genesis if height 0
 	if height == 0 {

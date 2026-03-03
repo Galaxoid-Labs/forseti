@@ -672,15 +672,6 @@ store_block :: proc(cs: ^Chain_State, block: ^wire.Block) -> Chain_Error {
 // Try to connect the next block(s) at tip+1. Reads stored blocks from disk.
 // Returns the number of blocks connected and hashes of any blocks that need re-download.
 connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 = nil) -> (connected: int, err: Chain_Error) {
-	// Build index: prev_hash -> entry for blocks stored but not yet connected.
-	// This gives O(1) lookup per block instead of scanning the full index.
-	pending := make(map[Hash256]^Block_Index_Entry, 1024, context.temp_allocator)
-	for _, entry in cs.block_index.entries {
-		if .Has_Data in entry.status && .Valid_Chain not_in entry.status {
-			pending[entry.prev_hash] = entry
-		}
-	}
-
 	// Per-block scratch arena: each block deserialization allocates txs, scripts,
 	// and witness data. Without per-iteration cleanup, connecting thousands of
 	// blocks leaks gigabytes into the caller's temp_allocator.
@@ -696,8 +687,10 @@ connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 =
 
 	for connected < MAX_CONNECT_BATCH {
 		tip_hash, _ := chain_tip(cs)
-		next_entry, found := pending[tip_hash]
-		if !found {
+
+		// O(1) child lookup via by_prev index.
+		next_entry := cs.block_index.by_prev[tip_hash]
+		if next_entry == nil || .Has_Data not_in next_entry.status || .Valid_Chain in next_entry.status {
 			return connected, .None
 		}
 
@@ -744,7 +737,6 @@ connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 =
 			return connected, cerr
 		}
 
-		delete_key(&pending, tip_hash)
 		connected += 1
 	}
 

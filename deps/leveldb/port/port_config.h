@@ -1,14 +1,22 @@
-// Auto-generated port config for POSIX/macOS build.
+// Port config for POSIX builds (macOS + Linux).
 
 #ifndef STORAGE_LEVELDB_PORT_PORT_CONFIG_H_
 #define STORAGE_LEVELDB_PORT_PORT_CONFIG_H_
 
 #if !defined(HAVE_FDATASYNC)
+#if defined(__linux__)
+#define HAVE_FDATASYNC 1
+#else
 #define HAVE_FDATASYNC 0
+#endif
 #endif
 
 #if !defined(HAVE_FULLFSYNC)
+#if defined(__APPLE__)
 #define HAVE_FULLFSYNC 1
+#else
+#define HAVE_FULLFSYNC 0
+#endif
 #endif
 
 #if !defined(HAVE_O_CLOEXEC)

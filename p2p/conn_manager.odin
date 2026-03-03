@@ -23,9 +23,10 @@ Conn_Manager :: struct {
 	next_peer_id:       Peer_Id,
 	network_magic:      u32,
 	default_port:       int,
-	shutdown:            bool,
-	pending_addrs:      [dynamic]string,
-	pending_addr_idx:   int,
+	shutdown:           bool,
+	// Pool of discovered addresses for replacing disconnected peers.
+	address_pool:       [dynamic]string,
+	address_pool_cursor: int,
 }
 
 conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) -> Net_Error {
@@ -66,6 +67,7 @@ conn_manager_destroy :: proc(cm: ^Conn_Manager) {
 		peer_destroy(peer)
 	}
 	delete(cm.peers)
+	delete(cm.address_pool)
 
 	// Drain remaining messages (channel may already be closed by shutdown).
 	for {
@@ -179,37 +181,37 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 
 	// Skip DNS discovery if peers were already added (e.g. via --connect).
 	if len(cm.peers) == 0 {
-		cm.pending_addrs = conn_manager_discover_peers(cm)
-		cm.pending_addr_idx = 0
+		addresses := conn_manager_discover_peers(cm)
 
-		// Connect the first peer synchronously so we have at least one.
-		// Remaining peers connect gradually in the message loop.
-		_, chain_height := chain.chain_tip(cm.chain)
-		for cm.pending_addr_idx < len(cm.pending_addrs) {
-			addr := cm.pending_addrs[cm.pending_addr_idx]
-			cm.pending_addr_idx += 1
+		connected := 0
+		for addr in addresses {
+			if connected >= MAX_OUTBOUND_PEERS {
+				break
+			}
 			err := conn_manager_add_peer(cm, addr, cm.default_port)
 			if err == .None {
+				connected += 1
 				log.infof("Connected to %s:%d", addr, cm.default_port)
-				peer := cm.peers[Peer_Id(cm.next_peer_id - 1)]
-				peer_send_version(peer, cm.params, chain_height)
-				peer.state = .Version_Sent
-				break
 			}
 		}
 
-		if len(cm.peers) == 0 {
+		// Keep remaining addresses for reconnection.
+		cm.address_pool = addresses
+		cm.address_pool_cursor = min(connected, len(addresses))
+
+		if connected == 0 {
 			log.warn("No peers available. Exiting.")
-			delete(cm.pending_addrs)
 			return
 		}
 	} else {
 		log.infof("Using %d pre-configured peer(s)", len(cm.peers))
-		_, chain_height := chain.chain_tip(cm.chain)
-		for _, peer in cm.peers {
-			peer_send_version(peer, cm.params, chain_height)
-			peer.state = .Version_Sent
-		}
+	}
+
+	// Send version to all connected peers.
+	_, chain_height := chain.chain_tip(cm.chain)
+	for _, peer in cm.peers {
+		peer_send_version(peer, cm.params, chain_height)
+		peer.state = .Version_Sent
 	}
 
 	last_ping_check: i64 = time.to_unix_seconds(time.now())
@@ -221,43 +223,37 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 		// inv messages, etc.) to prevent unbounded memory growth during IBD.
 		free_all(context.temp_allocator)
 
-		// Use non-blocking recv when there's active work to do:
-		// - pending blocks to connect
-		// - pending peer addresses to try connecting
-		has_pending := _has_pending_blocks(cm)
-		needs_peers := len(cm.peers) < MAX_OUTBOUND_PEERS && cm.pending_addr_idx < len(cm.pending_addrs)
 		msg: Peer_Message
 		got_msg: bool
 
-		if has_pending || needs_peers {
-			msg, got_msg = chan.try_recv(cm.msg_chan)
-			if !got_msg && !has_pending {
-				// No message and no blocks to connect — brief sleep to avoid busy-wait.
-				time.sleep(100 * time.Millisecond)
-			}
-		} else {
-			msg, got_msg = chan.recv(cm.msg_chan)
-			if !got_msg {
-				break // Channel closed.
-			}
+		msg, got_msg = chan.recv(cm.msg_chan)
+		if !got_msg {
+			break // Channel closed.
 		}
 
-		if got_msg {
-			_conn_manager_process_message(cm, msg)
+		_conn_manager_process_message(cm, msg)
 
-			// Free payload after processing.
-			if msg.payload != nil {
-				delete(msg.payload)
-			}
+		// Free payload after processing.
+		if msg.payload != nil {
+			delete(msg.payload)
+		}
+
+		// Force-check header sync completion after every message.
+		// Catches edge cases where late-joining peers block the transition.
+		if cm.sync_mgr.state == .Syncing_Headers {
+			_check_header_sync_complete(&cm.sync_mgr, &cm.peers)
 		}
 
 		// Check for stalled block/header requests.
-		sync_check_stalls(&cm.sync_mgr, &cm.peers)
+		stall_peer := sync_check_stalls(&cm.sync_mgr, &cm.peers)
+		if stall_peer != 0 {
+			// Disconnect the stalling peer — sync_handle_disconnect requeues its blocks.
+			sync_handle_disconnect(&cm.sync_mgr, stall_peer, &cm.peers)
+			conn_manager_remove_peer(cm, stall_peer)
 
-		// Connect any pending stored blocks (recovery catch-up).
-		// During normal operation this is a no-op. After crash recovery,
-		// thousands of stored blocks need connecting.
-		_conn_manager_connect_pending(cm)
+			// Try to connect a replacement peer from the address pool.
+			_conn_manager_replace_peer(cm)
+		}
 
 		now := time.to_unix_seconds(time.now())
 
@@ -286,32 +282,8 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 				}
 			}
 		}
-
-		// Gradually connect more peers. The 5-second connect timeout provides
-		// natural rate limiting — no additional time throttle needed.
-		if len(cm.peers) < MAX_OUTBOUND_PEERS && cm.pending_addr_idx < len(cm.pending_addrs) {
-			addr := cm.pending_addrs[cm.pending_addr_idx]
-			cm.pending_addr_idx += 1
-			err := conn_manager_add_peer(cm, addr, cm.default_port)
-			if err == .None {
-				log.infof("Connected to %s:%d", addr, cm.default_port)
-				_, chain_height := chain.chain_tip(cm.chain)
-				peer := cm.peers[Peer_Id(cm.next_peer_id - 1)]
-				peer_send_version(peer, cm.params, chain_height)
-				peer.state = .Version_Sent
-			}
-		}
-
-		// Clean up pending addresses when done.
-		if cm.pending_addr_idx >= len(cm.pending_addrs) && len(cm.pending_addrs) > 0 {
-			delete(cm.pending_addrs)
-			cm.pending_addrs = {}
-		}
 	}
 
-	if len(cm.pending_addrs) > 0 {
-		delete(cm.pending_addrs)
-	}
 	log.info("Connection manager shutting down.")
 }
 
@@ -408,8 +380,9 @@ _conn_manager_handle_verack :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 		case .Idle:
 			sync_start_header_sync(&cm.sync_mgr, &cm.peers)
 		case .Syncing_Headers:
-			// Add late-joining peer to the header race if no lead has been selected yet.
-			if cm.sync_mgr.header_lead_peer == 0 {
+			// Add late-joining peer to the header race if no lead has been selected yet,
+			// but only if we actually need more headers from this peer.
+			if cm.sync_mgr.header_lead_peer == 0 && cm.sync_mgr.best_header_height < int(peer.start_height) {
 				locator := build_block_locator(cm.sync_mgr.chain)
 				defer delete(locator)
 				peer_send_getheaders(peer, locator, HASH_ZERO)
@@ -605,39 +578,42 @@ conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid: Hash256) {
 	_conn_manager_relay_tx(cm, txid, Peer_Id(0))
 }
 
-// Check if there are stored blocks awaiting connection.
-_has_pending_blocks :: proc(cm: ^Conn_Manager) -> bool {
-	_, tip_height := chain.chain_tip(cm.chain)
-	return tip_height < cm.sync_mgr.best_header_height
-}
 
-// Connect stored-but-not-connected blocks (recovery catch-up).
-// After crash recovery, thousands of blocks may be on disk awaiting connection.
-// This drains the backlog without waiting for new block arrivals from peers.
-_conn_manager_connect_pending :: proc(cm: ^Conn_Manager) {
-	_, tip_height := chain.chain_tip(cm.chain)
-	best_header := cm.sync_mgr.best_header_height
-	if tip_height >= best_header {
+// Try to connect a replacement peer when a slot opens.
+_conn_manager_replace_peer :: proc(cm: ^Conn_Manager) {
+	if len(cm.peers) >= MAX_OUTBOUND_PEERS {
 		return
 	}
 
-	prev_height := tip_height
-	connected, cerr := chain.connect_pending_blocks(cm.chain)
-	if connected > 0 {
-		_, new_height := chain.chain_tip(cm.chain)
-		cm.sync_mgr.last_tip_update = time.to_unix_seconds(time.now())
+	// Try addresses from the pool.
+	attempts := 0
+	for cm.address_pool_cursor < len(cm.address_pool) && attempts < 5 {
+		addr := cm.address_pool[cm.address_pool_cursor]
+		cm.address_pool_cursor += 1
+		attempts += 1
 
-		// Budget-based UTXO flush during catch-up.
-		should_flush := chain.coins_cache_should_flush(&cm.chain.coins)
-		safety_flush := new_height / 5000 > prev_height / 5000
-		if should_flush || safety_flush {
-			tip_hash, tip_h := chain.chain_tip(cm.chain)
-			chain.coins_cache_flush(&cm.chain.coins, tip_hash, tip_h)
-		}
+		err := conn_manager_add_peer(cm, addr, cm.default_port)
+		if err == .None {
+			log.infof("Replacement peer connected: %s:%d", addr, cm.default_port)
 
-		if should_flush || safety_flush || new_height >= best_header {
-			log.infof("Recovery catch-up: height %d / %d", new_height, best_header)
+			// Send version + register for sync.
+			peer_id := cm.next_peer_id - 1
+			peer, found := cm.peers[peer_id]
+			if found {
+				_, chain_height := chain.chain_tip(cm.chain)
+				peer_send_version(peer, cm.params, chain_height)
+				peer.state = .Version_Sent
+			}
+			return
 		}
+	}
+
+	// Pool exhausted — re-discover via DNS.
+	if cm.address_pool_cursor >= len(cm.address_pool) {
+		log.debug("Address pool exhausted, re-discovering via DNS")
+		delete(cm.address_pool)
+		cm.address_pool = conn_manager_discover_peers(cm)
+		cm.address_pool_cursor = 0
 	}
 }
 

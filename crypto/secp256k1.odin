@@ -263,6 +263,11 @@ verify_ecdsa :: proc(pubkey_bytes: []u8, sig_der: []u8, msg_hash: Hash256) -> bo
 		return false
 	}
 
+	// Guard against nil/empty inputs — secp256k1 aborts on NULL pointers.
+	if len(pubkey_bytes) == 0 || len(sig_der) == 0 {
+		return false
+	}
+
 	pubkey: Secp256k1_Pubkey
 	if secp256k1_ec_pubkey_parse(ctx, &pubkey, raw_data(pubkey_bytes), c.size_t(len(pubkey_bytes))) != 1 {
 		return false

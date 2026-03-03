@@ -6,7 +6,7 @@ This is an educational/experimental project. It implements the core components o
 
 ## Status
 
-**209 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), and testnet3 with full script verification.
+**209 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Builds on macOS and Linux.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
@@ -33,6 +33,7 @@ This is an educational/experimental project. It implements the core components o
 | 20 | Control + Raw Transaction RPCs | Complete |
 | 21 | Testnet4 Support (BIP94) | Complete |
 | 22 | Testnet3 Fixes (BIP16 activation, lax DER, difficulty) | Complete |
+| 23 | Mainnet Sync (BIP30, adaptive stall detection, peer management) | Complete |
 
 ## Dependencies
 
@@ -332,10 +333,6 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 
 ## What's Left to Build
 
-### Correctness
-
-- **Testnet3 20-min difficulty rule** — When block timestamp >20min after previous, difficulty resets to `pow_limit`
-
 ### Performance
 
 - **Snappy compression for LevelDB** — Would reduce disk usage for mainnet
@@ -354,12 +351,12 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Thread model**: Main thread (setup + wait), RPC thread, P2P thread, one reader thread per peer, N script verification worker threads (`--par`)
 - **Graceful shutdown**: SIGINT/SIGTERM triggers mempool save, atomic UTXO + metadata flush to LevelDB, then clean exit
 - **Headers-first sync**: Single lead peer downloads headers via `getheaders`/`headers`, with automatic failover if the lead disconnects. Headers are batched into single WriteBatch transactions (up to 2000 per batch)
-- **Multi-peer block download**: Round-robin block requests across all active peers (up to 8), with bandwidth-based scoring — fast peers get more slots (up to 64), slow peers get fewer (minimum 4), new peers get a trial allocation of 8 blocks
+- **Multi-peer block download**: Fastest-first block assignment across all active peers (up to 8) — peers are sorted by throughput and the fastest peer gets tip-adjacent blocks so slow peers can't block chain progress. Bandwidth-based scoring: fast peers get more slots (up to 16), slow peers fewer (minimum 4), new peers get a trial allocation of 8 blocks
 - **Steady-state sync**: BIP130 `sendheaders` for header announcements, periodic `getheaders` polling (120s), and `inv`-triggered header requests keep the node up-to-date after IBD
-- **Stall detection**: Blocks stalled >30s are requeued to other peers; header requests timeout after 60s with lead peer failover
+- **Adaptive stall detection**: Bitcoin Core-style stall handling — default 10s timeout, doubles on disconnect (max 64s), decays by 0.85x on successful block connects. Slow peers (throughput <10% of fastest) are evicted after a trial period. Disconnected peers are replaced via DNS discovery
 - **DNS peer discovery**: Resolves all A records from DNS seeds (typically 20+ addresses per seed)
 - **Write-back UTXO cache**: In-memory cache with dirty/fresh flags, flushed atomically to LevelDB when memory usage exceeds the configurable budget (`--dbcache`, default 450 MiB). Rollback support for failed block validation
-- **Block index**: In-memory tree with skip list pointers for O(log n) ancestor lookup, persisted to LevelDB
+- **Block index**: In-memory tree with skip list pointers for O(log n) ancestor lookup, persisted to LevelDB. `by_prev` index provides O(1) next-block lookup for chain traversal
 - **Sighash caching**: BIP143 (SegWit v0) and BIP341 (Taproot) intermediate hashes are cached per-transaction, avoiding O(n^2) re-computation for transactions with many inputs
 - **Parallel script verification**: Two-phase block validation — Phase 1 processes UTXO updates sequentially (single-threaded, no locking), Phase 2 dispatches all script checks to a persistent thread pool (`--par=N`). Sighash caches are eagerly pre-computed before dispatch so workers read immutable data without synchronization. Serial fallback for small blocks (<16 inputs) or `--par=1`
 - **Per-input verification arena**: A 2MB heap-allocated scratch arena is reset between each input's script verification (serial path), preventing sighash writer accumulation from exhausting the 64MB block arena on large transactions. Parallel workers each allocate their own 2MB arena

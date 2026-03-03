@@ -65,15 +65,16 @@ DEFAULT_PORT_SIGNET   :: 38333
 
 MAX_OUTBOUND_PEERS          :: 8
 MAX_HEADERS_PER_MSG         :: 2000
-MAX_BLOCKS_PER_PEER         :: 64
+MAX_BLOCKS_PER_PEER         :: 16   // Bitcoin Core: 16 per peer max
 MIN_BLOCKS_PER_PEER         :: 4
 PEER_TRIAL_BLOCKS           :: 8
 PEER_TRIAL_SECS             :: 30
 PING_INTERVAL_SECS          :: 120
 HANDSHAKE_TIMEOUT_SECS      :: 10
 STALE_TIP_SECS              :: 600
-BLOCK_STALL_TIMEOUT_SECS    :: 30
-STALL_CHECK_INTERVAL_SECS   :: 5
+BLOCK_STALL_TIMEOUT_DEFAULT :: 10  // Seconds before disconnecting a stalling peer
+BLOCK_STALL_TIMEOUT_MAX     :: 64  // Max after repeated doublings
+STALL_CHECK_INTERVAL_SECS   :: 1
 HEADER_REQUEST_TIMEOUT_SECS :: 60
 HEADER_REFRESH_SECS         :: 120  // Periodic getheaders while In_Sync
 
