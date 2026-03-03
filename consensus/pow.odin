@@ -129,11 +129,13 @@ calculate_next_work_required :: proc(
 		return current_bits
 	}
 
-	actual_timespan := current_time - last_retarget_time
+	// Use signed arithmetic — on testnet3, timestamps can go backwards
+	// due to the 20-minute min-difficulty rule (miners set future timestamps).
+	actual_timespan := i64(current_time) - i64(last_retarget_time)
 
 	// Clamp to [target_timespan/4, target_timespan*4]
-	min_timespan := params.target_timespan / 4
-	max_timespan := params.target_timespan * 4
+	min_timespan := i64(params.target_timespan) / 4
+	max_timespan := i64(params.target_timespan) * 4
 	if actual_timespan < min_timespan {
 		actual_timespan = min_timespan
 	}

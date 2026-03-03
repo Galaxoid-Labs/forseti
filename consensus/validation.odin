@@ -278,8 +278,8 @@ count_block_sigops :: proc(block: ^wire.Block) -> int {
 get_script_flags :: proc(height: int, params: ^Chain_Params) -> script.Verify_Flags {
 	flags := script.Verify_Flags{}
 
-	// P2SH active from height >= 1 (always for practical purposes)
-	if height >= 1 {
+	// P2SH (BIP16)
+	if height >= params.p2sh_height {
 		flags += {.P2SH}
 	}
 

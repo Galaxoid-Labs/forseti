@@ -48,6 +48,12 @@ foreign secp256k1_lib {
 		inputlen: c.size_t,
 	) -> c.int ---
 
+	secp256k1_ecdsa_signature_parse_compact :: proc(
+		ctx: Secp256k1_Context,
+		sig: ^Secp256k1_ECDSA_Signature,
+		input64: [^]u8,
+	) -> c.int ---
+
 	secp256k1_ecdsa_signature_normalize :: proc(
 		ctx: Secp256k1_Context,
 		sigout: ^Secp256k1_ECDSA_Signature,
@@ -192,7 +198,64 @@ verify_seckey :: proc(seckey: []u8) -> bool {
 	return secp256k1_ec_seckey_verify(ctx, raw_data(seckey)) == 1
 }
 
+// Lax DER signature parser — extracts R and S into 32-byte-each compact form.
+// Handles non-minimal encodings (extra leading zeros, etc.) that strict DER rejects.
+// Based on Bitcoin Core's ecdsa_signature_parse_der_lax (contrib/lax_der_parsing.c).
+_parse_sig_der_lax :: proc(input: []u8) -> (compact: [64]u8, ok: bool) {
+	if len(input) < 6 { return {}, false } // Minimum: 30 LL 02 01 RR 02 01 SS
+
+	pos := 0
+
+	// Sequence tag
+	if input[pos] != 0x30 { return {}, false }
+	pos += 1
+
+	// Sequence length — skip (lax: don't validate against actual remaining bytes)
+	if input[pos] & 0x80 != 0 {
+		// Long form length encoding
+		n_bytes := int(input[pos] & 0x7F)
+		pos += 1 + n_bytes
+	} else {
+		pos += 1
+	}
+
+	// R INTEGER
+	if pos >= len(input) || input[pos] != 0x02 { return {}, false }
+	pos += 1
+	if pos >= len(input) { return {}, false }
+	r_len := int(input[pos])
+	pos += 1
+	if r_len == 0 || pos + r_len > len(input) { return {}, false }
+	r_data := input[pos:pos + r_len]
+	pos += r_len
+
+	// S INTEGER
+	if pos >= len(input) || input[pos] != 0x02 { return {}, false }
+	pos += 1
+	if pos >= len(input) { return {}, false }
+	s_len := int(input[pos])
+	pos += 1
+	if s_len == 0 || pos + s_len > len(input) { return {}, false }
+	s_data := input[pos:pos + s_len]
+
+	// Strip leading zeros from R, right-align into first 32 bytes
+	for len(r_data) > 1 && r_data[0] == 0 { r_data = r_data[1:] }
+	if len(r_data) > 32 { return {}, false }
+	r_offset := 32 - len(r_data)
+	for i in 0 ..< len(r_data) { compact[r_offset + i] = r_data[i] }
+
+	// Strip leading zeros from S, right-align into second 32 bytes
+	for len(s_data) > 1 && s_data[0] == 0 { s_data = s_data[1:] }
+	if len(s_data) > 32 { return {}, false }
+	s_offset := 32 - len(s_data)
+	for i in 0 ..< len(s_data) { compact[32 + s_offset + i] = s_data[i] }
+
+	return compact, true
+}
+
 // Verify an ECDSA signature (DER-encoded) against a public key and message hash.
+// Uses lax DER parsing (matching Bitcoin Core's CPubKey::Verify) — strict DER
+// validation is done separately by the script interpreter when BIP66 is active.
 // Automatically normalizes to lower-S form per BIP62.
 verify_ecdsa :: proc(pubkey_bytes: []u8, sig_der: []u8, msg_hash: Hash256) -> bool {
 	ctx := _global_secp256k1_ctx
@@ -205,8 +268,14 @@ verify_ecdsa :: proc(pubkey_bytes: []u8, sig_der: []u8, msg_hash: Hash256) -> bo
 		return false
 	}
 
+	// Lax DER parse: extract R and S into compact 64-byte form
+	compact, lax_ok := _parse_sig_der_lax(sig_der)
+	if !lax_ok {
+		return false
+	}
+
 	sig: Secp256k1_ECDSA_Signature
-	if secp256k1_ecdsa_signature_parse_der(ctx, &sig, raw_data(sig_der), c.size_t(len(sig_der))) != 1 {
+	if secp256k1_ecdsa_signature_parse_compact(ctx, &sig, &compact[0]) != 1 {
 		return false
 	}
 

@@ -1,11 +1,14 @@
 package p2p
 
+import "core:c"
 import "core:fmt"
 import "core:mem"
 import tcp "core:net"
+import "core:strconv"
 import "core:strings"
 import "core:sync"
 import "core:sync/chan"
+import "core:sys/posix"
 import "core:thread"
 import "core:time"
 
@@ -37,6 +40,77 @@ Peer :: struct {
 	bytes_recv:     i64,   // total bytes received
 }
 
+// TCP connect with a 5-second timeout using non-blocking socket + poll.
+_dial_tcp_timeout :: proc(address: string, port: int) -> (tcp.TCP_Socket, Net_Error) {
+	// Parse address string into IP4 bytes.
+	ip4: [4]u8
+	parts := strings.split(address, ".", context.temp_allocator)
+	if len(parts) != 4 {
+		return 0, .Connection_Failed
+	}
+	for i in 0 ..< 4 {
+		val, ok := strconv.parse_int(parts[i])
+		if !ok || val < 0 || val > 255 {
+			return 0, .Connection_Failed
+		}
+		ip4[i] = u8(val)
+	}
+
+	// Create TCP socket.
+	fd := posix.socket(.INET, .STREAM, {})
+	if fd == -1 {
+		return 0, .Connection_Failed
+	}
+
+	// Set non-blocking.
+	flags := posix.fcntl(fd, .GETFL)
+	posix.fcntl(fd, .SETFL, flags | c.int(posix.O_NONBLOCK))
+
+	// Build sockaddr_in manually.
+	addr: posix.sockaddr_in
+	addr.sin_family = .INET
+	addr.sin_port = u16be(u16(port))
+	addr.sin_addr.s_addr = transmute(u32be)(ip4)
+	addr.sin_len = u8(size_of(posix.sockaddr_in))
+
+	// Initiate connect (returns immediately with EINPROGRESS).
+	res := posix.connect(fd, (^posix.sockaddr)(&addr), posix.socklen_t(size_of(posix.sockaddr_in)))
+	if res == .OK {
+		// Connected immediately — restore blocking mode.
+		posix.fcntl(fd, .SETFL, flags)
+		return tcp.TCP_Socket(fd), .None
+	}
+
+	// Check if connection is in progress.
+	if posix.errno() != .EINPROGRESS {
+		posix.close(fd)
+		return 0, .Connection_Failed
+	}
+
+	// Poll for writability with 5-second timeout.
+	pfd := posix.pollfd{fd = fd, events = {.OUT}, revents = {}}
+	poll_res := posix.poll(&pfd, 1, 5000)
+
+	if poll_res <= 0 {
+		// Timeout or error.
+		posix.close(fd)
+		return 0, .Connection_Failed
+	}
+
+	// Check for connection error via SO_ERROR.
+	sock_err: c.int = 0
+	err_len := posix.socklen_t(size_of(c.int))
+	posix.getsockopt(fd, posix.SOL_SOCKET, posix.Sock_Option.ERROR, &sock_err, &err_len)
+	if sock_err != 0 {
+		posix.close(fd)
+		return 0, .Connection_Failed
+	}
+
+	// Restore blocking mode.
+	posix.fcntl(fd, .SETFL, flags)
+	return tcp.TCP_Socket(fd), .None
+}
+
 // Connect to a peer, allocate Peer struct, start reader thread.
 peer_connect :: proc(
 	address: string,
@@ -45,8 +119,8 @@ peer_connect :: proc(
 	msg_chan: chan.Chan(Peer_Message),
 	peer_id: Peer_Id,
 ) -> (peer: ^Peer, err: Net_Error) {
-	socket, net_err := tcp.dial_tcp(address, port)
-	if net_err != nil {
+	socket, connect_err := _dial_tcp_timeout(address, port)
+	if connect_err != .None {
 		return nil, .Connection_Failed
 	}
 

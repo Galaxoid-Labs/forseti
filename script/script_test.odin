@@ -1491,3 +1491,69 @@ test_testnet4_118555_bare_script :: proc(t: ^testing.T) {
 	serr := verify_script(&verifier, tx.inputs[1].script_sig, spent_outputs[1].script_pubkey, nil)
 	testing.expect(t, serr == .None, fmt.tprintf("Bare script input should pass: got %v", serr))
 }
+
+@(test)
+test_testnet3_26860_p2pkh :: proc(t: ^testing.T) {
+	// Testnet3 block 26860, tx 1: standard P2PKH with uncompressed pubkey.
+	// Pre-BIP66, only .P2SH flag active.
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	src_dir := #location().file_path
+	base_dir := src_dir[:strings.last_index(src_dir, "/")]
+
+	tx_hex_raw, tx_ok := os.read_entire_file(fmt.tprintf("%s/testdata/testnet3_26860_tx1.hex", base_dir))
+	if !tx_ok {
+		testing.expect(t, false, "failed to read testdata/testnet3_26860_tx1.hex")
+		return
+	}
+	defer delete(tx_hex_raw)
+
+	tx_hex_str := strings.trim_space(string(tx_hex_raw))
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str)
+	if !hex_ok {
+		testing.expect(t, false, "failed to hex-decode tx")
+		return
+	}
+	defer delete(tx_bytes)
+
+	r := wire.reader_init(tx_bytes)
+	tx, tx_err := wire.deserialize_tx(&r)
+	if tx_err != nil {
+		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
+		return
+	}
+
+	testing.expect_value(t, len(tx.inputs), 1)
+	testing.expect_value(t, len(tx.outputs), 2)
+
+	// Prevout: 8750000000 sats, P2PKH
+	prevout_raw, prev_ok := os.read_entire_file(fmt.tprintf("%s/testdata/testnet3_26860_tx1_prevouts.txt", base_dir))
+	if !prev_ok {
+		testing.expect(t, false, "failed to read prevouts")
+		return
+	}
+	defer delete(prevout_raw)
+
+	parts := strings.split(strings.trim_space(string(prevout_raw)), " ")
+	defer delete(parts)
+	value, _ := strconv.parse_i64(parts[0])
+	spk, _ := hex.decode(transmute([]u8)parts[1])
+	defer delete(spk)
+
+	spent_outputs := []wire.Tx_Out{{value = value, script_pubkey = spk}}
+
+	// Only P2SH flag active at height 26860 on testnet3
+	flags := Verify_Flags{.P2SH}
+
+	verifier := Script_Verifier{
+		tx            = &tx,
+		input_idx     = 0,
+		amount        = spent_outputs[0].value,
+		flags         = flags,
+		spent_outputs = spent_outputs,
+	}
+
+	serr := verify_script(&verifier, tx.inputs[0].script_sig, spent_outputs[0].script_pubkey, nil)
+	testing.expect(t, serr == .None, fmt.tprintf("P2PKH should pass: got %v", serr))
+}

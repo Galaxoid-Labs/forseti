@@ -319,8 +319,9 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 		}
 
 		remaining := len(sm.blocks_to_download) - sm.download_cursor
-		if should_flush || safety_flush || remaining == 0 {
-			log.debugf("Connected block at height %d (remaining: %d, in-flight: %d)",
+		progress_interval := height / 1000 > prev_height / 1000
+		if should_flush || safety_flush || remaining == 0 || progress_interval {
+			log.infof("Blocks: %d (remaining: %d, in-flight: %d)",
 				height, remaining, len(sm.blocks_in_flight))
 
 			// Log per-peer throughput stats at 5000-block intervals.

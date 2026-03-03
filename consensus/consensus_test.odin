@@ -212,11 +212,16 @@ test_get_script_flags :: proc(t: ^testing.T) {
 	// Regtest: all flags active at height 0
 	regtest := REGTEST_PARAMS
 	flags_reg := get_script_flags(0, &regtest)
-	testing.expect(t, .P2SH not_in flags_reg, "P2SH not active at height 0 (requires >= 1)")
-	flags_reg1 := get_script_flags(1, &regtest)
-	testing.expect(t, .P2SH in flags_reg1, "P2SH active at height 1")
-	testing.expect(t, .DER_Sig in flags_reg1, "DER_Sig active at height 1 regtest")
-	testing.expect(t, .Witness in flags_reg1, "Witness active at height 1 regtest")
+	testing.expect(t, .P2SH in flags_reg, "P2SH active at height 0 on regtest")
+	testing.expect(t, .DER_Sig in flags_reg, "DER_Sig active at height 0 regtest")
+	testing.expect(t, .Witness in flags_reg, "Witness active at height 0 regtest")
+
+	// Testnet3: P2SH not active before height 514
+	testnet3 := TESTNET3_PARAMS
+	flags_t3_pre := get_script_flags(513, &testnet3)
+	testing.expect(t, .P2SH not_in flags_t3_pre, "P2SH not active at testnet3 height 513")
+	flags_t3_post := get_script_flags(514, &testnet3)
+	testing.expect(t, .P2SH in flags_t3_post, "P2SH active at testnet3 height 514")
 }
 
 // --- Coinbase detection tests ---
@@ -354,24 +359,28 @@ test_difficulty_adjustment :: proc(t: ^testing.T) {
 	same := calculate_next_work_required(0, params.target_timespan, 0x1d00ffff, &params)
 	testing.expect_value(t, same, u32(0x1d00ffff))
 
+	// Use a harder starting difficulty so 4x doesn't hit the pow_limit ceiling.
+	// 0x1b00ffff target is 1/65536 of pow_limit, so 4x is well below the limit.
+	start_bits := u32(0x1b00ffff)
+	original_target := bits_to_target(start_bits)
+
 	// 4x timespan = 4x easier (larger target)
 	four_x_time := params.target_timespan * 4
-	easier := calculate_next_work_required(0, four_x_time, 0x1d00ffff, &params)
+	easier := calculate_next_work_required(0, four_x_time, start_bits, &params)
 	easier_target := bits_to_target(easier)
-	original_target := bits_to_target(0x1d00ffff)
 	testing.expect(t, u256_compare(easier_target, original_target) > 0, "4x timespan should yield easier target")
 
 	// 1/4 timespan = 4x harder (smaller target)
 	quarter_time := params.target_timespan / 4
-	harder := calculate_next_work_required(0, quarter_time, 0x1d00ffff, &params)
+	harder := calculate_next_work_required(0, quarter_time, start_bits, &params)
 	harder_target := bits_to_target(harder)
 	testing.expect(t, u256_compare(harder_target, original_target) < 0, "1/4 timespan should yield harder target")
 
 	// Extreme values get clamped to 4x limits
-	extreme_easy := calculate_next_work_required(0, params.target_timespan * 100, 0x1d00ffff, &params)
+	extreme_easy := calculate_next_work_required(0, params.target_timespan * 100, start_bits, &params)
 	testing.expect_value(t, extreme_easy, easier) // clamped at 4x
 
-	extreme_hard := calculate_next_work_required(0, 1, 0x1d00ffff, &params)
+	extreme_hard := calculate_next_work_required(0, 1, start_bits, &params)
 	testing.expect_value(t, extreme_hard, harder) // clamped at 1/4
 }
 

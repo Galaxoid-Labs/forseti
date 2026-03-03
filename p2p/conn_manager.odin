@@ -14,16 +14,18 @@ import "../mempool"
 import "../wire"
 
 Conn_Manager :: struct {
-	peers:          map[Peer_Id]^Peer,
-	msg_chan:        chan.Chan(Peer_Message),
-	sync_mgr:       Sync_Manager,
-	chain:          ^chain.Chain_State,
-	params:         ^consensus.Chain_Params,
-	mp:             ^mempool.Mempool,
-	next_peer_id:   Peer_Id,
-	network_magic:  u32,
-	default_port:   int,
-	shutdown:        bool,
+	peers:              map[Peer_Id]^Peer,
+	msg_chan:            chan.Chan(Peer_Message),
+	sync_mgr:           Sync_Manager,
+	chain:              ^chain.Chain_State,
+	params:             ^consensus.Chain_Params,
+	mp:                 ^mempool.Mempool,
+	next_peer_id:       Peer_Id,
+	network_magic:      u32,
+	default_port:       int,
+	shutdown:            bool,
+	pending_addrs:      [dynamic]string,
+	pending_addr_idx:   int,
 }
 
 conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) -> Net_Error {
@@ -177,34 +179,37 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 
 	// Skip DNS discovery if peers were already added (e.g. via --connect).
 	if len(cm.peers) == 0 {
-		addresses := conn_manager_discover_peers(cm)
-		defer delete(addresses)
+		cm.pending_addrs = conn_manager_discover_peers(cm)
+		cm.pending_addr_idx = 0
 
-		connected := 0
-		for addr in addresses {
-			if connected >= MAX_OUTBOUND_PEERS {
-				break
-			}
+		// Connect the first peer synchronously so we have at least one.
+		// Remaining peers connect gradually in the message loop.
+		_, chain_height := chain.chain_tip(cm.chain)
+		for cm.pending_addr_idx < len(cm.pending_addrs) {
+			addr := cm.pending_addrs[cm.pending_addr_idx]
+			cm.pending_addr_idx += 1
 			err := conn_manager_add_peer(cm, addr, cm.default_port)
 			if err == .None {
-				connected += 1
 				log.infof("Connected to %s:%d", addr, cm.default_port)
+				peer := cm.peers[Peer_Id(cm.next_peer_id - 1)]
+				peer_send_version(peer, cm.params, chain_height)
+				peer.state = .Version_Sent
+				break
 			}
 		}
 
-		if connected == 0 {
+		if len(cm.peers) == 0 {
 			log.warn("No peers available. Exiting.")
+			delete(cm.pending_addrs)
 			return
 		}
 	} else {
 		log.infof("Using %d pre-configured peer(s)", len(cm.peers))
-	}
-
-	// Send version to all connected peers.
-	_, chain_height := chain.chain_tip(cm.chain)
-	for _, peer in cm.peers {
-		peer_send_version(peer, cm.params, chain_height)
-		peer.state = .Version_Sent
+		_, chain_height := chain.chain_tip(cm.chain)
+		for _, peer in cm.peers {
+			peer_send_version(peer, cm.params, chain_height)
+			peer.state = .Version_Sent
+		}
 	}
 
 	last_ping_check: i64 = time.to_unix_seconds(time.now())
@@ -216,14 +221,20 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 		// inv messages, etc.) to prevent unbounded memory growth during IBD.
 		free_all(context.temp_allocator)
 
-		// Use non-blocking recv when there are pending blocks to connect,
-		// so the loop keeps making progress instead of stalling on the channel.
+		// Use non-blocking recv when there's active work to do:
+		// - pending blocks to connect
+		// - pending peer addresses to try connecting
 		has_pending := _has_pending_blocks(cm)
+		needs_peers := len(cm.peers) < MAX_OUTBOUND_PEERS && cm.pending_addr_idx < len(cm.pending_addrs)
 		msg: Peer_Message
 		got_msg: bool
 
-		if has_pending {
+		if has_pending || needs_peers {
 			msg, got_msg = chan.try_recv(cm.msg_chan)
+			if !got_msg && !has_pending {
+				// No message and no blocks to connect — brief sleep to avoid busy-wait.
+				time.sleep(100 * time.Millisecond)
+			}
 		} else {
 			msg, got_msg = chan.recv(cm.msg_chan)
 			if !got_msg {
@@ -275,8 +286,32 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 				}
 			}
 		}
+
+		// Gradually connect more peers. The 5-second connect timeout provides
+		// natural rate limiting — no additional time throttle needed.
+		if len(cm.peers) < MAX_OUTBOUND_PEERS && cm.pending_addr_idx < len(cm.pending_addrs) {
+			addr := cm.pending_addrs[cm.pending_addr_idx]
+			cm.pending_addr_idx += 1
+			err := conn_manager_add_peer(cm, addr, cm.default_port)
+			if err == .None {
+				log.infof("Connected to %s:%d", addr, cm.default_port)
+				_, chain_height := chain.chain_tip(cm.chain)
+				peer := cm.peers[Peer_Id(cm.next_peer_id - 1)]
+				peer_send_version(peer, cm.params, chain_height)
+				peer.state = .Version_Sent
+			}
+		}
+
+		// Clean up pending addresses when done.
+		if cm.pending_addr_idx >= len(cm.pending_addrs) && len(cm.pending_addrs) > 0 {
+			delete(cm.pending_addrs)
+			cm.pending_addrs = {}
+		}
 	}
 
+	if len(cm.pending_addrs) > 0 {
+		delete(cm.pending_addrs)
+	}
 	log.info("Connection manager shutting down.")
 }
 

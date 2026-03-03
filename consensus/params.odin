@@ -16,6 +16,7 @@ Chain_Params :: struct {
 	retarget_interval:         int,
 	subsidy_halving_interval:  int,
 	// BIP activation heights
+	p2sh_height:               int,  // BIP16
 	bip34_height:              int,
 	bip65_height:              int,
 	bip66_height:              int,
@@ -52,6 +53,7 @@ _init_params :: proc "contextless" () {
 		target_spacing           = 10 * 60,            // 10 minutes
 		retarget_interval        = 2016,
 		subsidy_halving_interval = 210_000,
+		p2sh_height              = 173_805,
 		bip34_height             = 227_931,
 		bip65_height             = 388_381,
 		bip66_height             = 363_725,
@@ -63,7 +65,6 @@ _init_params :: proc "contextless" () {
 		bech32_hrp               = "bc",
 	}
 	// mainnet pow_limit: 00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-	MAINNET_PARAMS.pow_limit[3] = 0xff
 	for i in 4 ..< 32 {
 		MAINNET_PARAMS.pow_limit[i] = 0xff
 	}
@@ -86,12 +87,13 @@ _init_params :: proc "contextless" () {
 		target_spacing           = 10 * 60,
 		retarget_interval        = 2016,
 		subsidy_halving_interval = 210_000,
-		bip34_height             = 1,
-		bip65_height             = 1,
-		bip66_height             = 1,
-		csv_height               = 1,
-		segwit_height            = 1,
-		taproot_height           = 1,
+		p2sh_height              = 514,
+		bip34_height             = 21_111,
+		bip65_height             = 581_885,
+		bip66_height             = 330_776,
+		csv_height               = 770_112,
+		segwit_height            = 834_624,
+		taproot_height           = 2_032_291,
 		p2pkh_prefix             = 0x6F,
 		p2sh_prefix              = 0xC4,
 		bech32_hrp               = "tb",
@@ -109,6 +111,7 @@ _init_params :: proc "contextless" () {
 		target_spacing           = 10 * 60,
 		retarget_interval        = 2016,
 		subsidy_halving_interval = 210_000,
+		p2sh_height              = 1,
 		bip34_height             = 1,
 		bip65_height             = 1,
 		bip66_height             = 1,
@@ -130,6 +133,7 @@ _init_params :: proc "contextless" () {
 		target_spacing           = 10 * 60,
 		retarget_interval        = 2016,
 		subsidy_halving_interval = 210_000,
+		p2sh_height              = 1,
 		bip34_height             = 1,
 		bip65_height             = 1,
 		bip66_height             = 1,
@@ -244,6 +248,7 @@ _init_params :: proc "contextless" () {
 		target_spacing           = 10 * 60,
 		retarget_interval        = 2016,
 		subsidy_halving_interval = 150,
+		p2sh_height              = 0,
 		bip34_height             = 0,
 		bip65_height             = 0,
 		bip66_height             = 0,

@@ -6,13 +6,13 @@ This is an educational/experimental project. It implements the core components o
 
 ## Status
 
-**208 tests passing** across 9 packages. Successfully syncs signet (~294k blocks) and testnet4 (~124k blocks) with full script verification.
+**209 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), and testnet3 with full script verification.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
 | 0 | Crypto + C Bindings | Complete (24 tests) |
 | 1 | Wire Protocol + Serialization | Complete (24 tests) |
-| 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH, Taproot) | Complete (49 tests) |
+| 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH, Taproot) | Complete (50 tests) |
 | 3 | Consensus Rules + Block Validation | Complete (15 tests) |
 | 4 | UTXO Set + Chain State | Complete (10 tests) |
 | 5 | Persistent Storage (LevelDB) | Complete (13 tests) |
@@ -32,6 +32,7 @@ This is an educational/experimental project. It implements the core components o
 | 19 | Parallel Script Verification (`--par`) | Complete |
 | 20 | Control + Raw Transaction RPCs | Complete |
 | 21 | Testnet4 Support (BIP94) | Complete |
+| 22 | Testnet3 Fixes (BIP16 activation, lax DER, difficulty) | Complete |
 
 ## Dependencies
 
@@ -155,7 +156,7 @@ curl -s --data '{"method":"getblockchaininfo","params":[],"id":1}' \
 bitcoin-cli -rpcport=18443 getblockchaininfo
 ```
 
-### Bitcoin Core RPC Coverage (36 / 78 non-wallet RPCs)
+### Bitcoin Core RPC Coverage (37 / 78 non-wallet RPCs)
 
 The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are intentionally excluded.
 
@@ -275,16 +276,16 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 ## Testing
 
 ```bash
-# Run all 204 tests
+# Run all 209 tests
 make test
 
 # Test individual packages
 odin test crypto          # 24 tests
 odin test wire            # 24 tests
-odin test script          # 47 tests (use -define:ODIN_TEST_THREADS=1 if flaky)
+odin test script          # 50 tests (use -define:ODIN_TEST_THREADS=1 if flaky)
 odin test consensus       # 15 tests
 odin test storage         # 13 tests
-odin test chain           #  8 tests
+odin test chain           # 10 tests
 odin test p2p             #  6 tests
 odin test mempool         # 20 tests
 odin test rpc             # 47 tests
@@ -365,6 +366,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Mempool persistence**: Mempool is saved to `<datadir>/mempool.dat` on shutdown and reloaded/revalidated on startup
 - **Transaction relay**: P2P `inv`/`tx`/`getdata` handling for propagating mempool transactions to peers
 - **RBF (BIP125)**: Full replace-by-fee support — signaling check (opt-in or fullrbf), no new unconfirmed parents, higher absolute fee, bandwidth fee, max 100 evictions
+- **Lax DER signature parsing**: Pre-BIP66 transactions may contain non-strictly-encoded DER signatures. The verification path uses a lax DER parser (matching Bitcoin Core's `ecdsa_signature_parse_der_lax`), while strict DER validation is enforced separately by the script interpreter when BIP66 is active
 - **Address encoding**: Base58Check (P2PKH, P2SH) and Bech32/Bech32m (P2WPKH, P2WSH, P2TR) for both encoding and decoding, with network-aware validation
 - **Configurable DB cache**: `--dbcache` controls total database memory (default 450 MiB), split following Bitcoin Core's algorithm — small LevelDB caches (2-8 MiB), large in-memory coins cache (~440 MiB). Lower values reduce RAM usage at the cost of more frequent UTXO flushes during sync
 - **Assumevalid**: Skips script verification for blocks below a configured height (267,665 for signet) for faster initial sync
