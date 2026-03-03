@@ -15,6 +15,7 @@ import "../wire"
 Sync_State :: enum {
 	Idle,
 	Syncing_Headers,
+	Probing_Peers,
 	Downloading_Blocks,
 	In_Sync,
 }
@@ -49,6 +50,8 @@ Sync_Manager :: struct {
 	header_lead_peer:   Peer_Id, // fastest responder becomes lead for header sync
 	stall_timeout:      i64,     // adaptive stall timeout (seconds), doubles on disconnect, decays on connect
 	last_disconnect:    i64,     // timestamp of last stall disconnect (rate limit)
+	probe_start_time:   i64,     // when probe phase started (unix seconds)
+	probe_complete:     bool,    // true after probe phase finishes (or was skipped)
 }
 
 sync_manager_init :: proc(sm: ^Sync_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) {
@@ -115,11 +118,15 @@ sync_start_header_sync :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) -> 
 	// If we already have headers up to or beyond the best peer's height, skip to block download.
 	if sm.best_header_height >= int(best_height) {
 		log.infof("Headers already up to date (height %d). Building download queue...", sm.best_header_height)
-		sm.state = .Downloading_Blocks
 		_build_download_queue(sm)
 		if len(sm.blocks_to_download) == 0 {
 			sm.state = .In_Sync
+		} else if !sm.probe_complete && len(sm.peer_rr_list) > MAX_OUTBOUND_PEERS {
+			sm.state = .Probing_Peers
+			log.infof("%d blocks queued for download — starting peer probe", len(sm.blocks_to_download))
+			_start_probe(sm, peers)
 		} else {
+			sm.state = .Downloading_Blocks
 			log.infof("%d blocks queued for download", len(sm.blocks_to_download))
 			sync_request_blocks(sm, peers)
 		}
@@ -233,15 +240,19 @@ sync_handle_headers :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, headers: []wire
 		}
 
 		if all_done {
-			// Header sync complete — transition to block download.
+			// Header sync complete — transition to block download (or probe).
 			log.info("Header sync complete. Building download queue...")
-			sm.state = .Downloading_Blocks
 			_build_download_queue(sm)
 
 			if len(sm.blocks_to_download) == 0 {
 				log.info("No blocks to download. Already in sync.")
 				sm.state = .In_Sync
+			} else if !sm.probe_complete && len(sm.peer_rr_list) > MAX_OUTBOUND_PEERS {
+				sm.state = .Probing_Peers
+				log.infof("%d blocks queued for download — starting peer probe", len(sm.blocks_to_download))
+				_start_probe(sm, peers)
 			} else {
+				sm.state = .Downloading_Blocks
 				log.infof("%d blocks queued for download", len(sm.blocks_to_download))
 				sync_request_blocks(sm, peers)
 			}
@@ -336,6 +347,14 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 				_log_peer_throughput(sm)
 			}
 		}
+	}
+
+	// During probe phase: refill the delivering peer's slot, but don't do
+	// full sync_request_blocks or check for sync completion. Probe exits
+	// via timeout in sync_check_probe_complete.
+	if sm.state == .Probing_Peers {
+		_refill_probe_peer(sm, peer_id, peers)
+		return
 	}
 
 	// Request more blocks.
@@ -776,13 +795,17 @@ _check_header_sync_complete :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer
 
 	if all_done {
 		log.info("Header sync complete. Building download queue...")
-		sm.state = .Downloading_Blocks
 		_build_download_queue(sm)
 
 		if len(sm.blocks_to_download) == 0 {
 			log.info("No blocks to download. Already in sync.")
 			sm.state = .In_Sync
+		} else if !sm.probe_complete && len(sm.peer_rr_list) > MAX_OUTBOUND_PEERS {
+			sm.state = .Probing_Peers
+			log.infof("%d blocks queued for download — starting peer probe", len(sm.blocks_to_download))
+			_start_probe(sm, peers)
 		} else {
+			sm.state = .Downloading_Blocks
 			log.infof("%d blocks queued for download", len(sm.blocks_to_download))
 			sync_request_blocks(sm, peers)
 		}
@@ -843,6 +866,247 @@ _request_announced_blocks :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, headers: 
 		log.infof("Requesting %d announced block(s) from peer %d", len(inv), peer_id)
 		peer_send_getdata(peer, inv[:])
 	}
+}
+
+// Refill a peer's in-flight blocks during probe so fast peers accumulate more deliveries.
+_refill_probe_peer :: proc(sm: ^Sync_Manager, pid: Peer_Id, peers: ^map[Peer_Id]^Peer) {
+	peer, found := peers[pid]
+	if !found || peer.state != .Active {
+		return
+	}
+	ps, ps_found := sm.peer_sync[pid]
+	if !ps_found {
+		return
+	}
+
+	available := PROBE_BLOCKS_PER_PEER - ps.blocks_in_flight
+	if available <= 0 {
+		return
+	}
+
+	now := time.to_unix_seconds(time.now())
+	inv := make([]wire.Inv_Vector, available, context.temp_allocator)
+	count := 0
+
+	for count < available && sm.download_cursor < len(sm.blocks_to_download) {
+		hash := sm.blocks_to_download[sm.download_cursor]
+		sm.download_cursor += 1
+		if hash in sm.blocks_in_flight {
+			continue
+		}
+		entry, known := sm.chain.block_index.entries[hash]
+		if known && .Has_Data in entry.status {
+			continue
+		}
+		sm.blocks_in_flight[hash] = pid
+		sm.block_request_time[hash] = now
+		inv[count] = wire.Inv_Vector{type = .Witness_Block, hash = hash}
+		count += 1
+	}
+
+	if count > 0 {
+		ps.blocks_in_flight += count
+		sm.peer_sync[pid] = ps
+		peer_send_getdata(peer, inv[:count])
+	}
+}
+
+// Give a single late-joining peer trial blocks during the probe phase.
+_give_probe_blocks :: proc(sm: ^Sync_Manager, pid: Peer_Id, peers: ^map[Peer_Id]^Peer) {
+	peer, found := peers[pid]
+	if !found || peer.state != .Active {
+		return
+	}
+
+	now := time.to_unix_seconds(time.now())
+	inv := make([]wire.Inv_Vector, PROBE_BLOCKS_PER_PEER, context.temp_allocator)
+	count := 0
+
+	for count < PROBE_BLOCKS_PER_PEER && sm.download_cursor < len(sm.blocks_to_download) {
+		hash := sm.blocks_to_download[sm.download_cursor]
+		sm.download_cursor += 1
+		if hash in sm.blocks_in_flight {
+			continue
+		}
+		entry, known := sm.chain.block_index.entries[hash]
+		if known && .Has_Data in entry.status {
+			continue
+		}
+		sm.blocks_in_flight[hash] = pid
+		sm.block_request_time[hash] = now
+		inv[count] = wire.Inv_Vector{type = .Witness_Block, hash = hash}
+		count += 1
+	}
+
+	if count > 0 {
+		ps := sm.peer_sync[pid]
+		ps.blocks_in_flight += count
+		sm.peer_sync[pid] = ps
+		peer_send_getdata(peer, inv[:count])
+		log.infof("Late probe: gave %d trial blocks to peer %d", count, pid)
+	}
+}
+
+// Start probe phase: reset peer counters and distribute trial blocks.
+_start_probe :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
+	now := time.to_unix_seconds(time.now())
+	sm.probe_start_time = now
+
+	// Reset all peers' delivery counters for a clean measurement.
+	for pid in sm.peer_rr_list {
+		ps, found := sm.peer_sync[pid]
+		if !found {
+			continue
+		}
+		ps.blocks_delivered = 0
+		ps.tracking_since = now
+		sm.peer_sync[pid] = ps
+	}
+
+	// Distribute PROBE_BLOCKS_PER_PEER blocks to each active peer.
+	num_peers := len(sm.peer_rr_list)
+	log.infof("Starting peer probe: %d peers, %d blocks each, %ds timeout",
+		num_peers, PROBE_BLOCKS_PER_PEER, PROBE_TIMEOUT_SECS)
+
+	for pid in sm.peer_rr_list {
+		peer, found := peers[pid]
+		if !found || peer.state != .Active {
+			continue
+		}
+
+		// Gather up to PROBE_BLOCKS_PER_PEER blocks from front of download queue.
+		inv := make([]wire.Inv_Vector, PROBE_BLOCKS_PER_PEER, context.temp_allocator)
+		count := 0
+
+		// Drain requeue list first.
+		for count < PROBE_BLOCKS_PER_PEER && len(sm.requeue_list) > 0 {
+			hash := pop(&sm.requeue_list)
+			if hash in sm.blocks_in_flight {
+				continue
+			}
+			entry, known := sm.chain.block_index.entries[hash]
+			if known && .Has_Data in entry.status {
+				continue
+			}
+			sm.blocks_in_flight[hash] = pid
+			sm.block_request_time[hash] = now
+			inv[count] = wire.Inv_Vector{type = .Witness_Block, hash = hash}
+			count += 1
+		}
+
+		// Then main download queue.
+		for count < PROBE_BLOCKS_PER_PEER && sm.download_cursor < len(sm.blocks_to_download) {
+			hash := sm.blocks_to_download[sm.download_cursor]
+			sm.download_cursor += 1
+			if hash in sm.blocks_in_flight {
+				continue
+			}
+			entry, known := sm.chain.block_index.entries[hash]
+			if known && .Has_Data in entry.status {
+				continue
+			}
+			sm.blocks_in_flight[hash] = pid
+			sm.block_request_time[hash] = now
+			inv[count] = wire.Inv_Vector{type = .Witness_Block, hash = hash}
+			count += 1
+		}
+
+		if count > 0 {
+			ps := sm.peer_sync[pid]
+			ps.blocks_in_flight += count
+			sm.peer_sync[pid] = ps
+			peer_send_getdata(peer, inv[:count])
+		}
+	}
+}
+
+// Check if probe phase is complete. Returns temp-allocated slice of peer IDs to disconnect.
+sync_check_probe_complete :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) -> []Peer_Id {
+	if sm.state != .Probing_Peers {
+		return nil
+	}
+
+	now := time.to_unix_seconds(time.now())
+	if now - sm.probe_start_time < PROBE_TIMEOUT_SECS {
+		return nil
+	}
+
+	// Build parallel arrays for sorting (can't declare structs in procs).
+	sorted_pids := make([dynamic]Peer_Id, 0, len(sm.peer_rr_list), context.temp_allocator)
+	sorted_rates := make([dynamic]f64, 0, len(sm.peer_rr_list), context.temp_allocator)
+
+	for pid in sm.peer_rr_list {
+		ps, found := sm.peer_sync[pid]
+		if !found {
+			continue
+		}
+		peer, pfound := peers[pid]
+		if !pfound || peer.state != .Active {
+			continue
+		}
+		elapsed := now - ps.tracking_since
+		rate: f64 = 0
+		if elapsed > 0 {
+			rate = f64(ps.blocks_delivered) / f64(elapsed)
+		}
+		append(&sorted_pids, pid)
+		append(&sorted_rates, rate)
+	}
+
+	// Insertion sort by rate descending.
+	for i in 1 ..< len(sorted_pids) {
+		j := i
+		for j > 0 && sorted_rates[j] > sorted_rates[j - 1] {
+			sorted_pids[j], sorted_pids[j - 1] = sorted_pids[j - 1], sorted_pids[j]
+			sorted_rates[j], sorted_rates[j - 1] = sorted_rates[j - 1], sorted_rates[j]
+			j -= 1
+		}
+	}
+
+	// Log rankings.
+	for i in 0 ..< len(sorted_pids) {
+		ps := sm.peer_sync[sorted_pids[i]]
+		log.infof("Probe rank %d: peer %d — %.2f blk/s (%d delivered)",
+			i + 1, sorted_pids[i], sorted_rates[i], ps.blocks_delivered)
+	}
+
+	// Peers beyond MAX_OUTBOUND_PEERS → disconnect list.
+	to_disconnect := make([dynamic]Peer_Id, 0, len(sorted_pids), context.temp_allocator)
+	for i in MAX_OUTBOUND_PEERS ..< len(sorted_pids) {
+		pid := sorted_pids[i]
+		// Requeue in-flight blocks before disconnect.
+		sync_handle_disconnect(sm, pid, peers)
+		append(&to_disconnect, pid)
+	}
+
+	if len(to_disconnect) > 0 {
+		log.infof("Probe: disconnecting %d slow peer(s)", len(to_disconnect))
+	}
+
+	// Finalize probe.
+	sm.probe_complete = true
+	sm.state = .Downloading_Blocks
+
+	// Reset surviving peers' tracking counters (probe data not representative of larger blocks).
+	now2 := time.to_unix_seconds(time.now())
+	for pid in sm.peer_rr_list {
+		ps, found := sm.peer_sync[pid]
+		if !found {
+			continue
+		}
+		ps.blocks_delivered = 0
+		ps.tracking_since = now2
+		sm.peer_sync[pid] = ps
+	}
+
+	remaining := len(sm.requeue_list) + len(sm.blocks_to_download) - sm.download_cursor
+	log.infof("Probe complete. %d peers retained, %d blocks remaining",
+		len(sm.peer_rr_list), remaining)
+
+	// Start real download with surviving peers.
+	sync_request_blocks(sm, peers)
+
+	return to_disconnect[:]
 }
 
 // Build the download queue: all block index entries that have Valid_Header but not Has_Data.

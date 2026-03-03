@@ -64,6 +64,9 @@ DEFAULT_PORT_REGTEST  :: 18444
 DEFAULT_PORT_SIGNET   :: 38333
 
 MAX_OUTBOUND_PEERS          :: 8
+MAX_PROBE_PEERS             :: 20   // Connect to more peers during startup probe
+PROBE_BLOCKS_PER_PEER       :: 8    // Trial blocks per peer during probe
+PROBE_TIMEOUT_SECS          :: 15   // Max seconds for probe phase
 MAX_HEADERS_PER_MSG         :: 2000
 MAX_BLOCKS_PER_PEER         :: 16   // Bitcoin Core: 16 per peer max
 MIN_BLOCKS_PER_PEER         :: 4

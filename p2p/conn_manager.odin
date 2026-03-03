@@ -47,7 +47,7 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 	case:                     cm.default_port = DEFAULT_PORT_MAINNET
 	}
 
-	cm.peers = make(map[Peer_Id]^Peer, MAX_OUTBOUND_PEERS * 2)
+	cm.peers = make(map[Peer_Id]^Peer, MAX_PROBE_PEERS * 2)
 
 	// Create buffered channel for peer messages.
 	ch, ch_err := chan.create(chan.Chan(Peer_Message), 4096, context.allocator)
@@ -86,7 +86,8 @@ conn_manager_destroy :: proc(cm: ^Conn_Manager) {
 
 // Connect to a peer, perform handshake, add to peer map.
 conn_manager_add_peer :: proc(cm: ^Conn_Manager, address: string, port: int) -> Net_Error {
-	if len(cm.peers) >= MAX_OUTBOUND_PEERS {
+	peer_limit := MAX_PROBE_PEERS if !cm.sync_mgr.probe_complete else MAX_OUTBOUND_PEERS
+	if len(cm.peers) >= peer_limit {
 		return .Too_Many_Peers
 	}
 
@@ -153,7 +154,7 @@ conn_manager_discover_peers :: proc(cm: ^Conn_Manager) -> [dynamic]string {
 			addr_str := fmt.tprintf("%d.%d.%d.%d", addr[0], addr[1], addr[2], addr[3])
 			append(&addresses, addr_str)
 
-			if len(addresses) >= MAX_OUTBOUND_PEERS * 2 {
+			if len(addresses) >= MAX_PROBE_PEERS * 2 {
 				break
 			}
 		}
@@ -185,7 +186,7 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 
 		connected := 0
 		for addr in addresses {
-			if connected >= MAX_OUTBOUND_PEERS {
+			if connected >= MAX_PROBE_PEERS {
 				break
 			}
 			err := conn_manager_add_peer(cm, addr, cm.default_port)
@@ -242,6 +243,14 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 		// Catches edge cases where late-joining peers block the transition.
 		if cm.sync_mgr.state == .Syncing_Headers {
 			_check_header_sync_complete(&cm.sync_mgr, &cm.peers)
+		}
+
+		// Check if peer probe is complete.
+		if cm.sync_mgr.state == .Probing_Peers {
+			to_disconnect := sync_check_probe_complete(&cm.sync_mgr, &cm.peers)
+			for pid in to_disconnect {
+				conn_manager_remove_peer(cm, pid)
+			}
 		}
 
 		// Check for stalled block/header requests.
@@ -391,6 +400,9 @@ _conn_manager_handle_verack :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 				ps.getheaders_sent_at = time.to_unix_seconds(time.now())
 				cm.sync_mgr.peer_sync[peer_id] = ps
 			}
+		case .Probing_Peers:
+			// Late-joining peer during probe — give it trial blocks too.
+			_give_probe_blocks(&cm.sync_mgr, peer_id, &cm.peers)
 		case .Downloading_Blocks:
 			// Fill new peer's available block slots.
 			sync_request_blocks(&cm.sync_mgr, &cm.peers)
@@ -584,7 +596,8 @@ conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid: Hash256) {
 
 // Try to connect a replacement peer when a slot opens.
 _conn_manager_replace_peer :: proc(cm: ^Conn_Manager) {
-	if len(cm.peers) >= MAX_OUTBOUND_PEERS {
+	peer_limit := MAX_PROBE_PEERS if !cm.sync_mgr.probe_complete else MAX_OUTBOUND_PEERS
+	if len(cm.peers) >= peer_limit {
 		return
 	}
 
