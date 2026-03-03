@@ -34,8 +34,8 @@ This is an educational/experimental project. It implements the core components o
 | 21 | Testnet4 Support (BIP94) | Complete |
 | 22 | Testnet3 Fixes (BIP16 activation, lax DER, difficulty) | Complete |
 | 23 | Mainnet Sync (BIP30, adaptive stall detection, peer management) | Complete |
-| 24 | Peer Probe at Startup | Complete |
-| 25 | Assumevalid + Txid Optimization | Complete |
+| 24 | Assumevalid + Txid Optimization | Complete |
+| 25 | nbio Async I/O Migration | Complete |
 
 ## Dependencies
 
@@ -398,20 +398,15 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Compact blocks (BIP152)** — Bandwidth-efficient block relay
 - **Ancestor/descendant limits** — No CPFP chain depth limits (Bitcoin Core uses 25/25)
 
-### Infrastructure
-
-- **`core:nbio` migration** — Replace thread-per-peer with async I/O event loop (waiting for Odin's nbio package to mature)
-
 ## Architecture Notes
 
-- **Thread model**: Main thread (setup + wait), RPC thread, P2P thread, one reader thread per peer, N script verification worker threads (`--par`)
+- **Thread model**: Main thread (setup + wait), RPC thread, P2P thread (`core:nbio` event loop — kqueue on macOS, epoll on Linux), N script verification worker threads (`--par`). No per-peer threads — all peer I/O is multiplexed on a single event loop with async connect/recv/send callbacks
 - **Graceful shutdown**: SIGINT/SIGTERM triggers mempool save, atomic UTXO + metadata flush to LevelDB, then clean exit
 - **Headers-first sync**: Single lead peer downloads headers via `getheaders`/`headers`, with automatic failover if the lead disconnects. Headers are batched into single WriteBatch transactions (up to 2000 per batch)
-- **Peer probe at startup**: Connects to up to 20 peers at startup and runs a 15-second probe phase after header sync. Each peer receives trial blocks with continuous refill — fast peers accumulate more deliveries. After the timeout, peers are ranked by throughput and the top 8 are kept; the rest are disconnected. Skipped when fewer than 9 peers connect (e.g. `--connect` mode)
 - **Multi-peer block download**: Fastest-first block assignment across all active peers (up to 8) — peers are sorted by throughput and the fastest peer gets tip-adjacent blocks so slow peers can't block chain progress. Bandwidth-based scoring: fast peers get more slots (up to 16), slow peers fewer (minimum 4), new peers get a trial allocation of 8 blocks
 - **Steady-state sync**: BIP130 `sendheaders` for header announcements, periodic `getheaders` polling (120s), and `inv`-triggered header requests keep the node up-to-date after IBD
 - **Adaptive stall detection**: Bitcoin Core-style stall handling — default 10s timeout, doubles on disconnect (max 64s), decays by 0.85x on successful block connects. Slow peers (throughput <10% of fastest) are evicted after a trial period. Disconnected peers are replaced via DNS discovery
-- **DNS peer discovery**: Resolves all A records from DNS seeds (typically 20+ addresses per seed, up to 40 collected for probe phase)
+- **DNS peer discovery**: Resolves all A records from DNS seeds (typically 20+ addresses per seed), connects up to 8 outbound peers
 - **Write-back UTXO cache**: In-memory cache with dirty/fresh flags, flushed atomically to LevelDB when memory usage exceeds the configurable budget (`--dbcache`, default 450 MiB). Rollback support for failed block validation
 - **Block index**: In-memory tree with skip list pointers for O(log n) ancestor lookup, persisted to LevelDB. `by_prev` index provides O(1) next-block lookup for chain traversal
 - **Sighash caching**: BIP143 (SegWit v0) and BIP341 (Taproot) intermediate hashes are cached per-transaction, avoiding O(n^2) re-computation for transactions with many inputs

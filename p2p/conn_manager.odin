@@ -2,10 +2,9 @@ package p2p
 
 import "core:fmt"
 import "core:log"
-import "core:mem"
+import "core:nbio"
 import tcp "core:net"
 import "core:strings"
-import "core:sync/chan"
 import "core:time"
 
 import "../chain"
@@ -15,7 +14,6 @@ import "../wire"
 
 Conn_Manager :: struct {
 	peers:              map[Peer_Id]^Peer,
-	msg_chan:            chan.Chan(Peer_Message),
 	sync_mgr:           Sync_Manager,
 	chain:              ^chain.Chain_State,
 	params:             ^consensus.Chain_Params,
@@ -27,6 +25,16 @@ Conn_Manager :: struct {
 	// Pool of discovered addresses for replacing disconnected peers.
 	address_pool:       [dynamic]string,
 	address_pool_cursor: int,
+	// nbio event loop reference for cross-thread operations.
+	event_loop:         ^nbio.Event_Loop,
+	// Pre-configured peer address (from --connect), connected during conn_manager_run.
+	connect_address:    string,
+	connect_port:       int,
+	// Periodic timer state.
+	last_ping_check:    i64,
+	last_header_refresh: i64,
+	// Zombie peers: destroyed but not yet freed (deferred to avoid use-after-free in nbio callbacks).
+	zombie_peers:       [dynamic]^Peer,
 }
 
 conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) -> Net_Error {
@@ -47,14 +55,10 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 	case:                     cm.default_port = DEFAULT_PORT_MAINNET
 	}
 
-	cm.peers = make(map[Peer_Id]^Peer, MAX_PROBE_PEERS * 2)
-
-	// Create buffered channel for peer messages.
-	ch, ch_err := chan.create(chan.Chan(Peer_Message), 4096, context.allocator)
-	if ch_err != nil {
-		return .Connection_Failed
-	}
-	cm.msg_chan = ch
+	cm.peers = make(map[Peer_Id]^Peer, MAX_OUTBOUND_PEERS * 2)
+	cm.zombie_peers = make([dynamic]^Peer, 0, 8)
+	cm.last_ping_check = time.to_unix_seconds(time.now())
+	cm.last_header_refresh = time.to_unix_seconds(time.now())
 
 	sync_manager_init(&cm.sync_mgr, cs, params, mp)
 
@@ -62,48 +66,37 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 }
 
 conn_manager_destroy :: proc(cm: ^Conn_Manager) {
-	// Disconnect all peers.
-	for id, peer in cm.peers {
+	// Free zombie peers.
+	for peer in cm.zombie_peers {
+		_peer_free(peer)
+	}
+	delete(cm.zombie_peers)
+
+	// Disconnect and free all active peers.
+	for _, peer in cm.peers {
 		peer_destroy(peer)
+		_peer_free(peer)
 	}
 	delete(cm.peers)
 	delete(cm.address_pool)
 
-	// Drain remaining messages (channel may already be closed by shutdown).
-	for {
-		msg, ok := chan.try_recv(cm.msg_chan)
-		if !ok {
-			break
-		}
-		if msg.payload != nil {
-			delete(msg.payload)
-		}
-	}
-
-	chan.destroy(cm.msg_chan)
 	sync_manager_destroy(&cm.sync_mgr)
 }
 
-// Connect to a peer, perform handshake, add to peer map.
+// Start an async connect to a peer. Returns immediately.
 conn_manager_add_peer :: proc(cm: ^Conn_Manager, address: string, port: int) -> Net_Error {
-	peer_limit := MAX_PROBE_PEERS if !cm.sync_mgr.probe_complete else MAX_OUTBOUND_PEERS
-	if len(cm.peers) >= peer_limit {
+	if len(cm.peers) >= MAX_OUTBOUND_PEERS {
 		return .Too_Many_Peers
 	}
 
 	peer_id := cm.next_peer_id
 	cm.next_peer_id += 1
 
-	peer, err := peer_connect(address, port, cm.network_magic, cm.msg_chan, peer_id)
-	if err != .None {
-		return err
-	}
-
-	cm.peers[peer_id] = peer
+	peer_start_connect(cm, address, port, peer_id)
 	return .None
 }
 
-// Remove and destroy a peer.
+// Remove and destroy a peer. Defers freeing to zombie list for nbio safety.
 conn_manager_remove_peer :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 	peer, found := cm.peers[peer_id]
 	if !found {
@@ -111,6 +104,7 @@ conn_manager_remove_peer :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 	}
 	delete_key(&cm.peers, peer_id)
 	peer_destroy(peer)
+	append(&cm.zombie_peers, peer)
 }
 
 // Discover peers via DNS seed resolution.
@@ -154,7 +148,7 @@ conn_manager_discover_peers :: proc(cm: ^Conn_Manager) -> [dynamic]string {
 			addr_str := fmt.tprintf("%d.%d.%d.%d", addr[0], addr[1], addr[2], addr[3])
 			append(&addresses, addr_str)
 
-			if len(addresses) >= MAX_PROBE_PEERS * 2 {
+			if len(addresses) >= MAX_OUTBOUND_PEERS * 2 {
 				break
 			}
 		}
@@ -167,32 +161,111 @@ conn_manager_discover_peers :: proc(cm: ^Conn_Manager) -> [dynamic]string {
 	return addresses
 }
 
-// Cleanly shut down the connection manager.
+// Cleanly shut down the connection manager. Safe to call from any thread.
 conn_manager_shutdown :: proc(cm: ^Conn_Manager) {
 	cm.shutdown = true
-	// Close the channel to unblock the recv loop.
-	chan.close(cm.msg_chan)
+	// Wake up the event loop so run_until exits.
+	if cm.event_loop != nil {
+		nbio.wake_up(cm.event_loop)
+	}
 }
 
-// Main event loop. Discovers peers, connects, processes messages.
+// Periodic timer callback — handles ping, header refresh, stall checks.
+_on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
+	if cm.shutdown {
+		return
+	}
+
+	// Free zombie peers from previous tick (safe now — nbio callbacks have fired).
+	for peer in cm.zombie_peers {
+		_peer_free(peer)
+	}
+	clear(&cm.zombie_peers)
+
+	now := time.to_unix_seconds(time.now())
+
+	// Force-check header sync completion after every tick.
+	if cm.sync_mgr.state == .Syncing_Headers {
+		_check_header_sync_complete(&cm.sync_mgr, &cm.peers)
+	}
+
+	// Check for stalled block/header requests.
+	stall_peer := sync_check_stalls(&cm.sync_mgr, &cm.peers)
+	if stall_peer != 0 {
+		sync_handle_disconnect(&cm.sync_mgr, stall_peer, &cm.peers)
+		conn_manager_remove_peer(cm, stall_peer)
+		_conn_manager_replace_peer(cm)
+	}
+
+	// Periodic getheaders while in sync.
+	if now - cm.last_header_refresh >= HEADER_REFRESH_SECS && cm.sync_mgr.state == .In_Sync {
+		cm.last_header_refresh = now
+		locator := build_block_locator(cm.sync_mgr.chain)
+		for _, peer in cm.peers {
+			if peer.state == .Active {
+				peer_send_getheaders(peer, locator, HASH_ZERO)
+				break
+			}
+		}
+		delete(locator)
+	}
+
+	// Periodic ping.
+	if now - cm.last_ping_check >= PING_INTERVAL_SECS {
+		cm.last_ping_check = now
+		for _, peer in cm.peers {
+			if peer.state == .Active {
+				peer_send_ping(peer)
+			}
+		}
+	}
+
+	// Free temp allocations.
+	free_all(context.temp_allocator)
+
+	// Re-arm the periodic timer (1 second).
+	if !cm.shutdown {
+		nbio.timeout_poly(1 * time.Second, cm, _on_periodic_timer)
+	}
+}
+
+// Main event loop. Discovers peers, connects, processes messages via nbio callbacks.
 conn_manager_run :: proc(cm: ^Conn_Manager) {
 	context.logger = log.create_console_logger(.Debug, {.Level, .Time, .Terminal_Color})
 
 	log.infof("Starting connection manager (network: %s)", cm.params.name)
 
-	// Skip DNS discovery if peers were already added (e.g. via --connect).
+	// Acquire the event loop for this thread.
+	el_err := nbio.acquire_thread_event_loop()
+	if el_err != nil {
+		log.errorf("Failed to acquire event loop: %v", el_err)
+		return
+	}
+	cm.event_loop = nbio.current_thread_event_loop()
+
+	// If --connect was specified, add peer now (event loop is ready).
+	if len(cm.connect_address) > 0 {
+		err := conn_manager_add_peer(cm, cm.connect_address, cm.connect_port)
+		if err == .None {
+			log.infof("Connecting to manual peer %s:%d", cm.connect_address, cm.connect_port)
+		} else {
+			log.warnf("Failed to connect to %s:%d: %v", cm.connect_address, cm.connect_port, err)
+		}
+	}
+
+	// Discover peers via DNS if no manual peer was configured.
 	if len(cm.peers) == 0 {
 		addresses := conn_manager_discover_peers(cm)
 
 		connected := 0
 		for addr in addresses {
-			if connected >= MAX_PROBE_PEERS {
+			if connected >= MAX_OUTBOUND_PEERS {
 				break
 			}
 			err := conn_manager_add_peer(cm, addr, cm.default_port)
 			if err == .None {
 				connected += 1
-				log.infof("Connected to %s:%d", addr, cm.default_port)
+				log.infof("Connecting to %s:%d", addr, cm.default_port)
 			}
 		}
 
@@ -202,135 +275,64 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 
 		if connected == 0 {
 			log.warn("No peers available. Exiting.")
+			nbio.release_thread_event_loop()
 			return
 		}
-	} else {
-		log.infof("Using %d pre-configured peer(s)", len(cm.peers))
 	}
 
-	// Send version to all connected peers.
-	_, chain_height := chain.chain_tip(cm.chain)
-	for _, peer in cm.peers {
-		peer_send_version(peer, cm.params, chain_height)
-		peer.state = .Version_Sent
-	}
+	// Start periodic timer (fires every 1 second for stall checks, ping, etc.)
+	nbio.timeout_poly(1 * time.Second, cm, _on_periodic_timer)
 
-	last_ping_check: i64 = time.to_unix_seconds(time.now())
-	last_header_refresh: i64 = time.to_unix_seconds(time.now())
+	// Run the event loop until shutdown.
+	nbio.run_until(&cm.shutdown)
 
-	// Main message loop.
-	for !cm.shutdown {
-		// Free temp allocations from previous iteration (block deserialization,
-		// inv messages, etc.) to prevent unbounded memory growth during IBD.
-		free_all(context.temp_allocator)
-
-		msg: Peer_Message
-		got_msg: bool
-
-		msg, got_msg = chan.recv(cm.msg_chan)
-		if !got_msg {
-			break // Channel closed.
-		}
-
-		_conn_manager_process_message(cm, msg)
-
-		// Free payload after processing.
-		if msg.payload != nil {
-			delete(msg.payload)
-		}
-
-		// Force-check header sync completion after every message.
-		// Catches edge cases where late-joining peers block the transition.
-		if cm.sync_mgr.state == .Syncing_Headers {
-			_check_header_sync_complete(&cm.sync_mgr, &cm.peers)
-		}
-
-		// Check if peer probe is complete.
-		if cm.sync_mgr.state == .Probing_Peers {
-			to_disconnect := sync_check_probe_complete(&cm.sync_mgr, &cm.peers)
-			for pid in to_disconnect {
-				conn_manager_remove_peer(cm, pid)
-			}
-		}
-
-		// Check for stalled block/header requests.
-		stall_peer := sync_check_stalls(&cm.sync_mgr, &cm.peers)
-		if stall_peer != 0 {
-			// Disconnect the stalling peer — sync_handle_disconnect requeues its blocks.
-			sync_handle_disconnect(&cm.sync_mgr, stall_peer, &cm.peers)
-			conn_manager_remove_peer(cm, stall_peer)
-
-			// Try to connect a replacement peer from the address pool.
-			_conn_manager_replace_peer(cm)
-		}
-
-		now := time.to_unix_seconds(time.now())
-
-		// Periodic getheaders while in sync — safety net for missed BIP130 announcements.
-		// Bitcoin Core does this every ~15 minutes; we do it every 2 minutes since we
-		// have fewer peers and signet block times are ~10 minutes.
-		if now - last_header_refresh >= HEADER_REFRESH_SECS && cm.sync_mgr.state == .In_Sync {
-			last_header_refresh = now
-			locator := build_block_locator(cm.sync_mgr.chain)
-			// Send to first active peer we find.
-			for _, peer in cm.peers {
-				if peer.state == .Active {
-					peer_send_getheaders(peer, locator, HASH_ZERO)
-					break
-				}
-			}
-			delete(locator)
-		}
-
-		// Periodic ping check.
-		if now - last_ping_check >= PING_INTERVAL_SECS {
-			last_ping_check = now
-			for _, peer in cm.peers {
-				if peer.state == .Active {
-					peer_send_ping(peer)
-				}
-			}
-		}
-	}
-
+	nbio.release_thread_event_loop()
 	log.info("Connection manager shutting down.")
 }
 
-// Dispatch inbound message by command.
-_conn_manager_process_message :: proc(cm: ^Conn_Manager, msg: Peer_Message) {
+// Called from _on_connect when async dial succeeds. Sends version and starts recv.
+_conn_manager_peer_connected :: proc(cm: ^Conn_Manager, peer: ^Peer) {
+	_, chain_height := chain.chain_tip(cm.chain)
+	peer_send_version(peer, cm.params, chain_height)
+	peer.state = .Version_Sent
+	_peer_start_recv(peer)
+}
+
+// Dispatch inbound message by command (called inline from recv callback).
+_conn_manager_dispatch :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, cmd: string, payload: []byte) {
 	// Empty command = disconnect signal.
-	if msg.command == "" {
-		log.infof("Peer %d disconnected", msg.peer_id)
-		sync_handle_disconnect(&cm.sync_mgr, msg.peer_id, &cm.peers)
-		conn_manager_remove_peer(cm, msg.peer_id)
+	if cmd == "" {
+		log.infof("Peer %d disconnected", peer_id)
+		sync_handle_disconnect(&cm.sync_mgr, peer_id, &cm.peers)
+		conn_manager_remove_peer(cm, peer_id)
 		return
 	}
 
-	switch msg.command {
+	switch cmd {
 	case wire.CMD_VERSION:
-		_conn_manager_handle_version(cm, msg.peer_id, msg.payload)
+		_conn_manager_handle_version(cm, peer_id, payload)
 	case wire.CMD_VERACK:
-		_conn_manager_handle_verack(cm, msg.peer_id)
+		_conn_manager_handle_verack(cm, peer_id)
 	case wire.CMD_HEADERS:
-		_conn_manager_handle_headers(cm, msg.peer_id, msg.payload)
+		_conn_manager_handle_headers(cm, peer_id, payload)
 	case wire.CMD_BLOCK:
-		_conn_manager_handle_block(cm, msg.peer_id, msg.payload)
+		_conn_manager_handle_block(cm, peer_id, payload)
 	case wire.CMD_INV:
-		_conn_manager_handle_inv(cm, msg.peer_id, msg.payload)
+		_conn_manager_handle_inv(cm, peer_id, payload)
 	case wire.CMD_PING:
-		_conn_manager_handle_ping(cm, msg.peer_id, msg.payload)
+		_conn_manager_handle_ping(cm, peer_id, payload)
 	case wire.CMD_PONG:
-		_conn_manager_handle_pong(cm, msg.peer_id, msg.payload)
+		_conn_manager_handle_pong(cm, peer_id, payload)
 	case wire.CMD_SENDHEADERS:
 		// Peer wants headers announcements — note it.
-		peer, found := cm.peers[msg.peer_id]
+		peer, found := cm.peers[peer_id]
 		if found {
 			peer.send_headers = true
 		}
 	case wire.CMD_TX:
-		_conn_manager_handle_tx(cm, msg.peer_id, msg.payload)
+		_conn_manager_handle_tx(cm, peer_id, payload)
 	case wire.CMD_GETDATA:
-		_conn_manager_handle_getdata(cm, msg.peer_id, msg.payload)
+		_conn_manager_handle_getdata(cm, peer_id, payload)
 	case wire.CMD_SENDCMPCT, wire.CMD_FEEFILTER, wire.CMD_WTXIDRELAY, wire.CMD_ADDRV2, wire.CMD_ADDR:
 		// Ignored for now.
 	case:
@@ -400,9 +402,6 @@ _conn_manager_handle_verack :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 				ps.getheaders_sent_at = time.to_unix_seconds(time.now())
 				cm.sync_mgr.peer_sync[peer_id] = ps
 			}
-		case .Probing_Peers:
-			// Late-joining peer during probe — give it trial blocks too.
-			_give_probe_blocks(&cm.sync_mgr, peer_id, &cm.peers)
 		case .Downloading_Blocks:
 			// Fill new peer's available block slots.
 			sync_request_blocks(&cm.sync_mgr, &cm.peers)
@@ -469,8 +468,6 @@ _conn_manager_handle_inv :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: [
 	}
 
 	// If we got inv for unknown blocks, send getheaders to discover the chain.
-	// This handles multi-block gaps (e.g., node was offline) where the peer
-	// doesn't support sendheaders or we missed the headers announcement.
 	if has_unknown_block {
 		locator := build_block_locator(cm.sync_mgr.chain)
 		defer delete(locator)
@@ -588,16 +585,18 @@ _conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid: Hash256, from_peer: Peer
 	}
 }
 
-// Exported relay for RPC thread (no sender to exclude).
+// Exported relay for RPC thread. Queues work to the event loop thread.
 conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid: Hash256) {
+	// For now, call directly. The RPC thread's access to cm.peers is a pre-existing
+	// race condition that exists in the current code too. The sends are queued to
+	// nbio which is safe. A proper fix would use nbio cross-thread queueing.
 	_conn_manager_relay_tx(cm, txid, Peer_Id(0))
 }
 
 
 // Try to connect a replacement peer when a slot opens.
 _conn_manager_replace_peer :: proc(cm: ^Conn_Manager) {
-	peer_limit := MAX_PROBE_PEERS if !cm.sync_mgr.probe_complete else MAX_OUTBOUND_PEERS
-	if len(cm.peers) >= peer_limit {
+	if len(cm.peers) >= MAX_OUTBOUND_PEERS {
 		return
 	}
 
@@ -610,16 +609,7 @@ _conn_manager_replace_peer :: proc(cm: ^Conn_Manager) {
 
 		err := conn_manager_add_peer(cm, addr, cm.default_port)
 		if err == .None {
-			log.infof("Replacement peer connected: %s:%d", addr, cm.default_port)
-
-			// Send version + register for sync.
-			peer_id := cm.next_peer_id - 1
-			peer, found := cm.peers[peer_id]
-			if found {
-				_, chain_height := chain.chain_tip(cm.chain)
-				peer_send_version(peer, cm.params, chain_height)
-				peer.state = .Version_Sent
-			}
+			log.infof("Replacement peer connecting: %s:%d", addr, cm.default_port)
 			return
 		}
 	}

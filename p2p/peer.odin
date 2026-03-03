@@ -1,12 +1,9 @@
 package p2p
 
-import "core:fmt"
-import "core:mem"
+import "core:log"
+import "core:nbio"
 import tcp "core:net"
 import "core:strings"
-import "core:sync"
-import "core:sync/chan"
-import "core:thread"
 import "core:time"
 
 import "../consensus"
@@ -25,9 +22,6 @@ Peer :: struct {
 	last_ping:      i64, // unix timestamp
 	last_pong:      i64,
 	ping_nonce:     u64,
-	reader_thread:  ^thread.Thread,
-	msg_chan:        chan.Chan(Peer_Message),
-	send_mutex:     sync.Mutex,
 	network_magic:  u32,
 	recv_buf:       [dynamic]byte,
 	connected_at:   i64,   // unix timestamp when connection established
@@ -35,51 +29,265 @@ Peer :: struct {
 	last_recv:      i64,   // unix timestamp of last message received
 	bytes_sent:     i64,   // total bytes sent
 	bytes_recv:     i64,   // total bytes received
+	// nbio fields
+	read_buf:       [65536]byte,  // fixed buffer for async recv
+	send_queue:     [dynamic][]byte, // queued outbound messages (owned bytes)
+	sending:        bool,  // whether an async send is in-flight
+	sending_msg:    []byte, // the message currently being sent (for freeing in callback)
+	cm:             ^Conn_Manager, // back-reference for callbacks
 }
 
-// Connect to a peer, allocate Peer struct, start reader thread.
-peer_connect :: proc(
-	address: string,
-	port: int,
-	network_magic: u32,
-	msg_chan: chan.Chan(Peer_Message),
-	peer_id: Peer_Id,
-) -> (peer: ^Peer, err: Net_Error) {
-	socket, net_err := tcp.dial_tcp(address, port)
-	if net_err != nil {
-		return nil, .Connection_Failed
+// Start an async connect to a peer. Allocates Peer, adds to cm.peers, kicks off nbio.dial_poly.
+peer_start_connect :: proc(cm: ^Conn_Manager, address: string, port: int, peer_id: Peer_Id) {
+	// Resolve address to endpoint (DNS is blocking — happens once at startup, acceptable).
+	ip4, ip4_ok := tcp.parse_ip4_address(address)
+	if !ip4_ok {
+		log.debugf("Failed to parse address: %s", address)
+		return
 	}
+	endpoint := tcp.Endpoint{address = ip4, port = port}
 
-	peer = new(Peer)
+	peer := new(Peer)
 	peer.id = peer_id
-	peer.socket = socket
 	peer.address = strings.clone(address)
 	peer.state = .Connecting
-	peer.network_magic = network_magic
-	peer.msg_chan = msg_chan
+	peer.network_magic = cm.network_magic
+	peer.cm = cm
 	peer.recv_buf = make([dynamic]byte, 0, 8192)
+	peer.send_queue = make([dynamic][]byte, 0, 16)
 	peer.connected_at = time.to_unix_seconds(time.now())
 
-	// Start reader thread, passing peer pointer via data field.
-	peer.reader_thread = thread.create_and_start_with_data(
-		rawptr(peer),
-		_peer_reader_proc,
-	)
+	// Add peer to map immediately so we can track it.
+	cm.peers[peer_id] = peer
 
-	return peer, .None
+	// Kick off async dial.
+	nbio.dial_poly(endpoint, peer, _on_connect, timeout = 5 * time.Second)
 }
 
-// Close socket, join thread, free memory.
+// Callback when async dial completes.
+_on_connect :: proc(op: ^nbio.Operation, peer: ^Peer) {
+	if op.dial.err != nil {
+		log.debugf("Connection to %s failed: %v", peer.address, op.dial.err)
+		// Remove from peers map and clean up.
+		delete_key(&peer.cm.peers, peer.id)
+		_peer_free(peer)
+		return
+	}
+
+	peer.socket = op.dial.socket
+	peer.state = .Connecting
+	peer.connected_at = time.to_unix_seconds(time.now())
+
+	// Associate the socket with the event loop.
+	assoc_err := nbio.associate_socket(peer.socket)
+	if assoc_err != .None {
+		log.debugf("Failed to associate socket for peer %d: %v", peer.id, assoc_err)
+		delete_key(&peer.cm.peers, peer.id)
+		tcp.close(peer.socket)
+		_peer_free(peer)
+		return
+	}
+
+	log.infof("Connected to %s (peer %d)", peer.address, peer.id)
+
+	// Send version message and start recv — delegated to conn_manager.
+	_conn_manager_peer_connected(peer.cm, peer)
+}
+
+// Post one async recv on the peer's read_buf.
+_peer_start_recv :: proc(peer: ^Peer) {
+	if peer.state == .Disconnected {
+		return
+	}
+	bufs := [1][]byte{peer.read_buf[:]}
+	nbio.recv_poly(peer.socket, bufs[:], peer, _on_recv, timeout = 120 * time.Second)
+}
+
+// Callback when async recv completes.
+_on_recv :: proc(op: ^nbio.Operation, peer: ^Peer) {
+	if peer.state == .Disconnected {
+		return
+	}
+
+	// Check for error/EOF.
+	if op.recv.err != nil || op.recv.received == 0 {
+		_peer_handle_disconnect(peer)
+		return
+	}
+
+	peer.bytes_recv += i64(op.recv.received)
+	peer.last_recv = time.to_unix_seconds(time.now())
+
+	// Accumulate into recv_buf.
+	append(&peer.recv_buf, ..peer.read_buf[:op.recv.received])
+
+	// Parse and dispatch complete messages.
+	_peer_process_messages(peer)
+
+	// Re-arm recv.
+	_peer_start_recv(peer)
+}
+
+// Parse complete messages from recv_buf and dispatch inline.
+_peer_process_messages :: proc(peer: ^Peer) {
+	cm := peer.cm
+
+	for {
+		if len(peer.recv_buf) < wire.MESSAGE_HEADER_SIZE {
+			break
+		}
+
+		// Peek at header to get payload size.
+		r := wire.reader_init(peer.recv_buf[:])
+		hdr, hdr_err := wire.deserialize_message_header(&r)
+		if hdr_err != .None {
+			_peer_handle_disconnect(peer)
+			return
+		}
+
+		// Validate magic.
+		if hdr.magic != peer.network_magic {
+			_peer_handle_disconnect(peer)
+			return
+		}
+
+		// Check payload size limit.
+		if hdr.payload_size > wire.MAX_MESSAGE_PAYLOAD {
+			_peer_handle_disconnect(peer)
+			return
+		}
+
+		total_size := wire.MESSAGE_HEADER_SIZE + int(hdr.payload_size)
+		if len(peer.recv_buf) < total_size {
+			break // Need more data.
+		}
+
+		// Extract payload and validate checksum.
+		payload_start := wire.MESSAGE_HEADER_SIZE
+		payload_data := peer.recv_buf[payload_start:total_size]
+
+		if !wire.validate_checksum(&hdr, payload_data) {
+			_peer_handle_disconnect(peer)
+			return
+		}
+
+		cmd := wire.command_from_bytes(hdr.command)
+
+		// Dispatch inline — payload is a slice into recv_buf, valid for duration of dispatch.
+		_conn_manager_dispatch(cm, peer.id, cmd, payload_data)
+
+		// Free temp allocations from this message (block deserialization, etc.)
+		free_all(context.temp_allocator)
+
+		// Consume processed bytes from recv_buf.
+		remaining := len(peer.recv_buf) - total_size
+		if remaining > 0 {
+			copy(peer.recv_buf[:remaining], peer.recv_buf[total_size:])
+		}
+		resize(&peer.recv_buf, remaining)
+
+		// If peer was disconnected during dispatch, stop processing.
+		if peer.state == .Disconnected {
+			return
+		}
+	}
+}
+
+// Handle peer disconnect — notify conn_manager inline.
+_peer_handle_disconnect :: proc(peer: ^Peer) {
+	if peer.state == .Disconnected {
+		return
+	}
+	log.infof("Peer %d disconnected", peer.id)
+	cm := peer.cm
+	sync_handle_disconnect(&cm.sync_mgr, peer.id, &cm.peers)
+	conn_manager_remove_peer(cm, peer.id)
+}
+
+// Send a framed message to the peer. Queues for async send.
+peer_send_message :: proc(peer: ^Peer, command: string, payload: []byte) -> Net_Error {
+	if peer.state == .Disconnected {
+		return .Send_Failed
+	}
+
+	msg := wire.build_message(peer.network_magic, command, payload)
+	// msg is owned []byte — append to send queue.
+	append(&peer.send_queue, msg)
+
+	// If not currently sending, start flushing.
+	if !peer.sending {
+		_peer_flush_send_queue(peer)
+	}
+	return .None
+}
+
+// Start sending the next message in the queue.
+_peer_flush_send_queue :: proc(peer: ^Peer) {
+	if len(peer.send_queue) == 0 {
+		peer.sending = false
+		return
+	}
+
+	// Pop front message.
+	msg := peer.send_queue[0]
+	ordered_remove(&peer.send_queue, 0)
+
+	peer.sending = true
+	peer.sending_msg = msg
+	bufs := [1][]byte{msg}
+	nbio.send_poly(peer.socket, bufs[:], peer, _on_send, all = true, timeout = 30 * time.Second)
+}
+
+// Callback when async send completes.
+_on_send :: proc(op: ^nbio.Operation, peer: ^Peer) {
+	// If peer was destroyed, sending_msg was already freed — bail out.
+	if peer.state == .Disconnected {
+		return
+	}
+
+	// Free the sent message buffer.
+	if peer.sending_msg != nil {
+		delete(peer.sending_msg)
+		peer.sending_msg = nil
+	}
+
+	if op.send.err != nil {
+		_peer_handle_disconnect(peer)
+		return
+	}
+
+	peer.bytes_sent += i64(op.send.sent)
+	peer.last_send = time.to_unix_seconds(time.now())
+
+	// Send next queued message.
+	_peer_flush_send_queue(peer)
+}
+
+// Mark peer as disconnected and close socket. Frees send resources but does NOT
+// free the peer struct — caller must add to zombie list (or call _peer_free for shutdown).
+// This prevents use-after-free when nbio callbacks still hold a ^Peer pointer.
 peer_destroy :: proc(peer: ^Peer) {
 	if peer == nil {
 		return
 	}
 	peer.state = .Disconnected
 	tcp.close(peer.socket)
-	if peer.reader_thread != nil {
-		thread.join(peer.reader_thread)
-		thread.destroy(peer.reader_thread)
+
+	// Free any unsent messages in the queue.
+	for msg in peer.send_queue {
+		delete(msg)
 	}
+	delete(peer.send_queue)
+
+	// Free the in-flight send message (callback won't fire after socket close).
+	if peer.sending_msg != nil {
+		delete(peer.sending_msg)
+		peer.sending_msg = nil
+	}
+}
+
+// Free peer memory (without closing socket — used by both destroy and failed connect).
+_peer_free :: proc(peer: ^Peer) {
 	delete(peer.recv_buf)
 	if len(peer.address) > 0 {
 		delete(peer.address)
@@ -88,22 +296,6 @@ peer_destroy :: proc(peer: ^Peer) {
 		delete(peer.user_agent)
 	}
 	free(peer)
-}
-
-// Send a framed message to the peer. Acquires send_mutex.
-peer_send_message :: proc(peer: ^Peer, command: string, payload: []byte) -> Net_Error {
-	msg := wire.build_message(peer.network_magic, command, payload)
-	defer delete(msg)
-
-	if sync.mutex_guard(&peer.send_mutex) {
-		_, send_err := tcp.send_tcp(peer.socket, msg)
-		if send_err != nil {
-			return .Send_Failed
-		}
-		peer.bytes_sent += i64(len(msg))
-		peer.last_send = time.to_unix_seconds(time.now())
-	}
-	return .None
 }
 
 // Build and send a version message.
@@ -188,109 +380,4 @@ peer_send_getdata :: proc(peer: ^Peer, inventory: []wire.Inv_Vector) -> Net_Erro
 // Send sendheaders (BIP130, empty payload).
 peer_send_sendheaders :: proc(peer: ^Peer) -> Net_Error {
 	return peer_send_message(peer, wire.CMD_SENDHEADERS, nil)
-}
-
-// Reader thread procedure. Reads messages from the socket and sends them to the shared channel.
-_peer_reader_proc :: proc(data: rawptr) {
-	peer := (^Peer)(data)
-	read_buf: [4096]byte
-
-	for {
-		// Read from socket.
-		bytes_read, recv_err := tcp.recv_tcp(peer.socket, read_buf[:])
-
-		if recv_err != nil || bytes_read == 0 {
-			// Connection closed or error — send disconnect signal.
-			chan.send(peer.msg_chan, Peer_Message{
-				peer_id = peer.id,
-				command = "",
-				payload = nil,
-			})
-			return
-		}
-
-		peer.bytes_recv += i64(bytes_read)
-		peer.last_recv = time.to_unix_seconds(time.now())
-
-		// Accumulate into recv_buf.
-		append(&peer.recv_buf, ..read_buf[:bytes_read])
-
-		// Try to parse complete messages from the buffer.
-		for {
-			if len(peer.recv_buf) < wire.MESSAGE_HEADER_SIZE {
-				break
-			}
-
-			// Peek at header to get payload size.
-			r := wire.reader_init(peer.recv_buf[:])
-			hdr, hdr_err := wire.deserialize_message_header(&r)
-			if hdr_err != .None {
-				// Bad header — disconnect.
-				chan.send(peer.msg_chan, Peer_Message{
-					peer_id = peer.id,
-					command = "",
-					payload = nil,
-				})
-				return
-			}
-
-			// Validate magic.
-			if hdr.magic != peer.network_magic {
-				chan.send(peer.msg_chan, Peer_Message{
-					peer_id = peer.id,
-					command = "",
-					payload = nil,
-				})
-				return
-			}
-
-			// Check payload size limit.
-			if hdr.payload_size > wire.MAX_MESSAGE_PAYLOAD {
-				chan.send(peer.msg_chan, Peer_Message{
-					peer_id = peer.id,
-					command = "",
-					payload = nil,
-				})
-				return
-			}
-
-			total_size := wire.MESSAGE_HEADER_SIZE + int(hdr.payload_size)
-			if len(peer.recv_buf) < total_size {
-				break // Need more data.
-			}
-
-			// Extract payload and validate checksum.
-			payload_start := wire.MESSAGE_HEADER_SIZE
-			payload_data := peer.recv_buf[payload_start:total_size]
-
-			if !wire.validate_checksum(&hdr, payload_data) {
-				chan.send(peer.msg_chan, Peer_Message{
-					peer_id = peer.id,
-					command = "",
-					payload = nil,
-				})
-				return
-			}
-
-			// Clone payload so the channel message owns it.
-			cloned_payload := make([]byte, len(payload_data))
-			copy(cloned_payload, payload_data)
-
-			cmd := wire.command_from_bytes(hdr.command)
-
-			// Send parsed message to main thread.
-			chan.send(peer.msg_chan, Peer_Message{
-				peer_id = peer.id,
-				command = cmd,
-				payload = cloned_payload,
-			})
-
-			// Consume processed bytes from recv_buf.
-			remaining := len(peer.recv_buf) - total_size
-			if remaining > 0 {
-				copy(peer.recv_buf[:remaining], peer.recv_buf[total_size:])
-			}
-			resize(&peer.recv_buf, remaining)
-		}
-	}
 }

@@ -438,18 +438,14 @@ main :: proc() {
 			log.errorf("Failed to initialize connection manager: %v", cm_err)
 			// Continue without P2P — RPC still works.
 		} else {
-			// If --connect was specified, add the peer before starting the run loop.
+			// If --connect was specified, store address for event loop to connect.
 			if len(cfg.connect) > 0 {
 				addr, port, connect_ok := _parse_connect(cfg.connect)
 				if !connect_ok {
 					log.error("Invalid --connect format, expected ip:port")
 				} else {
-					peer_err := p2p.conn_manager_add_peer(cm, addr, port)
-					if peer_err != .None {
-						log.warnf("Failed to connect to %s:%d: %v", addr, port, peer_err)
-					} else {
-						log.infof("Connected to manual peer %s:%d", addr, port)
-					}
+					cm.connect_address = addr
+					cm.connect_port = port
 				}
 			}
 

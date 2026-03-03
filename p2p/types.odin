@@ -28,13 +28,6 @@ Peer_State :: enum {
 
 Peer_Id :: distinct u64
 
-// Inbound message from a peer reader thread.
-Peer_Message :: struct {
-	peer_id: Peer_Id,
-	command: string, // CMD_VERSION, CMD_HEADERS, etc. Empty = disconnect signal.
-	payload: []byte, // raw payload (owned, must be freed by receiver)
-}
-
 // DNS seed hostnames per network.
 MAINNET_SEEDS :: [4]string {
 	"seed.bitcoin.sipa.be",
@@ -64,9 +57,6 @@ DEFAULT_PORT_REGTEST  :: 18444
 DEFAULT_PORT_SIGNET   :: 38333
 
 MAX_OUTBOUND_PEERS          :: 8
-MAX_PROBE_PEERS             :: 20   // Connect to more peers during startup probe
-PROBE_BLOCKS_PER_PEER       :: 8    // Trial blocks per peer during probe
-PROBE_TIMEOUT_SECS          :: 15   // Max seconds for probe phase
 MAX_HEADERS_PER_MSG         :: 2000
 MAX_BLOCKS_PER_PEER         :: 16   // Bitcoin Core: 16 per peer max
 MIN_BLOCKS_PER_PEER         :: 4
