@@ -813,7 +813,7 @@ test_getnetworkinfo :: proc(t: ^testing.T) {
 
 	subver, sv_ok := obj["subversion"].(json.String)
 	testing.expect(t, sv_ok, "subversion should be string")
-	testing.expect(t, subver == "/btcnode-odin:0.1.0/", "subversion should match")
+	testing.expect(t, subver == wire.NODE_USER_AGENT, "subversion should match")
 
 	pv, pv_ok := obj["protocolversion"].(json.Integer)
 	testing.expect(t, pv_ok, "protocolversion should be integer")

@@ -1148,7 +1148,7 @@ _services_to_names :: proc(services: u64) -> json.Array {
 _handle_getnetworkinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 	obj := make(json.Object, 8, context.temp_allocator)
 	obj["version"] = json.Value(json.Integer(1))
-	obj["subversion"] = json.Value(json.String("/btcnode-odin:0.1.0/"))
+	obj["subversion"] = json.Value(json.String(wire.NODE_USER_AGENT))
 	obj["protocolversion"] = json.Value(json.Integer(i64(wire.PROTOCOL_VERSION)))
 	obj["localservices"] = json.Value(json.Integer(i64(p2p.LOCAL_SERVICES)))
 

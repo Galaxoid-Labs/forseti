@@ -399,7 +399,7 @@ test_version_message_roundtrip :: proc(t: ^testing.T) {
 		services     = 1,
 		timestamp    = 1234567890,
 		nonce        = 0xDEADBEEFCAFEBABE,
-		user_agent   = "/btcnode-odin:0.1.0/",
+		user_agent   = NODE_USER_AGENT,
 		start_height = 100000,
 		relay        = true,
 	}

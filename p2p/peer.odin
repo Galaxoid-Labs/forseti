@@ -314,7 +314,7 @@ peer_send_version :: proc(peer: ^Peer, params: ^consensus.Chain_Params, chain_he
 		addr_recv    = wire.Net_Address{services = 0},
 		addr_from    = wire.Net_Address{services = LOCAL_SERVICES},
 		nonce        = u64(timestamp) ~ u64(peer.id), // simple nonce
-		user_agent   = "/btcnode-odin:0.1.0/",
+		user_agent   = wire.NODE_USER_AGENT,
 		start_height = i32(chain_height),
 		relay        = true,
 	}

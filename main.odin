@@ -15,6 +15,7 @@ import "crypto"
 import "mempool"
 import "p2p"
 import "rpc"
+import "wire"
 
 DEFAULT_DATA_DIR :: "/tmp/btcnode-data"
 
@@ -702,7 +703,7 @@ main :: proc() {
 	crypto.init_secp256k1()
 	defer crypto.destroy_secp256k1()
 
-	log.info("bitcoin-node-odin starting...")
+	log.infof("bitcoin-node-odin v%s starting...", wire.NODE_VERSION)
 
 	// Select network params.
 	params, default_rpc_port, params_ok := _select_params(cfg.network)
