@@ -368,23 +368,17 @@ _handle_sendrawtransaction :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_
 _handle_getmempoolinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 	count := mempool.mempool_count(srv.mp)
 
-	// Sum vsizes
-	total_vsize := 0
-	for _, entry in srv.mp.entries {
-		total_vsize += entry.vsize
-	}
-
-	obj := make(json.Object, 8, context.temp_allocator)
+	obj := make(json.Object, 12, context.temp_allocator)
 	obj["loaded"] = json.Value(json.Boolean(true))
 	obj["size"] = json.Value(json.Integer(count))
-	obj["bytes"] = json.Value(json.Integer(total_vsize))
-	obj["usage"] = json.Value(json.Integer(total_vsize)) // approximate
-	obj["maxmempool"] = json.Value(json.Integer(mempool.MAX_MEMPOOL_SIZE * 1_000_000))
-	obj["mempoolminfee"] = json.Value(json.Float(_satoshi_to_btc(mempool.MIN_RELAY_TX_FEE)))
-	obj["minrelaytxfee"] = json.Value(json.Float(_satoshi_to_btc(mempool.MIN_RELAY_TX_FEE)))
-	obj["incrementalrelayfee"] = json.Value(json.Float(_satoshi_to_btc(mempool.MIN_RELAY_TX_FEE)))
+	obj["bytes"] = json.Value(json.Integer(srv.mp.usage))
+	obj["usage"] = json.Value(json.Integer(srv.mp.usage))
+	obj["maxmempool"] = json.Value(json.Integer(srv.mp.config.max_mempool_mb * 1_000_000))
+	obj["mempoolminfee"] = json.Value(json.Float(_satoshi_to_btc(srv.mp.min_fee)))
+	obj["minrelaytxfee"] = json.Value(json.Float(_satoshi_to_btc(srv.mp.config.min_relay_tx_fee)))
+	obj["incrementalrelayfee"] = json.Value(json.Float(_satoshi_to_btc(srv.mp.config.incremental_relay_fee)))
 	obj["unbroadcastcount"] = json.Value(json.Integer(0))
-	obj["fullrbf"] = json.Value(json.Boolean(srv.mp.fullrbf))
+	obj["fullrbf"] = json.Value(json.Boolean(srv.mp.config.fullrbf))
 
 	return _make_result(json.Value(obj), srv._current_id)
 }
@@ -845,7 +839,7 @@ _format_mempool_entry :: proc(srv: ^RPC_Server, entry: ^mempool.Mempool_Entry) -
 	}
 	obj["depends"] = json.Value(depends)
 
-	replaceable := srv.mp.fullrbf || mempool.tx_signals_rbf(&entry.tx)
+	replaceable := srv.mp.config.fullrbf || mempool.tx_signals_rbf(&entry.tx)
 	obj["bip125-replaceable"] = json.Value(json.Boolean(replaceable))
 
 	return obj
@@ -1047,27 +1041,7 @@ _handle_getblockheader :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Resp
 
 // Compute median time of past 11 blocks.
 _get_median_time :: proc(srv: ^RPC_Server, entry: ^chain.Block_Index_Entry) -> u32 {
-	timestamps: [11]u32
-	count := 0
-	current := entry
-	for count < 11 && current != nil {
-		timestamps[count] = current.timestamp
-		count += 1
-		current = current.prev
-	}
-
-	// Sort the timestamps (simple insertion sort for <= 11 elements)
-	for i in 1 ..< count {
-		key := timestamps[i]
-		j := i - 1
-		for j >= 0 && timestamps[j] > key {
-			timestamps[j + 1] = timestamps[j]
-			j -= 1
-		}
-		timestamps[j + 1] = key
-	}
-
-	return timestamps[count / 2]
+	return chain.get_median_time_past(entry)
 }
 
 // --- getdifficulty ---

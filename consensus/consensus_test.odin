@@ -590,6 +590,47 @@ test_u256_compare :: proc(t: ^testing.T) {
 	testing.expect_value(t, u256_compare(a, b), 1)
 }
 
+// --- is_tx_final tests ---
+
+@(test)
+test_is_tx_final :: proc(t: ^testing.T) {
+	// Helper: make a simple tx with given locktime and sequence values
+	make_tx :: proc(locktime: u32, sequences: []u32) -> wire.Tx {
+		inputs := make([]wire.Tx_In, len(sequences), context.temp_allocator)
+		for i in 0 ..< len(sequences) {
+			inputs[i] = wire.Tx_In{
+				previous_output = wire.Outpoint{index = u32(i)},
+				sequence        = sequences[i],
+			}
+		}
+		outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
+		outputs[0] = wire.Tx_Out{value = 1000}
+		return wire.Tx{version = 1, inputs = inputs, outputs = outputs, locktime = locktime}
+	}
+
+	// locktime=0 is always final
+	tx0 := make_tx(0, []u32{0})
+	testing.expect(t, is_tx_final(&tx0, 100, 1000000), "locktime=0 should be final")
+
+	// Height-based locktime (< 500_000_000): final when height > locktime
+	tx_h := make_tx(99, []u32{0})
+	testing.expect(t, is_tx_final(&tx_h, 100, 0), "locktime=99 at height=100 should be final")
+	testing.expect(t, !is_tx_final(&tx_h, 99, 0), "locktime=99 at height=99 should NOT be final")
+
+	// Time-based locktime (>= 500_000_000): final when block_time > locktime
+	tx_t := make_tx(500_000_100, []u32{0})
+	testing.expect(t, is_tx_final(&tx_t, 100, 500_000_101), "time-based should be final when time past")
+	testing.expect(t, !is_tx_final(&tx_t, 100, 500_000_100), "time-based should NOT be final at exact time")
+
+	// All-final sequences bypass locktime check
+	tx_final := make_tx(999999, []u32{0xFFFFFFFF, 0xFFFFFFFF})
+	testing.expect(t, is_tx_final(&tx_final, 1, 0), "all-final sequences should bypass locktime")
+
+	// Mixed sequences: one non-final means not final
+	tx_mixed := make_tx(999999, []u32{0xFFFFFFFF, 0xFFFFFFFE})
+	testing.expect(t, !is_tx_final(&tx_mixed, 1, 0), "mixed sequences should not be final")
+}
+
 // --- u256_is_zero tests ---
 
 @(test)

@@ -6,6 +6,7 @@ import "../wire"
 
 WITNESS_SCALE_FACTOR :: 4
 MAX_BLOCK_SIGOPS_COST :: 80_000
+LOCKTIME_THRESHOLD :: u32(500_000_000)
 
 COINBASE_WITNESS_COMMITMENT_HEADER :: [4]byte{0xaa, 0x21, 0xa9, 0xed}
 
@@ -171,6 +172,31 @@ is_coinbase_tx :: proc(tx: ^wire.Tx) -> bool {
 	}
 	if tx.inputs[0].previous_output.index != 0xffffffff {
 		return false
+	}
+	return true
+}
+
+// Check if a transaction is final for inclusion in a block at the given height and time.
+// Implements Bitcoin Core's IsFinalTx.
+is_tx_final :: proc(tx: ^wire.Tx, height: int, block_time: u32) -> bool {
+	if tx.locktime == 0 {
+		return true
+	}
+	// Height-based or time-based locktime
+	lock_threshold: i64
+	if tx.locktime < LOCKTIME_THRESHOLD {
+		lock_threshold = i64(height)
+	} else {
+		lock_threshold = i64(block_time)
+	}
+	if i64(tx.locktime) < lock_threshold {
+		return true
+	}
+	// If locktime hasn't passed, tx is still final if all inputs are final (sequence == 0xFFFFFFFF)
+	for i in 0 ..< len(tx.inputs) {
+		if tx.inputs[i].sequence != 0xFFFFFFFF {
+			return false
+		}
 	}
 	return true
 }

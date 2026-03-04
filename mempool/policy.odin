@@ -18,7 +18,7 @@ MAX_OP_RETURN_SIZE :: 83                   // Bitcoin Core -datacarriersize defa
 MAX_RBF_EVICTIONS :: 100                   // BIP125 rule 5: max txs evicted per replacement
 
 // Check transaction against standard relay policy.
-check_tx_policy :: proc(tx: ^wire.Tx) -> Mempool_Error {
+check_tx_policy :: proc(tx: ^wire.Tx, config: ^Mempool_Config = nil) -> Mempool_Error {
 	// 1. Version must be in [1, 2]
 	if tx.version < MIN_STANDARD_TX_VERSION || tx.version > MAX_STANDARD_TX_VERSION {
 		return .Non_Standard
@@ -29,6 +29,12 @@ check_tx_policy :: proc(tx: ^wire.Tx) -> Mempool_Error {
 	if weight > MAX_STANDARD_TX_WEIGHT {
 		return .Non_Standard
 	}
+
+	// Resolve config values (use defaults if no config provided)
+	datacarrier := config != nil ? config.datacarrier : true
+	datacarrier_size := config != nil ? config.datacarrier_size : MAX_OP_RETURN_SIZE
+	permit_bare_multisig := config != nil ? config.permit_bare_multisig : true
+	dust_relay_fee := config != nil ? config.dust_relay_fee : DUST_RELAY_FEE_PER_KVB
 
 	// 3. All outputs must have standard script types and not be dust
 	for i in 0 ..< len(tx.outputs) {
@@ -45,14 +51,26 @@ check_tx_policy :: proc(tx: ^wire.Tx) -> Mempool_Error {
 			return .Non_Standard
 		}
 
-		// OP_RETURN: enforce datacarrier size limit (Bitcoin Core -datacarriersize=83)
-		if stype == .Null_Data && len(spk) > MAX_OP_RETURN_SIZE {
+		// OP_RETURN: reject if datacarrier disabled, or enforce size limit
+		if stype == .Null_Data {
+			if !datacarrier {
+				return .Non_Standard
+			}
+			if len(spk) > datacarrier_size {
+				return .Non_Standard
+			}
+		}
+
+		// Bare multisig: reject if not permitted
+		// Note: our classify_script already classifies bare multisig as Non_Standard,
+		// so this check only matters if classify_script is extended to recognize it.
+		if !permit_bare_multisig && _is_bare_multisig(spk) {
 			return .Non_Standard
 		}
 
 		// OP_RETURN outputs are exempt from dust check
 		if stype != .Null_Data {
-			if _is_dust(&tx.outputs[i]) {
+			if _is_dust_with_fee(&tx.outputs[i], dust_relay_fee) {
 				return .Non_Standard
 			}
 		}
@@ -88,4 +106,29 @@ check_tx_policy :: proc(tx: ^wire.Tx) -> Mempool_Error {
 // Check if an output is below the dust threshold.
 _is_dust :: proc(output: ^wire.Tx_Out) -> bool {
 	return output.value < get_dust_threshold(output.script_pubkey)
+}
+
+// Check if an output is below the dust threshold with a custom dust relay fee.
+_is_dust_with_fee :: proc(output: ^wire.Tx_Out, dust_relay_fee: i64) -> bool {
+	return output.value < get_dust_threshold(output.script_pubkey, dust_relay_fee)
+}
+
+// Check if a script is bare multisig: OP_m <pubkeys...> OP_n OP_CHECKMULTISIG
+_is_bare_multisig :: proc(spk: []byte) -> bool {
+	if len(spk) < 3 {
+		return false
+	}
+	// Last byte must be OP_CHECKMULTISIG (0xae)
+	if spk[len(spk) - 1] != 0xae {
+		return false
+	}
+	// First byte: OP_1..OP_16 (0x51..0x60)
+	if spk[0] < 0x51 || spk[0] > 0x60 {
+		return false
+	}
+	// Second-to-last byte: OP_1..OP_16 (n)
+	if spk[len(spk) - 2] < 0x51 || spk[len(spk) - 2] > 0x60 {
+		return false
+	}
+	return true
 }

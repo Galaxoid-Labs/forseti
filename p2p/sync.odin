@@ -320,9 +320,10 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 			chain.coins_cache_flush(&sm.chain.coins, tip_hash, tip_h)
 		}
 
-		// Remove confirmed/conflicting txs from mempool.
+		// Remove confirmed/conflicting txs from mempool and update tip for BIP 68/113.
 		if sm.mp != nil {
 			mempool.mempool_remove_for_block(sm.mp, block)
+			mempool.mempool_update_tip(sm.mp)
 		}
 
 		remaining := sm.best_header_height - height

@@ -258,6 +258,28 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 		}
 	}
 
+	// 3b. BIP 113: Check transaction finality using MTP after csv_height.
+	parent_entry: ^Block_Index_Entry
+	mtp_current: u32
+	if height > 0 {
+		parent_entry = cs.block_index.entries[entry.prev_hash]
+	}
+	{
+		block_time: u32
+		if height >= cs.params.csv_height && parent_entry != nil {
+			mtp_current = get_median_time_past(parent_entry)
+			block_time = mtp_current
+		} else {
+			block_time = block.header.timestamp
+		}
+		for tx_idx in 0 ..< len(block.txs) {
+			tx := block.txs[tx_idx]
+			if !consensus.is_tx_final(&tx, height, block_time) {
+				return .Non_Final_Tx
+			}
+		}
+	}
+
 	// 4. Two-phase block validation:
 	//    Phase 1: Process UTXO updates sequentially (spend inputs, add outputs, collect fees).
 	//             Collect script checks for deferred verification.
@@ -287,6 +309,7 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 
 		// 4a. Look up inputs
 		spent_outputs := make([]wire.Tx_Out, len(tx.inputs), context.temp_allocator)
+		input_heights := make([]int, len(tx.inputs), context.temp_allocator)
 		input_sum: i64 = 0
 
 		for in_idx in 0 ..< len(tx.inputs) {
@@ -304,6 +327,8 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 				}
 			}
 
+			input_heights[in_idx] = int(coin.height)
+
 			// Clone script to temp_allocator — coins_cache_spend (step 4d)
 			// frees the cache-owned script, so we need a copy that survives
 			// through Phase 2 script verification.
@@ -314,6 +339,14 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 				script_pubkey = script_clone,
 			}
 			input_sum += coin.amount
+		}
+
+		// 4a2. BIP 68: Check relative lock-time (sequence locks)
+		if height >= cs.params.csv_height {
+			if !check_sequence_locks(cs, &tx, height, input_heights, mtp_current) {
+				_rollback_applied_txs(cs, block, applied_tx_indices[:], undo_coins[:])
+				return .Non_Final_Tx
+			}
 		}
 
 		// 4b. Collect script checks (skipped under assumevalid)
@@ -490,6 +523,90 @@ disconnect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Ind
 	pop(&cs.active_chain)
 
 	return .None
+}
+
+// BIP 68 sequence lock constants (duplicated from script/interpreter.odin to avoid cross-package dep).
+SEQUENCE_LOCKTIME_DISABLE_FLAG :: u32(1 << 31)
+SEQUENCE_LOCKTIME_TYPE_FLAG    :: u32(1 << 22)
+SEQUENCE_LOCKTIME_MASK         :: u32(0x0000ffff)
+SEQUENCE_LOCKTIME_GRANULARITY  :: 512 // seconds per sequence unit for time-based locks
+
+// Compute median-time-past (MTP) of the previous 11 blocks.
+// Used by BIP 113 for nLockTime evaluation and BIP 68 for sequence locks.
+get_median_time_past :: proc(entry: ^Block_Index_Entry) -> u32 {
+	timestamps: [11]u32
+	count := 0
+	current := entry
+	for count < 11 && current != nil {
+		timestamps[count] = current.timestamp
+		count += 1
+		current = current.prev
+	}
+
+	// Insertion sort for <= 11 elements
+	for i in 1 ..< count {
+		key := timestamps[i]
+		j := i - 1
+		for j >= 0 && timestamps[j] > key {
+			timestamps[j + 1] = timestamps[j]
+			j -= 1
+		}
+		timestamps[j + 1] = key
+	}
+
+	return timestamps[count / 2]
+}
+
+// BIP 68: Check relative lock-time (sequence locks) for a non-coinbase transaction.
+// input_heights contains the height at which each input's coin was mined.
+// parent_entry is the block *before* the block being connected.
+check_sequence_locks :: proc(cs: ^Chain_State, tx: ^wire.Tx, height: int,
+	input_heights: []int, mtp_current: u32) -> bool {
+	// BIP 68 only applies to version 2+ transactions
+	if tx.version < 2 {
+		return true
+	}
+
+	for i in 0 ..< len(tx.inputs) {
+		seq := tx.inputs[i].sequence
+
+		// If disable flag set, this input has no relative lock constraint
+		if seq & SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
+			continue
+		}
+
+		if seq & SEQUENCE_LOCKTIME_TYPE_FLAG != 0 {
+			// Time-based relative lock
+			// Need MTP at the block *before* the one containing the coin
+			coin_height := input_heights[i]
+			if coin_height <= 0 {
+				return false
+			}
+			// Look up the entry at coin_height - 1 to get its MTP
+			coin_prev_height := coin_height - 1
+			if coin_prev_height < 0 || coin_prev_height >= len(cs.active_chain) {
+				return false
+			}
+			coin_prev_hash := cs.active_chain[coin_prev_height]
+			coin_prev_entry, found := cs.block_index.entries[coin_prev_hash]
+			if !found {
+				return false
+			}
+			mtp_coin := get_median_time_past(coin_prev_entry)
+			required_seconds := i64(seq & SEQUENCE_LOCKTIME_MASK) * SEQUENCE_LOCKTIME_GRANULARITY
+			if i64(mtp_current) - i64(mtp_coin) < required_seconds {
+				return false
+			}
+		} else {
+			// Height-based relative lock
+			required_height := int(seq & SEQUENCE_LOCKTIME_MASK)
+			if height - input_heights[i] < required_height {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // Compute the expected nBits for a new block on top of parent_entry.

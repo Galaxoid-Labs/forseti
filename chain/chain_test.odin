@@ -796,6 +796,108 @@ test_block_index_to_record :: proc(t: ^testing.T) {
 	testing.expect(t, .Has_Data in rec.status, "should have Has_Data")
 }
 
+// --- Median time past tests ---
+
+@(test)
+test_get_median_time_past :: proc(t: ^testing.T) {
+	// Build a chain of 15 entries with known timestamps
+	idx := block_index_init()
+	defer block_index_destroy(&idx)
+
+	entries: [15]^Block_Index_Entry
+	prev_hash := HASH_ZERO
+
+	// Timestamps: 100, 200, 300, ..., 1500
+	for i in 0 ..< 15 {
+		hdr := wire.Block_Header{
+			version   = 1,
+			prev_hash = prev_hash,
+			timestamp = u32((i + 1) * 100),
+			bits      = 0x207fffff,
+			nonce     = u32(i + 1),
+		}
+		entries[i] = block_index_add(&idx, &hdr, i, {.Valid_Header})
+		prev_hash = entries[i].hash
+	}
+
+	// MTP of entry at height 0 (only 1 block): median of [100] = 100
+	testing.expect_value(t, get_median_time_past(entries[0]), u32(100))
+
+	// MTP of entry at height 4 (5 blocks: 100,200,300,400,500): median = 300
+	testing.expect_value(t, get_median_time_past(entries[4]), u32(300))
+
+	// MTP of entry at height 10 (11 blocks: 100..1100): sorted median = 600
+	testing.expect_value(t, get_median_time_past(entries[10]), u32(600))
+
+	// MTP of entry at height 14 (11 blocks: 500..1500): sorted median = 1000
+	testing.expect_value(t, get_median_time_past(entries[14]), u32(1000))
+}
+
+// --- BIP 113: is_tx_final with MTP in connect_block ---
+
+@(test)
+test_bip113_non_final_tx_rejected :: proc(t: ^testing.T) {
+	dir := make_test_dir("bip113")
+	defer remove_test_dir(dir)
+
+	params := consensus.REGTEST_PARAMS
+	cs: Chain_State
+	err := chain_state_init(&cs, dir, &params)
+	testing.expect_value(t, err, Chain_Error.None)
+	defer chain_state_destroy(&cs)
+
+	// Build 2 blocks to establish chain (regtest csv_height=0, so BIP113 is active)
+	prev_hash := HASH_ZERO
+	for i in 0 ..< 2 {
+		block := make_chain_block(i, prev_hash, &params)
+		aerr := accept_block(&cs, &block)
+		testing.expect(t, aerr == .None, fmt.tprintf("accept block %d: %v", i, aerr))
+		prev_hash = wire.block_header_hash(&block.header)
+	}
+
+	// Create block 2 with a transaction that has a time-based locktime in the future.
+	// The block timestamp can be anything, but MTP of the parent determines finality
+	// after BIP113 activation. Use a locktime well above any possible MTP.
+	cb := consensus.make_coinbase(2)
+	future_locktime := u32(2_000_000_000) // far future time-based locktime
+
+	// Non-final tx: locktime in future, non-final sequence
+	nonfinal_inputs := make([]wire.Tx_In, 1, context.temp_allocator)
+	nonfinal_inputs[0] = wire.Tx_In{
+		previous_output = wire.Outpoint{index = 0},
+		script_sig      = []byte{0x01, 0x01},
+		sequence        = 0xFFFFFFFE, // non-final
+	}
+	nonfinal_inputs[0].previous_output.hash[0] = 0xAA
+	nonfinal_outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
+	nonfinal_outputs[0] = wire.Tx_Out{value = 0, script_pubkey = make([]byte, 0, context.temp_allocator)}
+	nonfinal_tx := wire.Tx{version = 1, inputs = nonfinal_inputs, outputs = nonfinal_outputs, locktime = future_locktime}
+
+	txs := make([]wire.Tx, 2, context.temp_allocator)
+	txs[0] = cb
+	txs[1] = nonfinal_tx
+
+	tx_ids := make([]crypto.Hash256, 2, context.temp_allocator)
+	tx_ids[0] = wire.tx_id(&cb)
+	tx_ids[1] = wire.tx_id(&nonfinal_tx)
+	merkle := crypto.merkle_root(tx_ids)
+
+	block := wire.Block{
+		header = wire.Block_Header{
+			version     = 0x20000000,
+			prev_hash   = prev_hash,
+			merkle_root = merkle,
+			timestamp   = u32(1231006507),
+			bits        = params.pow_limit_bits,
+		},
+		txs = txs,
+	}
+	consensus.mine_block(&block, &params)
+
+	aerr := accept_block(&cs, &block)
+	testing.expect_value(t, aerr, Chain_Error.Non_Final_Tx)
+}
+
 // --- Block subsidy test ---
 
 @(test)

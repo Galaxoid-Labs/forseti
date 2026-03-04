@@ -6,18 +6,18 @@ This is an educational/experimental project. It implements the core components o
 
 ## Status
 
-**252 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Builds on macOS and Linux.
+**262 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Builds on macOS and Linux.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
 | 0 | Crypto + C Bindings | Complete (29 tests) |
 | 1 | Wire Protocol + Serialization | Complete (30 tests) |
 | 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH, Taproot) | Complete (50 tests) |
-| 3 | Consensus Rules + Block Validation | Complete (21 tests) |
-| 4 | UTXO Set + Chain State | Complete (18 tests) |
+| 3 | Consensus Rules + Block Validation | Complete (22 tests) |
+| 4 | UTXO Set + Chain State | Complete (20 tests) |
 | 5 | Persistent Storage (LevelDB) | Complete (16 tests) |
 | 6 | P2P Networking | Complete (12 tests) |
-| 7 | Mempool + Persistence + RBF | Complete (24 tests) |
+| 7 | Mempool + Persistence + RBF + Config | Complete (31 tests) |
 | 8 | RPC Interface (42 methods) | Complete (52 tests) |
 | 9 | P2P Integration + CLI + Shutdown | Complete |
 | 10 | Signet Sync (BIP325) | Complete |
@@ -40,6 +40,8 @@ This is an educational/experimental project. It implements the core components o
 | 27 | Address Pool Lifetime Fix | Complete |
 | 28 | Test Coverage Expansion (+38 tests) | Complete |
 | 29 | Blockchain RPC Expansion (+5 methods) | Complete |
+| 30 | BIP 68 + BIP 113 Lock-time Enforcement | Complete |
+| 31 | Mempool Configuration (Bitcoin Core parity) | Complete |
 
 ## Dependencies
 
@@ -155,6 +157,8 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 
 ### CLI Flags
 
+**General:**
+
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--network=<name>` | `mainnet`, `testnet3`, `testnet4`, `signet`, `regtest` | `regtest` |
@@ -163,10 +167,29 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | `--connect=<ip:port>` | Connect to a specific peer | DNS discovery |
 | `--p2p-port=<port>` | P2P listen port | Network default |
 | `--no-p2p` | Disable P2P (RPC-only mode) | `false` |
-| `--mempoolfullrbf=<0\|1>` | Allow full RBF replacement | `1` |
 | `--dbcache=<MB>` | Database cache size in MiB | `450` |
 | `--par=<N>` | Script verification threads (0=auto, 1=serial, 2+=parallel) | `0` |
 | `--assumevalid=<height>` | Skip script verification below height (0=disable) | Network default |
+
+**Mempool (matching Bitcoin Core):**
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--maxmempool=<MB>` | Maximum mempool size in megabytes | `300` |
+| `--mempoolexpiry=<hours>` | Evict transactions older than N hours | `336` (14 days) |
+| `--mempoolfullrbf=<0\|1>` | Allow full replace-by-fee | `1` |
+| `--limitancestorcount=<N>` | Max unconfirmed ancestor count per tx | `25` |
+| `--limitancestorsize=<kvB>` | Max ancestor chain size in kvB | `101` |
+| `--limitdescendantcount=<N>` | Max unconfirmed descendant count per tx | `25` |
+| `--limitdescendantsize=<kvB>` | Max descendant chain size in kvB | `101` |
+| `--minrelaytxfee=<BTC/kvB>` | Minimum relay fee rate | `0.00001000` |
+| `--incrementalrelayfee=<BTC/kvB>` | Fee rate increment for RBF and mempool limiting | `0.00001000` |
+| `--dustrelayfee=<BTC/kvB>` | Dust threshold fee rate | `0.00003000` |
+| `--datacarrier=<0\|1>` | Allow OP_RETURN outputs | `1` |
+| `--datacarriersize=<bytes>` | Max OP_RETURN script size | `83` |
+| `--permitbaremultisig=<0\|1>` | Allow bare multisig outputs | `1` |
+| `--blocksonly` | Disable tx relay, only sync blocks | `false` |
+| `--persistmempool=<0\|1>` | Save/load mempool on shutdown/startup | `1` |
 
 ### Config File
 
@@ -181,10 +204,22 @@ network=regtest
 rpcport=18443
 connect=127.0.0.1:18444
 no-p2p=1
-mempoolfullrbf=1
 dbcache=450
 par=0
 assumevalid=880000
+
+# Mempool settings (Bitcoin Core compatible)
+maxmempool=300
+mempoolexpiry=336
+mempoolfullrbf=1
+limitancestorcount=25
+limitdescendantcount=25
+minrelaytxfee=0.00001000
+dustrelayfee=0.00003000
+datacarrier=1
+datacarriersize=83
+persistmempool=1
+# blocksonly=1
 
 # Network-specific sections override global values
 [regtest]
@@ -338,18 +373,18 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 ## Testing
 
 ```bash
-# Run all 252 tests
+# Run all 262 tests
 make test
 
 # Test individual packages
 odin test crypto          # 29 tests
 odin test wire            # 30 tests
 odin test script          # 50 tests (use -define:ODIN_TEST_THREADS=1 if flaky)
-odin test consensus       # 21 tests
+odin test consensus       # 22 tests
 odin test storage         # 16 tests
-odin test chain           # 18 tests
+odin test chain           # 20 tests
 odin test p2p             # 12 tests
-odin test mempool         # 24 tests
+odin test mempool         # 31 tests
 odin test rpc             # 52 tests
 ```
 
@@ -366,7 +401,7 @@ bitcoin-node-odin/
 ├── storage/               # LevelDB bindings + wrapper, flat files, block DB, index DB, UTXO DB
 ├── chain/                 # UTXO cache, block index (skip list), undo data, chain state
 ├── p2p/                   # Peer connections, sync manager, connection manager
-├── mempool/               # Fee rates, relay policy, validation pipeline, RBF, persistence
+├── mempool/               # Fee rates, relay policy, validation pipeline, RBF, persistence, configurable limits
 ├── rpc/                   # JSON-RPC server (42 methods), handlers, types
 └── deps/                  # C/C++ dependencies
     ├── libsecp256k1/      # Git submodule (bitcoin-core/secp256k1)
@@ -405,7 +440,6 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 ### Protocol Enhancements
 
 - **Compact blocks (BIP152)** — Bandwidth-efficient block relay
-- **Ancestor/descendant limits** — No CPFP chain depth limits (Bitcoin Core uses 25/25)
 
 ### Features
 
@@ -426,9 +460,11 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Sighash caching**: BIP143 (SegWit v0) and BIP341 (Taproot) intermediate hashes are cached per-transaction, avoiding O(n^2) re-computation for transactions with many inputs
 - **Parallel script verification**: Two-phase block validation — Phase 1 processes UTXO updates sequentially (single-threaded, no locking), Phase 2 dispatches all script checks to a persistent thread pool (`--par=N`). Sighash caches are eagerly pre-computed before dispatch so workers read immutable data without synchronization. Serial fallback for small blocks (<16 inputs) or `--par=1`. Workers use pre-allocated 8MB arena buffers from a mutex-protected pool (avoids per-check heap allocation)
 - **Per-input verification arena**: A 4MB heap-allocated scratch arena is reset between each input's script verification (serial path), preventing sighash writer accumulation from exhausting the 64MB block arena on large transactions
-- **Mempool persistence**: Mempool is saved to `<datadir>/mempool.dat` on shutdown and reloaded/revalidated on startup
-- **Transaction relay**: P2P `inv`/`tx`/`getdata` handling for propagating mempool transactions to peers. Cross-thread safety: RPC thread pushes txids to a mutex-protected relay queue, P2P event loop drains it — no direct cross-thread access to peer state
-- **RBF (BIP125)**: Full replace-by-fee support — signaling check (opt-in or fullrbf), no new unconfirmed parents, higher absolute fee, bandwidth fee, max 100 evictions
+- **Mempool configuration**: 16 configurable settings matching Bitcoin Core defaults — memory-based size limiting (`--maxmempool`, default 300 MB) with fee-based eviction and dynamic minimum fee, transaction expiry (`--mempoolexpiry`, default 336 hours), ancestor/descendant chain limits (count and size), configurable relay/dust/incremental fees, datacarrier toggle, bare multisig toggle, blocks-only mode (`--blocksonly`), and optional persistence (`--persistmempool`). All settings supported via CLI flags and `btcnode.conf`
+- **Memory-based mempool limiting**: Tracks total vsize of all entries. When usage exceeds the limit, lowest fee-rate transactions are evicted and the dynamic minimum fee (`mempoolminfee` in `getmempoolinfo`) is raised. Resets when usage drops below the limit after a block connect
+- **Mempool persistence**: Mempool is saved to `<datadir>/mempool.dat` on shutdown and reloaded/revalidated on startup (controlled by `--persistmempool`)
+- **Transaction relay**: P2P `inv`/`tx`/`getdata` handling for propagating mempool transactions to peers. Cross-thread safety: RPC thread pushes txids to a mutex-protected relay queue, P2P event loop drains it — no direct cross-thread access to peer state. `--blocksonly` disables inbound and outbound tx relay (RPC `sendrawtransaction` still works)
+- **RBF (BIP125)**: Full replace-by-fee support — signaling check (opt-in or fullrbf), no new unconfirmed parents, higher absolute fee, bandwidth fee (configurable via `--incrementalrelayfee`), max evictions (configurable)
 - **Lax DER signature parsing**: Pre-BIP66 transactions may contain non-strictly-encoded DER signatures. The verification path uses a lax DER parser (matching Bitcoin Core's `ecdsa_signature_parse_der_lax`), while strict DER validation is enforced separately by the script interpreter when BIP66 is active
 - **Address encoding**: Base58Check (P2PKH, P2SH) and Bech32/Bech32m (P2WPKH, P2WSH, P2TR) for both encoding and decoding, with network-aware validation
 - **Configurable DB cache**: `--dbcache` controls total database memory (default 450 MiB), split following Bitcoin Core's algorithm — small LevelDB caches (2-8 MiB), large in-memory coins cache (~440 MiB). Lower values reduce RAM usage at the cost of more frequent UTXO flushes during sync

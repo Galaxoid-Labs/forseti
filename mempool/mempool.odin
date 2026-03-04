@@ -11,6 +11,46 @@ import "../wire"
 
 Hash256 :: crypto.Hash256
 
+Mempool_Config :: struct {
+	max_mempool_mb:          int,    // --maxmempool (default: 300)
+	mempool_expiry_hours:    int,    // --mempoolexpiry (default: 336)
+	limit_ancestor_count:    int,    // --limitancestorcount (default: 25)
+	limit_ancestor_size_kb:  int,    // --limitancestorsize (default: 101)
+	limit_descendant_count:  int,    // --limitdescendantcount (default: 25)
+	limit_descendant_size_kb:int,    // --limitdescendantsize (default: 101)
+	min_relay_tx_fee:        i64,    // --minrelaytxfee in sat/kvB (default: 1000)
+	incremental_relay_fee:   i64,    // --incrementalrelayfee in sat/kvB (default: 1000)
+	dust_relay_fee:          i64,    // --dustrelayfee in sat/kvB (default: 3000)
+	datacarrier:             bool,   // --datacarrier (default: true)
+	datacarrier_size:        int,    // --datacarriersize (default: 83)
+	permit_bare_multisig:    bool,   // --permitbaremultisig (default: true)
+	fullrbf:                 bool,   // --mempoolfullrbf (default: true)
+	max_rbf_evictions:       int,    // (internal, default: 100)
+	persist_mempool:         bool,   // --persistmempool (default: true)
+	blocks_only:             bool,   // --blocksonly (default: false)
+}
+
+mempool_config_default :: proc() -> Mempool_Config {
+	return Mempool_Config{
+		max_mempool_mb          = 300,
+		mempool_expiry_hours    = 336,
+		limit_ancestor_count    = 25,
+		limit_ancestor_size_kb  = 101,
+		limit_descendant_count  = 25,
+		limit_descendant_size_kb= 101,
+		min_relay_tx_fee        = 1000,
+		incremental_relay_fee   = 1000,
+		dust_relay_fee          = 3000,
+		datacarrier             = true,
+		datacarrier_size        = 83,
+		permit_bare_multisig    = true,
+		fullrbf                 = true,
+		max_rbf_evictions       = 100,
+		persist_mempool         = true,
+		blocks_only             = false,
+	}
+}
+
 Mempool_Error :: enum {
 	None,
 	Tx_Already_Exists,
@@ -28,6 +68,8 @@ Mempool_Error :: enum {
 	RBF_Insufficient_Fee,
 	RBF_Fee_Too_Low,
 	RBF_Too_Many_Evictions,
+	Non_Final,
+	Chain_Limit_Exceeded,
 }
 
 Mempool_Entry :: struct {
@@ -44,17 +86,39 @@ Mempool :: struct {
 	spent_outpoints: map[wire.Outpoint]Hash256,
 	chain:           ^chain.Chain_State,
 	params:          ^consensus.Chain_Params,
-	max_size:        int,
-	fullrbf:         bool,
+	config:          Mempool_Config,
+	usage:           int,   // Total vsize bytes of all entries
+	min_fee:         i64,   // Dynamic minimum fee (sat/kvB) when mempool is full
+	tip_height:      int,   // Current chain tip height (updated on block connect)
+	tip_mtp:         u32,   // MTP at current tip (updated on block connect)
 }
 
-mempool_init :: proc(mp: ^Mempool, cs: ^chain.Chain_State, params: ^consensus.Chain_Params) {
+mempool_init :: proc(mp: ^Mempool, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, config: Mempool_Config = {}) {
 	mp.entries = make(map[Hash256]^Mempool_Entry, 256)
 	mp.spent_outpoints = make(map[wire.Outpoint]Hash256, 1024)
 	mp.chain = cs
 	mp.params = params
-	mp.max_size = MAX_MEMPOOL_ENTRIES
-	mp.fullrbf = true
+	// Use provided config, or default if zero-value
+	if config.max_mempool_mb == 0 {
+		mp.config = mempool_config_default()
+	} else {
+		mp.config = config
+	}
+	mp.min_fee = mp.config.min_relay_tx_fee
+	mempool_update_tip(mp)
+}
+
+// Update tip_height and tip_mtp from current chain state. Call after connecting/disconnecting blocks.
+mempool_update_tip :: proc(mp: ^Mempool) {
+	_, tip_height := chain.chain_tip(mp.chain)
+	mp.tip_height = tip_height
+	if tip_height >= 0 {
+		tip_hash := mp.chain.active_chain[tip_height]
+		tip_entry, found := mp.chain.block_index.entries[tip_hash]
+		if found {
+			mp.tip_mtp = chain.get_median_time_past(tip_entry)
+		}
+	}
 }
 
 mempool_destroy :: proc(mp: ^Mempool) {
@@ -90,7 +154,7 @@ _mempool_validate_internal :: proc(mp: ^Mempool, tx: ^wire.Tx) -> (
 	}
 
 	// 3. Run standard policy checks
-	policy_err := check_tx_policy(tx)
+	policy_err := check_tx_policy(tx, &mp.config)
 	if policy_err != .None {
 		return 0, 0, {}, policy_err
 	}
@@ -101,10 +165,19 @@ _mempool_validate_internal :: proc(mp: ^Mempool, tx: ^wire.Tx) -> (
 		return 0, 0, {}, .Non_Standard
 	}
 
+	// 4b. BIP 113: Check tx finality for next block
+	{
+		next_height := mp.tip_height + 1
+		if !consensus.is_tx_final(tx, next_height, mp.tip_mtp) {
+			return 0, 0, {}, .Non_Final
+		}
+	}
+
 	// 5. Verify all inputs exist and gather spent output info
 	height := chain.chain_height(mp.chain)
 	input_sum: i64 = 0
 	spent_outputs := make([]wire.Tx_Out, len(tx.inputs), context.temp_allocator)
+	input_heights := make([]int, len(tx.inputs), context.temp_allocator)
 
 	for in_idx in 0 ..< len(tx.inputs) {
 		prev_out := tx.inputs[in_idx].previous_output
@@ -123,6 +196,7 @@ _mempool_validate_internal :: proc(mp: ^Mempool, tx: ^wire.Tx) -> (
 				value         = coin.amount,
 				script_pubkey = coin.script,
 			}
+			input_heights[in_idx] = int(coin.height)
 			input_sum += coin.amount
 		} else {
 			// Check if output is from another mempool transaction
@@ -131,8 +205,23 @@ _mempool_validate_internal :: proc(mp: ^Mempool, tx: ^wire.Tx) -> (
 				return 0, 0, {}, .Missing_Inputs
 			}
 			spent_outputs[in_idx] = mp_coin
+			// Mempool txs are treated as mined at tip+1 for sequence lock purposes
+			input_heights[in_idx] = height + 1
 			input_sum += mp_coin.value
 		}
+	}
+
+	// 5b. BIP 68: Check sequence locks for next block
+	if height + 1 >= mp.params.csv_height {
+		if !chain.check_sequence_locks(mp.chain, tx, height + 1, input_heights, mp.tip_mtp) {
+			return 0, 0, {}, .Non_Final
+		}
+	}
+
+	// 5c. Chain limits (ancestor/descendant count and size)
+	chain_err := _check_chain_limits(mp, tx, consensus.get_tx_vsize(tx))
+	if chain_err != .None {
+		return 0, 0, {}, chain_err
 	}
 
 	// 6. Conflict detection + RBF
@@ -167,7 +256,8 @@ _mempool_validate_internal :: proc(mp: ^Mempool, tx: ^wire.Tx) -> (
 	}
 
 	tx_vsize := consensus.get_tx_vsize(tx)
-	min_fee := (MIN_RELAY_TX_FEE * i64(tx_vsize)) / 1000
+	effective_min_rate := max(mp.config.min_relay_tx_fee, mp.min_fee)
+	min_fee := (effective_min_rate * i64(tx_vsize)) / 1000
 	if min_fee == 0 {
 		min_fee = 1
 	}
@@ -220,11 +310,6 @@ _mempool_validate_internal :: proc(mp: ^Mempool, tx: ^wire.Tx) -> (
 
 // Full validation and addition of a transaction to the mempool.
 mempool_add :: proc(mp: ^Mempool, tx: ^wire.Tx) -> Mempool_Error {
-	// 0. Check mempool capacity
-	if len(mp.entries) >= mp.max_size {
-		return .Mempool_Full
-	}
-
 	// Validate (steps 1-8), get conflict set for RBF
 	tx_fee, vsize, conflict_set, val_err := _mempool_validate_internal(mp, tx)
 	if val_err != .None {
@@ -249,11 +334,15 @@ mempool_add :: proc(mp: ^Mempool, tx: ^wire.Tx) -> Mempool_Error {
 	entry.time = time.to_unix_seconds(time.now())
 
 	mp.entries[txid] = entry
+	mp.usage += vsize
 
 	// Record spent outpoints
 	for in_idx in 0 ..< len(tx.inputs) {
 		mp.spent_outpoints[tx.inputs[in_idx].previous_output] = txid
 	}
+
+	// Evict lowest fee-rate entries if over memory limit
+	_mempool_limit_size(mp, txid)
 
 	return .None
 }
@@ -270,6 +359,7 @@ mempool_remove :: proc(mp: ^Mempool, txid: Hash256) {
 		delete_key(&mp.spent_outpoints, entry.tx.inputs[in_idx].previous_output)
 	}
 
+	mp.usage -= entry.vsize
 	_free_tx(&entry.tx)
 	free(entry)
 	delete_key(&mp.entries, txid)
@@ -304,6 +394,14 @@ mempool_remove_for_block :: proc(mp: ^Mempool, block: ^wire.Block) {
 	for hash in to_remove {
 		mempool_remove(mp, hash)
 	}
+
+	// Reset dynamic min fee if usage dropped below limit
+	if mp.usage < mp.config.max_mempool_mb * 1_000_000 {
+		mp.min_fee = mp.config.min_relay_tx_fee
+	}
+
+	// Expire old transactions
+	mempool_expire(mp)
 }
 
 // Look up a mempool entry by txid.
@@ -422,6 +520,157 @@ mempool_get_descendants :: proc(mp: ^Mempool, txid: Hash256) -> [dynamic]Hash256
 	return queue
 }
 
+// --- Size limiting ---
+
+// Evict lowest fee-rate entries until usage is within the memory limit.
+// Never evicts the just-added tx (protect_txid).
+_mempool_limit_size :: proc(mp: ^Mempool, protect_txid: Hash256) {
+	limit_bytes := mp.config.max_mempool_mb * 1_000_000
+	if mp.usage <= limit_bytes {
+		return
+	}
+
+	// Sort entries ascending by fee rate
+	sorted := mempool_get_sorted(mp, context.temp_allocator)
+	// sorted is descending — iterate from the end (lowest fee rate)
+	idx := len(sorted) - 1
+	for idx >= 0 && mp.usage > limit_bytes {
+		entry := sorted[idx]
+		idx -= 1
+		if entry.txid == protect_txid {
+			continue
+		}
+		// Update min_fee to the evicted entry's fee rate
+		evicted_rate := fee_rate_per_kvb(entry.fee_rate)
+		if evicted_rate > mp.min_fee {
+			mp.min_fee = evicted_rate
+		}
+		mempool_remove(mp, entry.txid)
+	}
+}
+
+// --- Transaction expiry ---
+
+// Remove transactions older than mempool_expiry_hours. Returns count removed.
+mempool_expire :: proc(mp: ^Mempool) -> int {
+	if mp.config.mempool_expiry_hours <= 0 {
+		return 0
+	}
+
+	now := time.to_unix_seconds(time.now())
+	expiry_secs := i64(mp.config.mempool_expiry_hours) * 3600
+	to_remove := make([dynamic]Hash256, 0, 16, context.temp_allocator)
+
+	for txid, entry in mp.entries {
+		if now - entry.time > expiry_secs {
+			append(&to_remove, txid)
+		}
+	}
+
+	for txid in to_remove {
+		mempool_remove(mp, txid)
+	}
+	return len(to_remove)
+}
+
+// --- Chain limits ---
+
+// Check ancestor/descendant chain limits for a transaction about to be added.
+// tx_vsize is the vsize of the new tx. ancestors must be pre-computed.
+_check_chain_limits :: proc(mp: ^Mempool, tx: ^wire.Tx, tx_vsize: int) -> Mempool_Error {
+	txid := wire.tx_id(tx)
+
+	// Check ancestor limits (including self)
+	ancestors := mempool_get_ancestors(mp, txid)
+	// For a new tx not yet in mempool, compute ancestors from its inputs
+	if len(ancestors) == 0 {
+		// BFS from inputs
+		seen := make(map[Hash256]bool, 32, context.temp_allocator)
+		queue := make([dynamic]Hash256, 0, 32, context.temp_allocator)
+		for in_idx in 0 ..< len(tx.inputs) {
+			prev_txid := tx.inputs[in_idx].previous_output.hash
+			if prev_txid in mp.entries && !(prev_txid in seen) {
+				seen[prev_txid] = true
+				append(&queue, prev_txid)
+			}
+		}
+		qi := 0
+		for qi < len(queue) {
+			anc_txid := queue[qi]
+			qi += 1
+			anc_entry, anc_found := mp.entries[anc_txid]
+			if !anc_found { continue }
+			for in_idx in 0 ..< len(anc_entry.tx.inputs) {
+				prev_txid := anc_entry.tx.inputs[in_idx].previous_output.hash
+				if prev_txid in mp.entries && !(prev_txid in seen) {
+					seen[prev_txid] = true
+					append(&queue, prev_txid)
+				}
+			}
+		}
+		ancestors = queue
+	}
+
+	if len(ancestors) + 1 > mp.config.limit_ancestor_count {
+		return .Chain_Limit_Exceeded
+	}
+
+	ancestor_vsize := tx_vsize
+	for anc_txid in ancestors {
+		if anc_entry, found := mp.entries[anc_txid]; found {
+			ancestor_vsize += anc_entry.vsize
+		}
+	}
+	if ancestor_vsize > mp.config.limit_ancestor_size_kb * 1000 {
+		return .Chain_Limit_Exceeded
+	}
+
+	// Check descendant limits — for each ancestor already in mempool,
+	// verify adding this tx won't push any ancestor's descendant count/size over limits.
+	checked := make(map[Hash256]bool, 32, context.temp_allocator)
+	for anc_txid in ancestors {
+		if anc_txid in checked { continue }
+		checked[anc_txid] = true
+
+		descs := mempool_get_descendants(mp, anc_txid)
+		// +1 for the new tx being added
+		if len(descs) + 1 > mp.config.limit_descendant_count {
+			return .Chain_Limit_Exceeded
+		}
+		desc_vsize := tx_vsize
+		for desc_txid in descs {
+			if desc_entry, found := mp.entries[desc_txid]; found {
+				desc_vsize += desc_entry.vsize
+			}
+		}
+		if desc_vsize > mp.config.limit_descendant_size_kb * 1000 {
+			return .Chain_Limit_Exceeded
+		}
+	}
+	// Also check direct parents not already in ancestors list
+	for in_idx in 0 ..< len(tx.inputs) {
+		parent_txid := tx.inputs[in_idx].previous_output.hash
+		if parent_txid in mp.entries && !(parent_txid in checked) {
+			checked[parent_txid] = true
+			descs := mempool_get_descendants(mp, parent_txid)
+			if len(descs) + 1 > mp.config.limit_descendant_count {
+				return .Chain_Limit_Exceeded
+			}
+			desc_vsize := tx_vsize
+			for desc_txid in descs {
+				if desc_entry, found := mp.entries[desc_txid]; found {
+					desc_vsize += desc_entry.vsize
+				}
+			}
+			if desc_vsize > mp.config.limit_descendant_size_kb * 1000 {
+				return .Chain_Limit_Exceeded
+			}
+		}
+	}
+
+	return .None
+}
+
 // --- RBF (BIP125) helpers ---
 
 // Check if a transaction signals replaceability (nSequence < 0xfffffffe on any input).
@@ -494,7 +743,7 @@ _check_rbf_rules_preflight :: proc(
 	direct_conflicts: []Hash256, conflict_set: []Hash256,
 ) -> Mempool_Error {
 	// Rule 1: Signaling (only when fullrbf=false)
-	if !mp.fullrbf {
+	if !mp.config.fullrbf {
 		for txid in direct_conflicts {
 			entry, found := mp.entries[txid]
 			if !found { continue }
@@ -526,7 +775,7 @@ _check_rbf_rules_preflight :: proc(
 	}
 
 	// Rule 5: Max evictions
-	if len(conflict_set) > MAX_RBF_EVICTIONS {
+	if len(conflict_set) > mp.config.max_rbf_evictions {
 		return .RBF_Too_Many_Evictions
 	}
 
@@ -549,9 +798,9 @@ _check_rbf_fee_rules :: proc(
 		return .RBF_Insufficient_Fee
 	}
 
-	// Rule 4: Additional fee covers own bandwidth
+	// Rule 4: Additional fee covers own bandwidth (uses incremental relay fee)
 	additional_fee := tx_fee - conflict_fee
-	min_additional := (MIN_RELAY_TX_FEE * i64(tx_vsize)) / 1000
+	min_additional := (mp.config.incremental_relay_fee * i64(tx_vsize)) / 1000
 	if min_additional == 0 {
 		min_additional = 1
 	}

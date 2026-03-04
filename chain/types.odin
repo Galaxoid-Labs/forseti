@@ -24,6 +24,7 @@ Chain_Error :: enum {
 	Undo_Data_Corrupt,
 	Storage_Error,
 	Bad_Difficulty,
+	Non_Final_Tx,
 	Consensus_Error,
 	Invalid_State,
 }

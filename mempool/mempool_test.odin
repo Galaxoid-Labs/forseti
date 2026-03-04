@@ -233,7 +233,7 @@ test_mempool_double_spend :: proc(t: ^testing.T) {
 		_remove_test_dir(dir)
 	}
 	// Disable fullrbf — double-spends rejected when original doesn't signal RBF
-	mp.fullrbf = false
+	mp.config.fullrbf = false
 
 	cb_txid := _get_coinbase_txid(0)
 	outpoint := wire.Outpoint{hash = cb_txid, index = 0}
@@ -583,7 +583,7 @@ test_rbf_optin_signaling :: proc(t: ^testing.T) {
 		_remove_test_dir(dir)
 	}
 	// Disable fullrbf for opt-in testing
-	mp.fullrbf = false
+	mp.config.fullrbf = false
 
 	cb_txid := _get_coinbase_txid(0)
 	outpoint := wire.Outpoint{hash = cb_txid, index = 0}
@@ -612,7 +612,7 @@ test_rbf_fullrbf_overrides_signaling :: proc(t: ^testing.T) {
 		_remove_test_dir(dir)
 	}
 	// fullrbf=true (default)
-	testing.expect(t, mp.fullrbf, "fullrbf should default to true")
+	testing.expect(t, mp.config.fullrbf, "fullrbf should default to true")
 
 	cb_txid := _get_coinbase_txid(0)
 	outpoint := wire.Outpoint{hash = cb_txid, index = 0}
@@ -741,7 +741,7 @@ test_rbf_double_spend_rejected_without_rbf :: proc(t: ^testing.T) {
 		_remove_test_dir(dir)
 	}
 	// Disable fullrbf
-	mp.fullrbf = false
+	mp.config.fullrbf = false
 
 	cb_txid := _get_coinbase_txid(0)
 	outpoint := wire.Outpoint{hash = cb_txid, index = 0}
@@ -873,4 +873,345 @@ test_dust_threshold :: proc(t: ^testing.T) {
 	dust_wpkh := get_dust_threshold(p2wpkh_spk)
 	testing.expect(t, dust_wpkh > 0, "P2WPKH dust should be >0")
 	testing.expect(t, dust_wpkh < dust, "P2WPKH dust should be less than P2PKH")
+}
+
+// --- Mempool config tests ---
+
+@(test)
+test_mempool_size_limit_eviction :: proc(t: ^testing.T) {
+	mp, cs, params, dir := _make_test_mempool(t, "size_lim", 106)
+	defer {
+		mempool_destroy(mp)
+		free(mp)
+		chain.chain_state_destroy(cs)
+		free(cs)
+		free(params)
+		_remove_test_dir(dir)
+	}
+
+	subsidy := consensus.get_block_subsidy(0, &consensus.REGTEST_PARAMS)
+
+	// Add 3 txs with different fees
+	fees := [3]i64{1000, 5000, 2000}
+	for i in 0 ..< 3 {
+		cb_txid := _get_coinbase_txid(i)
+		outpoint := wire.Outpoint{hash = cb_txid, index = 0}
+		tx := _make_spend_tx(outpoint, subsidy, subsidy - fees[i])
+		err := mempool_add(mp, &tx)
+		testing.expect(t, err == .None, fmt.tprintf("add tx %d: %v", i, err))
+	}
+
+	testing.expect_value(t, mempool_count(mp), 3)
+	testing.expect(t, mp.usage > 0, "usage should be > 0")
+
+	// Track the low-fee tx for later
+	cb_txid0 := _get_coinbase_txid(0)
+	tx0 := _make_spend_tx(wire.Outpoint{hash = cb_txid0, index = 0}, subsidy, subsidy - 1000)
+	tx0_id := wire.tx_id(&tx0)
+	testing.expect(t, mempool_has(mp, tx0_id), "tx0 should exist before eviction")
+
+	// Set max_mempool_mb=1 and inflate usage so adding one more tx triggers eviction.
+	// Each real tx is ~85 vbytes. We inflate so that after adding tx3 we exceed 1MB,
+	// and removing one entry (~85 bytes) brings us back under.
+	mp.config.max_mempool_mb = 1
+	mp.usage = 1_000_000  // exactly at limit; adding tx3 will push over
+
+	// Add tx3 with highest fee — should succeed and evict the lowest fee-rate tx
+	cb_txid3 := _get_coinbase_txid(3)
+	tx3 := _make_spend_tx(wire.Outpoint{hash = cb_txid3, index = 0}, subsidy, subsidy - 10000)
+	err3 := mempool_add(mp, &tx3)
+	testing.expect_value(t, err3, Mempool_Error.None)
+
+	// The lowest fee-rate tx (1000 sat) should have been evicted
+	testing.expect(t, !mempool_has(mp, tx0_id), "lowest fee tx should be evicted")
+
+	// min_fee should be raised
+	testing.expect(t, mp.min_fee >= mp.config.min_relay_tx_fee, "min_fee should be at least min_relay_tx_fee")
+}
+
+@(test)
+test_mempool_expiry :: proc(t: ^testing.T) {
+	mp, cs, params, dir := _make_test_mempool(t, "expiry", 101)
+	defer {
+		mempool_destroy(mp)
+		free(mp)
+		chain.chain_state_destroy(cs)
+		free(cs)
+		free(params)
+		_remove_test_dir(dir)
+	}
+
+	subsidy := consensus.get_block_subsidy(0, &consensus.REGTEST_PARAMS)
+	cb_txid := _get_coinbase_txid(0)
+	outpoint := wire.Outpoint{hash = cb_txid, index = 0}
+	tx := _make_spend_tx(outpoint, subsidy, subsidy - 1000)
+
+	err := mempool_add(mp, &tx)
+	testing.expect_value(t, err, Mempool_Error.None)
+	testing.expect_value(t, mempool_count(mp), 1)
+
+	// Set expiry to 1 hour and backdate the entry to 2 hours ago
+	mp.config.mempool_expiry_hours = 1
+	txid := wire.tx_id(&tx)
+	entry, found := mempool_get(mp, txid)
+	testing.expect(t, found, "entry should exist")
+	if found {
+		entry.time -= 7200 // 2 hours ago
+	}
+
+	removed := mempool_expire(mp)
+	testing.expect_value(t, removed, 1)
+	testing.expect_value(t, mempool_count(mp), 0)
+}
+
+@(test)
+test_mempool_ancestor_limit :: proc(t: ^testing.T) {
+	mp, cs, params, dir := _make_test_mempool(t, "anc_lim", 130)
+	defer {
+		mempool_destroy(mp)
+		free(mp)
+		chain.chain_state_destroy(cs)
+		free(cs)
+		free(params)
+		_remove_test_dir(dir)
+	}
+
+	// Set ancestor limit to 3 for testing
+	mp.config.limit_ancestor_count = 3
+
+	subsidy := consensus.get_block_subsidy(0, &consensus.REGTEST_PARAMS)
+
+	// Build a chain using mempool_add for the first tx, then manually insert
+	// subsequent chain entries to avoid script verification issues.
+	// tx0: spends block 0's coinbase (OP_TRUE input, P2PKH output)
+	cb0 := _get_coinbase_txid(0)
+	tx0 := _make_spend_tx(wire.Outpoint{hash = cb0, index = 0}, subsidy, subsidy - 1000)
+	err0 := mempool_add(mp, &tx0)
+	testing.expect_value(t, err0, Mempool_Error.None)
+	tx0_id := wire.tx_id(&tx0)
+
+	// tx1, tx2: manually insert as if they spend the previous tx's output.
+	// We create fake entries and wire the spent_outpoints to form a chain.
+	_add_fake_chain_entry :: proc(mp: ^Mempool, prev_txid: Hash256, fee: i64, value: i64) -> Hash256 {
+		// Build a tx that appears to spend prev_txid:0
+		inputs := make([]wire.Tx_In, 1)
+		inputs[0] = wire.Tx_In{
+			previous_output = wire.Outpoint{hash = prev_txid, index = 0},
+			sequence = 0xffffffff,
+		}
+		// Use P2PKH output
+		spk := make([]byte, 25)
+		spk[0] = 0x76; spk[1] = 0xa9; spk[2] = 0x14
+		spk[23] = 0x88; spk[24] = 0xac
+		outputs := make([]wire.Tx_Out, 1)
+		outputs[0] = wire.Tx_Out{value = value, script_pubkey = spk}
+		tx := wire.Tx{version = 1, inputs = inputs, outputs = outputs}
+		txid := wire.tx_id(&tx)
+
+		entry := new(Mempool_Entry)
+		entry.tx = tx
+		entry.txid = txid
+		entry.fee = fee
+		entry.vsize = 85
+		entry.fee_rate = fee_rate(fee, 85)
+		mp.entries[txid] = entry
+		mp.usage += 85
+		mp.spent_outpoints[wire.Outpoint{hash = prev_txid, index = 0}] = txid
+		return txid
+	}
+
+	tx1_id := _add_fake_chain_entry(mp, tx0_id, 1000, subsidy - 2000)
+	tx2_id := _add_fake_chain_entry(mp, tx1_id, 1000, subsidy - 3000)
+
+	testing.expect_value(t, mempool_count(mp), 3)
+
+	// tx3: tries to spend tx2's output via mempool_add — should fail chain limit
+	// The chain limit check (step 5c) runs before script verification (step 8),
+	// so we'll hit Chain_Limit_Exceeded first.
+	tx3 := _make_spend_tx(wire.Outpoint{hash = tx2_id, index = 0}, subsidy - 3000, subsidy - 4000)
+	err3 := mempool_add(mp, &tx3)
+	testing.expect_value(t, err3, Mempool_Error.Chain_Limit_Exceeded)
+}
+
+@(test)
+test_mempool_descendant_limit :: proc(t: ^testing.T) {
+	mp, cs, params, dir := _make_test_mempool(t, "desc_lim", 130)
+	defer {
+		mempool_destroy(mp)
+		free(mp)
+		chain.chain_state_destroy(cs)
+		free(cs)
+		free(params)
+		_remove_test_dir(dir)
+	}
+
+	// Set descendant limit to 2 for testing
+	mp.config.limit_descendant_count = 2
+
+	subsidy := consensus.get_block_subsidy(0, &consensus.REGTEST_PARAMS)
+
+	// tx0: spends block 0's coinbase (real mempool_add works since coinbase has OP_TRUE)
+	cb0 := _get_coinbase_txid(0)
+	tx0 := _make_spend_tx(wire.Outpoint{hash = cb0, index = 0}, subsidy, subsidy - 1000)
+	err0 := mempool_add(mp, &tx0)
+	testing.expect_value(t, err0, Mempool_Error.None)
+	tx0_id := wire.tx_id(&tx0)
+
+	// Manually insert two descendants of tx0
+	_add_fake_desc_entry :: proc(mp: ^Mempool, prev_txid: Hash256, prev_idx: u32, fee: i64, value: i64) -> Hash256 {
+		inputs := make([]wire.Tx_In, 1)
+		inputs[0] = wire.Tx_In{
+			previous_output = wire.Outpoint{hash = prev_txid, index = prev_idx},
+			sequence = 0xffffffff,
+		}
+		spk := make([]byte, 25)
+		spk[0] = 0x76; spk[1] = 0xa9; spk[2] = 0x14
+		spk[23] = 0x88; spk[24] = 0xac
+		outputs := make([]wire.Tx_Out, 1)
+		outputs[0] = wire.Tx_Out{value = value, script_pubkey = spk}
+		tx := wire.Tx{version = 1, inputs = inputs, outputs = outputs}
+		txid := wire.tx_id(&tx)
+
+		entry := new(Mempool_Entry)
+		entry.tx = tx
+		entry.txid = txid
+		entry.fee = fee
+		entry.vsize = 85
+		entry.fee_rate = fee_rate(fee, 85)
+		mp.entries[txid] = entry
+		mp.usage += 85
+		mp.spent_outpoints[wire.Outpoint{hash = prev_txid, index = prev_idx}] = txid
+		return txid
+	}
+
+	// tx1: child of tx0 (descendant 1)
+	tx1_id := _add_fake_desc_entry(mp, tx0_id, 0, 1000, subsidy - 2000)
+	// tx2: child of tx1 (descendant 2 of tx0 via tx1)
+	_ = _add_fake_desc_entry(mp, tx1_id, 0, 1000, subsidy - 3000)
+
+	testing.expect_value(t, mempool_count(mp), 3)
+
+	// tx3 tries to spend tx0's... but output 0 is already spent by tx1.
+	// Instead, tx3 spends a separate coinbase but references tx1 as a parent.
+	// Actually, for the descendant check, the new tx must have a PARENT in mempool.
+	// tx3 spends block 1's coinbase but also tx1's output 0 (already spent).
+	// Simpler: manually add an output to tx0 to have a second one.
+	// Better: just test via tx1 — adding a child of tx1 would make tx1 have 2 descendants
+	// (the existing one + the new one's child), but more importantly tx0 would have
+	// 3 descendants (tx1 + tx1_child + new_tx), exceeding limit of 2.
+
+	// tx3: spends block 1's coinbase, but ALSO needs a mempool parent to trigger desc check.
+	// The desc check only triggers for inputs that reference mempool parents.
+	// So let's have tx3 reference tx1 output 0.
+	// But that's already spent by tx2. The check is on the parent's descendants.
+	// Actually wait — the descendant check iterates over all inputs. For each input
+	// whose prev_txid is in mp.entries, it computes descendants of that parent.
+	// We need a tx that spends an unspent output of a mempool tx.
+	// Let me give tx1 a second output.
+
+	// Modify tx1 to have 2 outputs so we can spend the second one.
+	if entry, found := mp.entries[tx1_id]; found {
+		spk2 := make([]byte, 25)
+		spk2[0] = 0x76; spk2[1] = 0xa9; spk2[2] = 0x14
+		spk2[23] = 0x88; spk2[24] = 0xac
+		old_outputs := entry.tx.outputs
+		new_outputs := make([]wire.Tx_Out, 2)
+		new_outputs[0] = old_outputs[0]
+		new_outputs[1] = wire.Tx_Out{value = 100000, script_pubkey = spk2}
+		delete(old_outputs)
+		entry.tx.outputs = new_outputs
+	}
+
+	// tx3: spends tx1 output 1 — tx1 already has 1 descendant (tx2).
+	// Adding tx3 makes tx1 have 2 descendants. But tx0 has descendants {tx1, tx2, tx3} = 3.
+	// With limit=2, this should exceed the descendant limit for tx1's parent chain.
+	tx3 := _make_spend_tx(wire.Outpoint{hash = tx1_id, index = 1}, 100000, 99000)
+	err3 := mempool_add(mp, &tx3)
+	testing.expect_value(t, err3, Mempool_Error.Chain_Limit_Exceeded)
+}
+
+@(test)
+test_mempool_config_min_relay_fee :: proc(t: ^testing.T) {
+	mp, cs, params, dir := _make_test_mempool(t, "min_fee", 101)
+	defer {
+		mempool_destroy(mp)
+		free(mp)
+		chain.chain_state_destroy(cs)
+		free(cs)
+		free(params)
+		_remove_test_dir(dir)
+	}
+
+	// Set a high min relay fee: 10000 sat/kvB
+	mp.config.min_relay_tx_fee = 10000
+
+	subsidy := consensus.get_block_subsidy(0, &consensus.REGTEST_PARAMS)
+	cb_txid := _get_coinbase_txid(0)
+	outpoint := wire.Outpoint{hash = cb_txid, index = 0}
+
+	// tx with only 1000 sat fee (~85 vbytes → fee rate ~11765 sat/kvB)
+	// min_fee = (10000 * 85) / 1000 = 850 sat. Our fee of 1000 > 850, so it should pass.
+	tx1 := _make_spend_tx(outpoint, subsidy, subsidy - 1000)
+	err1 := mempool_add(mp, &tx1)
+	testing.expect_value(t, err1, Mempool_Error.None)
+
+	// Now set min relay fee very high: 100000 sat/kvB
+	// Reset to test rejection
+	mempool_remove(mp, wire.tx_id(&tx1))
+	mp.config.min_relay_tx_fee = 100000
+
+	// Same tx: fee=1000, min_fee=(100000*85)/1000=8500. 1000 < 8500, should fail.
+	tx2 := _make_spend_tx(outpoint, subsidy, subsidy - 1000)
+	err2 := mempool_add(mp, &tx2)
+	testing.expect_value(t, err2, Mempool_Error.Insufficient_Fee)
+}
+
+@(test)
+test_mempool_datacarrier_disabled :: proc(t: ^testing.T) {
+	// Test that datacarrier=false rejects OP_RETURN
+	config := mempool_config_default()
+	config.datacarrier = false
+
+	// Valid OP_RETURN script (within size limit)
+	script_ok := make([]byte, 10, context.temp_allocator)
+	script_ok[0] = 0x6a // OP_RETURN
+	script_ok[1] = 0x08 // push 8 bytes
+
+	inputs := make([]wire.Tx_In, 1, context.temp_allocator)
+	inputs[0] = wire.Tx_In{
+		previous_output = wire.Outpoint{hash = wire.HASH_ZERO, index = 0},
+		sequence = 0xffffffff,
+	}
+	outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
+	outputs[0] = wire.Tx_Out{value = 0, script_pubkey = script_ok}
+	tx := wire.Tx{version = 1, inputs = inputs, outputs = outputs}
+
+	// With datacarrier=false, should reject
+	err := check_tx_policy(&tx, &config)
+	testing.expect_value(t, err, Mempool_Error.Non_Standard)
+
+	// With datacarrier=true, should accept
+	config.datacarrier = true
+	err2 := check_tx_policy(&tx, &config)
+	testing.expect_value(t, err2, Mempool_Error.None)
+}
+
+@(test)
+test_mempool_dust_relay_fee :: proc(t: ^testing.T) {
+	// Test that custom dust_relay_fee changes the threshold
+	// Default: 3000 sat/kvB → P2PKH dust = 1638
+	p2pkh_spk := make([]byte, 25, context.temp_allocator)
+	p2pkh_spk[0] = 0x76; p2pkh_spk[1] = 0xa9; p2pkh_spk[2] = 0x14
+	p2pkh_spk[23] = 0x88; p2pkh_spk[24] = 0xac
+
+	dust_default := get_dust_threshold(p2pkh_spk, 3000)
+	testing.expect_value(t, dust_default, i64(1638))
+
+	// With higher dust relay fee: 6000 sat/kvB → dust should double
+	dust_high := get_dust_threshold(p2pkh_spk, 6000)
+	testing.expect_value(t, dust_high, i64(3276))
+
+	// With lower dust relay fee: 1000 sat/kvB → dust should be lower
+	dust_low := get_dust_threshold(p2pkh_spk, 1000)
+	testing.expect_value(t, dust_low, i64(546))
 }

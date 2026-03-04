@@ -39,6 +39,8 @@ Conn_Manager :: struct {
 	// Cross-thread tx relay queue (RPC thread pushes, P2P thread drains).
 	relay_mutex:        sync.Mutex,
 	relay_queue:        [dynamic]Hash256,
+	// Blocks-only mode: reject inbound txs, skip tx relay.
+	blocks_only:        bool,
 }
 
 conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) -> Net_Error {
@@ -534,6 +536,12 @@ _conn_manager_handle_tx :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []
 		return
 	}
 
+	// In blocks-only mode, reject inbound txs from peers
+	if cm.blocks_only {
+		log.debugf("Ignoring tx from peer %d (blocks-only mode)", peer_id)
+		return
+	}
+
 	r := wire.reader_init(payload)
 	tx, err := wire.deserialize_tx(&r, context.temp_allocator)
 	if err != nil {
@@ -588,6 +596,9 @@ _conn_manager_handle_getdata :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 
 // Relay a tx inv to all active peers except the sender.
 _conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid: Hash256, from_peer: Peer_Id) {
+	if cm.blocks_only {
+		return
+	}
 	inv := [1]wire.Inv_Vector{{type = .Witness_Tx, hash = txid}}
 	w := wire.writer_init(context.temp_allocator)
 	inv_msg := wire.Inv_Message{inventory = inv[:]}

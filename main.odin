@@ -43,20 +43,48 @@ CLI_Flag :: enum {
 	DbCache,
 	Par,
 	Assume_Valid,
+	Max_Mempool,
+	Mempool_Expiry,
+	Limit_Ancestor_Count,
+	Limit_Ancestor_Size,
+	Limit_Descendant_Count,
+	Limit_Descendant_Size,
+	Min_Relay_Tx_Fee,
+	Incremental_Relay_Fee,
+	Dust_Relay_Fee,
+	Datacarrier,
+	Datacarrier_Size,
+	Permit_Bare_Multisig,
+	Blocks_Only,
+	Persist_Mempool,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
 
 CLI_Config :: struct {
-	network:         string,
-	data_dir:        string,
-	rpc_port:        int,
-	connect:         string, // ip:port of manual peer
-	p2p_port:        int,
-	no_p2p:          bool,
-	mempool_fullrbf: bool,
-	db_cache_mb:     int,
-	par_threads:     int, // 0 = auto, 1 = serial, >= 2 = N threads
-	assumevalid:     int, // -1 = use default, 0 = disable, >0 = override height
+	network:                string,
+	data_dir:               string,
+	rpc_port:               int,
+	connect:                string, // ip:port of manual peer
+	p2p_port:               int,
+	no_p2p:                 bool,
+	mempool_fullrbf:        bool,
+	db_cache_mb:            int,
+	par_threads:            int, // 0 = auto, 1 = serial, >= 2 = N threads
+	assumevalid:            int, // -1 = use default, 0 = disable, >0 = override height
+	max_mempool_mb:         int,
+	mempool_expiry_hours:   int,
+	limit_ancestor_count:   int,
+	limit_ancestor_size_kb: int,
+	limit_descendant_count: int,
+	limit_descendant_size_kb: int,
+	min_relay_tx_fee:       i64,
+	incremental_relay_fee:  i64,
+	dust_relay_fee:         i64,
+	datacarrier:            bool,
+	datacarrier_size:       int,
+	permit_bare_multisig:   bool,
+	blocks_only:            bool,
+	persist_mempool:        bool,
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -69,6 +97,20 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 	cfg.db_cache_mb = 450
 	cfg.par_threads = 0  // auto-detect
 	cfg.assumevalid = -1 // use network default
+	cfg.max_mempool_mb = 300
+	cfg.mempool_expiry_hours = 336
+	cfg.limit_ancestor_count = 25
+	cfg.limit_ancestor_size_kb = 101
+	cfg.limit_descendant_count = 25
+	cfg.limit_descendant_size_kb = 101
+	cfg.min_relay_tx_fee = 1000
+	cfg.incremental_relay_fee = 1000
+	cfg.dust_relay_fee = 3000
+	cfg.datacarrier = true
+	cfg.datacarrier_size = 83
+	cfg.permit_bare_multisig = true
+	cfg.blocks_only = false
+	cfg.persist_mempool = true
 
 	for arg in os.args[1:] {
 		if arg == "--help" || arg == "-h" {
@@ -130,6 +172,106 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 			}
 			cfg.assumevalid = max(val, 0)
 			flags_set += {.Assume_Valid}
+		} else if strings.has_prefix(arg, "--maxmempool=") {
+			val, parse_ok := strconv.parse_int(arg[len("--maxmempool="):])
+			if !parse_ok {
+				fmt.eprintln("Error: invalid --maxmempool value")
+				return cfg, flags_set, false
+			}
+			cfg.max_mempool_mb = max(val, 1)
+			flags_set += {.Max_Mempool}
+		} else if strings.has_prefix(arg, "--mempoolexpiry=") {
+			val, parse_ok := strconv.parse_int(arg[len("--mempoolexpiry="):])
+			if !parse_ok {
+				fmt.eprintln("Error: invalid --mempoolexpiry value")
+				return cfg, flags_set, false
+			}
+			cfg.mempool_expiry_hours = max(val, 1)
+			flags_set += {.Mempool_Expiry}
+		} else if strings.has_prefix(arg, "--limitancestorcount=") {
+			val, parse_ok := strconv.parse_int(arg[len("--limitancestorcount="):])
+			if !parse_ok {
+				fmt.eprintln("Error: invalid --limitancestorcount value")
+				return cfg, flags_set, false
+			}
+			cfg.limit_ancestor_count = max(val, 1)
+			flags_set += {.Limit_Ancestor_Count}
+		} else if strings.has_prefix(arg, "--limitancestorsize=") {
+			val, parse_ok := strconv.parse_int(arg[len("--limitancestorsize="):])
+			if !parse_ok {
+				fmt.eprintln("Error: invalid --limitancestorsize value")
+				return cfg, flags_set, false
+			}
+			cfg.limit_ancestor_size_kb = max(val, 1)
+			flags_set += {.Limit_Ancestor_Size}
+		} else if strings.has_prefix(arg, "--limitdescendantcount=") {
+			val, parse_ok := strconv.parse_int(arg[len("--limitdescendantcount="):])
+			if !parse_ok {
+				fmt.eprintln("Error: invalid --limitdescendantcount value")
+				return cfg, flags_set, false
+			}
+			cfg.limit_descendant_count = max(val, 1)
+			flags_set += {.Limit_Descendant_Count}
+		} else if strings.has_prefix(arg, "--limitdescendantsize=") {
+			val, parse_ok := strconv.parse_int(arg[len("--limitdescendantsize="):])
+			if !parse_ok {
+				fmt.eprintln("Error: invalid --limitdescendantsize value")
+				return cfg, flags_set, false
+			}
+			cfg.limit_descendant_size_kb = max(val, 1)
+			flags_set += {.Limit_Descendant_Size}
+		} else if strings.has_prefix(arg, "--minrelaytxfee=") {
+			val, parse_ok := strconv.parse_f64(arg[len("--minrelaytxfee="):])
+			if !parse_ok {
+				fmt.eprintln("Error: invalid --minrelaytxfee value")
+				return cfg, flags_set, false
+			}
+			cfg.min_relay_tx_fee = i64(val * 100_000_000)
+			flags_set += {.Min_Relay_Tx_Fee}
+		} else if strings.has_prefix(arg, "--incrementalrelayfee=") {
+			val, parse_ok := strconv.parse_f64(arg[len("--incrementalrelayfee="):])
+			if !parse_ok {
+				fmt.eprintln("Error: invalid --incrementalrelayfee value")
+				return cfg, flags_set, false
+			}
+			cfg.incremental_relay_fee = i64(val * 100_000_000)
+			flags_set += {.Incremental_Relay_Fee}
+		} else if strings.has_prefix(arg, "--dustrelayfee=") {
+			val, parse_ok := strconv.parse_f64(arg[len("--dustrelayfee="):])
+			if !parse_ok {
+				fmt.eprintln("Error: invalid --dustrelayfee value")
+				return cfg, flags_set, false
+			}
+			cfg.dust_relay_fee = i64(val * 100_000_000)
+			flags_set += {.Dust_Relay_Fee}
+		} else if strings.has_prefix(arg, "--datacarrier=") {
+			val := arg[len("--datacarrier="):]
+			cfg.datacarrier = val == "1" || val == "true"
+			flags_set += {.Datacarrier}
+		} else if strings.has_prefix(arg, "--datacarriersize=") {
+			val, parse_ok := strconv.parse_int(arg[len("--datacarriersize="):])
+			if !parse_ok {
+				fmt.eprintln("Error: invalid --datacarriersize value")
+				return cfg, flags_set, false
+			}
+			cfg.datacarrier_size = max(val, 0)
+			flags_set += {.Datacarrier_Size}
+		} else if strings.has_prefix(arg, "--permitbaremultisig=") {
+			val := arg[len("--permitbaremultisig="):]
+			cfg.permit_bare_multisig = val == "1" || val == "true"
+			flags_set += {.Permit_Bare_Multisig}
+		} else if arg == "--blocksonly" || strings.has_prefix(arg, "--blocksonly=") {
+			if strings.has_prefix(arg, "--blocksonly=") {
+				val := arg[len("--blocksonly="):]
+				cfg.blocks_only = val == "1" || val == "true"
+			} else {
+				cfg.blocks_only = true
+			}
+			flags_set += {.Blocks_Only}
+		} else if strings.has_prefix(arg, "--persistmempool=") {
+			val := arg[len("--persistmempool="):]
+			cfg.persist_mempool = val == "1" || val == "true"
+			flags_set += {.Persist_Mempool}
 		} else {
 			fmt.eprintln("Error: unknown flag:", arg)
 			_print_usage()
@@ -150,10 +292,27 @@ _print_usage :: proc() {
 	fmt.println("  --connect=<ip:port>   Connect to specific peer instead of DNS discovery")
 	fmt.println("  --p2p-port=<port>     P2P listen port (default: network-appropriate)")
 	fmt.println("  --no-p2p              Disable P2P networking (RPC-only mode)")
-	fmt.println("  --mempoolfullrbf=<0|1> Allow full RBF replacement (default: 1)")
 	fmt.println("  --dbcache=<MB>        Database cache size in MiB (default: 450, min: 4)")
 	fmt.println("  --par=<N>             Script verification threads (0=auto, 1=serial, 2+=parallel; default: 0)")
 	fmt.println("  --assumevalid=<height> Skip script verification below height (0=disable; default: network-specific)")
+	fmt.println()
+	fmt.println("Mempool options:")
+	fmt.println("  --maxmempool=<MB>     Maximum mempool size in megabytes (default: 300)")
+	fmt.println("  --mempoolexpiry=<hours> Evict txs older than N hours (default: 336)")
+	fmt.println("  --mempoolfullrbf=<0|1> Allow full RBF replacement (default: 1)")
+	fmt.println("  --limitancestorcount=<N> Max unconfirmed ancestor count (default: 25)")
+	fmt.println("  --limitancestorsize=<kvB> Max ancestor chain size in kvB (default: 101)")
+	fmt.println("  --limitdescendantcount=<N> Max unconfirmed descendant count (default: 25)")
+	fmt.println("  --limitdescendantsize=<kvB> Max descendant chain size in kvB (default: 101)")
+	fmt.println("  --minrelaytxfee=<BTC/kvB> Minimum relay fee rate (default: 0.00001000)")
+	fmt.println("  --incrementalrelayfee=<BTC/kvB> Fee rate increment for RBF (default: 0.00001000)")
+	fmt.println("  --dustrelayfee=<BTC/kvB> Dust threshold fee rate (default: 0.00003000)")
+	fmt.println("  --datacarrier=<0|1>   Allow OP_RETURN outputs (default: 1)")
+	fmt.println("  --datacarriersize=<bytes> Max OP_RETURN script size (default: 83)")
+	fmt.println("  --permitbaremultisig=<0|1> Allow bare multisig outputs (default: 1)")
+	fmt.println("  --blocksonly          Disable tx relay, only sync blocks (default: off)")
+	fmt.println("  --persistmempool=<0|1> Save/load mempool on shutdown/startup (default: 1)")
+	fmt.println()
 	fmt.println("  --help, -h            Show this help message")
 }
 
@@ -257,6 +416,110 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 			if n, parse_ok := strconv.parse_int(val); parse_ok {
 				cfg.assumevalid = max(n, 0)
 			}
+		}
+	}
+
+	if .Max_Mempool not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "maxmempool"); found {
+			if n, parse_ok := strconv.parse_int(val); parse_ok {
+				cfg.max_mempool_mb = max(n, 1)
+			}
+		}
+	}
+
+	if .Mempool_Expiry not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "mempoolexpiry"); found {
+			if n, parse_ok := strconv.parse_int(val); parse_ok {
+				cfg.mempool_expiry_hours = max(n, 1)
+			}
+		}
+	}
+
+	if .Limit_Ancestor_Count not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "limitancestorcount"); found {
+			if n, parse_ok := strconv.parse_int(val); parse_ok {
+				cfg.limit_ancestor_count = max(n, 1)
+			}
+		}
+	}
+
+	if .Limit_Ancestor_Size not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "limitancestorsize"); found {
+			if n, parse_ok := strconv.parse_int(val); parse_ok {
+				cfg.limit_ancestor_size_kb = max(n, 1)
+			}
+		}
+	}
+
+	if .Limit_Descendant_Count not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "limitdescendantcount"); found {
+			if n, parse_ok := strconv.parse_int(val); parse_ok {
+				cfg.limit_descendant_count = max(n, 1)
+			}
+		}
+	}
+
+	if .Limit_Descendant_Size not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "limitdescendantsize"); found {
+			if n, parse_ok := strconv.parse_int(val); parse_ok {
+				cfg.limit_descendant_size_kb = max(n, 1)
+			}
+		}
+	}
+
+	if .Min_Relay_Tx_Fee not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "minrelaytxfee"); found {
+			if f, parse_ok := strconv.parse_f64(val); parse_ok {
+				cfg.min_relay_tx_fee = i64(f * 100_000_000)
+			}
+		}
+	}
+
+	if .Incremental_Relay_Fee not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "incrementalrelayfee"); found {
+			if f, parse_ok := strconv.parse_f64(val); parse_ok {
+				cfg.incremental_relay_fee = i64(f * 100_000_000)
+			}
+		}
+	}
+
+	if .Dust_Relay_Fee not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "dustrelayfee"); found {
+			if f, parse_ok := strconv.parse_f64(val); parse_ok {
+				cfg.dust_relay_fee = i64(f * 100_000_000)
+			}
+		}
+	}
+
+	if .Datacarrier not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "datacarrier"); found {
+			cfg.datacarrier = val == "1" || val == "true" || val == "yes"
+		}
+	}
+
+	if .Datacarrier_Size not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "datacarriersize"); found {
+			if n, parse_ok := strconv.parse_int(val); parse_ok {
+				cfg.datacarrier_size = max(n, 0)
+			}
+		}
+	}
+
+	if .Permit_Bare_Multisig not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "permitbaremultisig"); found {
+			cfg.permit_bare_multisig = val == "1" || val == "true" || val == "yes"
+		}
+	}
+
+	if .Blocks_Only not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "blocksonly"); found {
+			cfg.blocks_only = val == "1" || val == "true" || val == "yes"
+		}
+	}
+
+	if .Persist_Mempool not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "persistmempool"); found {
+			cfg.persist_mempool = val == "1" || val == "true" || val == "yes"
 		}
 	}
 }
@@ -393,14 +656,37 @@ main :: proc() {
 	tip_hash, tip_height := chain.chain_tip(cs)
 	log.infof("Chain loaded: height=%d tip=%s", tip_height, rpc._hash_to_hex(tip_hash))
 
-	// Initialize mempool.
+	// Initialize mempool with config from CLI/config file.
+	mp_config := mempool.Mempool_Config{
+		max_mempool_mb          = cfg.max_mempool_mb,
+		mempool_expiry_hours    = cfg.mempool_expiry_hours,
+		limit_ancestor_count    = cfg.limit_ancestor_count,
+		limit_ancestor_size_kb  = cfg.limit_ancestor_size_kb,
+		limit_descendant_count  = cfg.limit_descendant_count,
+		limit_descendant_size_kb= cfg.limit_descendant_size_kb,
+		min_relay_tx_fee        = cfg.min_relay_tx_fee,
+		incremental_relay_fee   = cfg.incremental_relay_fee,
+		dust_relay_fee          = cfg.dust_relay_fee,
+		datacarrier             = cfg.datacarrier,
+		datacarrier_size        = cfg.datacarrier_size,
+		permit_bare_multisig    = cfg.permit_bare_multisig,
+		fullrbf                 = cfg.mempool_fullrbf,
+		max_rbf_evictions       = 100,
+		persist_mempool         = cfg.persist_mempool,
+		blocks_only             = cfg.blocks_only,
+	}
 	mp := new(mempool.Mempool)
-	mempool.mempool_init(mp, cs, params)
-	mp.fullrbf = cfg.mempool_fullrbf
-	defer mempool.mempool_save(mp, cfg.data_dir)
+	mempool.mempool_init(mp, cs, params, mp_config)
+	defer {
+		if mp.config.persist_mempool {
+			mempool.mempool_save(mp, cfg.data_dir)
+		}
+	}
 	defer mempool.mempool_destroy(mp)
 
-	mempool.mempool_load(mp, cfg.data_dir)
+	if mp.config.persist_mempool {
+		mempool.mempool_load(mp, cfg.data_dir)
+	}
 
 	// Start RPC server (cm wired below after P2P init).
 	srv := new(rpc.RPC_Server)
@@ -438,6 +724,8 @@ main :: proc() {
 			log.errorf("Failed to initialize connection manager: %v", cm_err)
 			// Continue without P2P — RPC still works.
 		} else {
+			cm.blocks_only = cfg.blocks_only
+
 			// If --connect was specified, store address for event loop to connect.
 			if len(cfg.connect) > 0 {
 				addr, port, connect_ok := _parse_connect(cfg.connect)

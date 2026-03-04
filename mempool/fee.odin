@@ -29,7 +29,7 @@ fee_rate_less :: proc(a, b: Fee_Rate) -> bool {
 // dust_relay_fee = 3000 sat/kvB = 3 sat/byte (Bitcoin Core default)
 DUST_RELAY_FEE_PER_KVB :: i64(3000)
 
-get_dust_threshold :: proc(script_pubkey: []byte) -> i64 {
+get_dust_threshold :: proc(script_pubkey: []byte, dust_relay_fee: i64 = DUST_RELAY_FEE_PER_KVB) -> i64 {
 	n := len(script_pubkey)
 
 	// Output serialization: 8 (value) + compact_size(script_len) + script_len
@@ -59,7 +59,7 @@ get_dust_threshold :: proc(script_pubkey: []byte) -> i64 {
 
 	total := output_size + input_size
 	// dust = 3 * total * (dust_relay_fee / 1000)
-	return (3 * i64(total) * DUST_RELAY_FEE_PER_KVB) / 1000
+	return (3 * i64(total) * dust_relay_fee) / 1000
 }
 
 _compact_size_len :: proc(n: int) -> int {
