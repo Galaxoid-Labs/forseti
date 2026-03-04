@@ -84,6 +84,36 @@ utxo_db_count :: proc(db: ^UTXO_DB) -> u32 {
 	return count
 }
 
+// Scan all UTXOs to compute aggregate stats: count and total amount (satoshis).
+// Warning: slow on large UTXO sets (millions of entries).
+utxo_db_scan_stats :: proc(db: ^UTXO_DB) -> (count: u32, total_amount: i64) {
+	iter := leveldb_create_iterator(db.store.chainstate_db, db.store.read_opts)
+	defer leveldb_iter_destroy(iter)
+
+	count = 0
+	total_amount = 0
+	leveldb_iter_seek_to_first(iter)
+	for leveldb_iter_valid(iter) != 0 {
+		klen: c.size_t
+		_ = leveldb_iter_key(iter, &klen)
+		if klen == 36 {
+			// Decode value to extract amount
+			vlen: c.size_t
+			vptr := leveldb_iter_value(iter, &vlen)
+			if vptr != nil && vlen >= 13 {
+				val := ([^]byte)(vptr)[:vlen]
+				// amount is at offset 5 (after 4-byte height + 1-byte is_coinbase), 8 bytes LE
+				amt := u64(val[5]) | u64(val[6]) << 8 | u64(val[7]) << 16 | u64(val[8]) << 24 |
+				       u64(val[9]) << 32 | u64(val[10]) << 40 | u64(val[11]) << 48 | u64(val[12]) << 56
+				total_amount += transmute(i64)amt
+			}
+			count += 1
+		}
+		leveldb_iter_next(iter)
+	}
+	return
+}
+
 // Add a put to a WriteBatch (for coins_cache_flush).
 utxo_db_batch_put :: proc(db: ^UTXO_DB, batch: LDB_WriteBatch, outpoint: wire.Outpoint, coin: UTXO_Coin) {
 	key := _utxo_key(outpoint)

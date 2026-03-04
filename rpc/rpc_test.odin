@@ -165,6 +165,26 @@ _make_spend_tx :: proc(outpoint: wire.Outpoint, input_value: i64, output_value: 
 	return wire.Tx{version = 1, inputs = inputs, outputs = outputs, locktime = 0}
 }
 
+// Like _make_spend_tx but with OP_1 output script (trivially spendable).
+// Allows building mempool chains without real signatures.
+_make_spend_tx_op1 :: proc(outpoint: wire.Outpoint, input_value: i64, output_value: i64) -> wire.Tx {
+	inputs := make([]wire.Tx_In, 1, context.temp_allocator)
+	inputs[0] = wire.Tx_In {
+		previous_output = outpoint,
+		script_sig      = make([]byte, 0, context.temp_allocator),
+		sequence        = 0xffffffff,
+	}
+
+	// OP_1 output (trivially spendable)
+	script_pubkey := make([]byte, 1, context.temp_allocator)
+	script_pubkey[0] = 0x51 // OP_1
+
+	outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
+	outputs[0] = wire.Tx_Out{value = output_value, script_pubkey = script_pubkey}
+
+	return wire.Tx{version = 1, inputs = inputs, outputs = outputs, locktime = 0}
+}
+
 _get_coinbase_txid :: proc(height: int) -> Hash256 {
 	cb := _make_test_coinbase(height)
 	return wire.tx_id(&cb)
@@ -1861,4 +1881,231 @@ test_rpc_help_includes_new :: proc(t: ^testing.T) {
 	testing.expect(t, _str_contains(result, "createrawtransaction"), "should contain createrawtransaction")
 	testing.expect(t, _str_contains(result, "combinerawtransaction"), "should contain combinerawtransaction")
 	testing.expect(t, _str_contains(result, "signrawtransactionwithkey"), "should contain signrawtransactionwithkey")
+	testing.expect(t, _str_contains(result, "gettxoutsetinfo"), "should contain gettxoutsetinfo")
+	testing.expect(t, _str_contains(result, "getmempoolancestors"), "should contain getmempoolancestors")
+	testing.expect(t, _str_contains(result, "getmempooldescendants"), "should contain getmempooldescendants")
+	testing.expect(t, _str_contains(result, "gettxoutproof"), "should contain gettxoutproof")
+	testing.expect(t, _str_contains(result, "verifytxoutproof"), "should contain verifytxoutproof")
+}
+
+// --- New RPC tests ---
+
+@(test)
+test_gettxoutsetinfo :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "txoutset", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+	resp := _handle_gettxoutsetinfo(srv, nil)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	obj, ok := resp.result.(json.Object)
+	testing.expect(t, ok, "result should be object")
+	if !ok { return }
+
+	// Check height
+	height, h_ok := obj["height"].(json.Integer)
+	testing.expect(t, h_ok, "height should be integer")
+	testing.expect_value(t, int(height), 4) // 5 blocks = height 4
+
+	// Check bestblock exists
+	_, bb_ok := obj["bestblock"].(json.String)
+	testing.expect(t, bb_ok, "bestblock should be string")
+
+	// txouts should be > 0 (coinbase outputs)
+	txouts, to_ok := obj["txouts"].(json.Integer)
+	testing.expect(t, to_ok, "txouts should be integer")
+	testing.expect(t, txouts > 0, fmt.tprintf("txouts should be > 0, got %d", txouts))
+
+	// total_amount should be > 0
+	total_amount, ta_ok := obj["total_amount"].(json.Float)
+	testing.expect(t, ta_ok, "total_amount should be float")
+	testing.expect(t, total_amount > 0, fmt.tprintf("total_amount should be > 0, got %f", total_amount))
+}
+
+// Helper to directly inject a mempool entry (bypasses validation).
+_inject_mempool_entry :: proc(mp: ^mempool.Mempool, tx: ^wire.Tx, fee: i64) -> Hash256 {
+	txid := wire.tx_id(tx)
+	vsize := consensus.get_tx_vsize(tx)
+	entry := new(mempool.Mempool_Entry)
+	entry.tx = tx^
+	entry.txid = txid
+	entry.fee = fee
+	entry.vsize = vsize
+	entry.fee_rate = mempool.fee_rate(fee, vsize)
+	entry.time = 1000000
+	mp.entries[txid] = entry
+	for in_idx in 0 ..< len(tx.inputs) {
+		mp.spent_outpoints[tx.inputs[in_idx].previous_output] = txid
+	}
+	return txid
+}
+
+@(test)
+test_getmempoolancestors :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "mpanc", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	// Create parent tx (direct inject to bypass validation)
+	parent_tx := _make_spend_tx(
+		wire.Outpoint{hash = _get_coinbase_txid(0), index = 0},
+		5_000_000_000,
+		4_999_000_000,
+	)
+	parent_txid := _inject_mempool_entry(mp, &parent_tx, 1_000_000)
+
+	// Create child tx spending parent's output
+	child_tx := _make_spend_tx(
+		wire.Outpoint{hash = parent_txid, index = 0},
+		4_999_000_000,
+		4_998_000_000,
+	)
+	child_txid := _inject_mempool_entry(mp, &child_tx, 1_000_000)
+
+	// Get ancestors of child — should include parent
+	p := _make_params(json.Value(json.String(_hash_to_hex(child_txid))))
+	resp := _handle_getmempoolancestors(srv, p)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	arr, ok := resp.result.(json.Array)
+	testing.expect(t, ok, "result should be array")
+	if !ok { return }
+
+	testing.expect_value(t, len(arr), 1)
+	anc_hex, s_ok := arr[0].(json.String)
+	testing.expect(t, s_ok, "ancestor should be string")
+	testing.expect(t, anc_hex == _hash_to_hex(parent_txid), "ancestor should be parent txid")
+
+	// Get ancestors of parent — should be empty
+	p2 := _make_params(json.Value(json.String(_hash_to_hex(parent_txid))))
+	resp2 := _handle_getmempoolancestors(srv, p2)
+	_, has_err2 := resp2.error.?
+	testing.expect(t, !has_err2, "should not error for parent")
+
+	arr2, ok2 := resp2.result.(json.Array)
+	testing.expect(t, ok2, "result should be array")
+	if ok2 {
+		testing.expect_value(t, len(arr2), 0)
+	}
+}
+
+@(test)
+test_getmempooldescendants :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "mpdesc", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	// Create parent tx (direct inject)
+	parent_tx := _make_spend_tx(
+		wire.Outpoint{hash = _get_coinbase_txid(0), index = 0},
+		5_000_000_000,
+		4_999_000_000,
+	)
+	parent_txid := _inject_mempool_entry(mp, &parent_tx, 1_000_000)
+
+	// Create child tx spending parent
+	child_tx := _make_spend_tx(
+		wire.Outpoint{hash = parent_txid, index = 0},
+		4_999_000_000,
+		4_998_000_000,
+	)
+	child_txid := _inject_mempool_entry(mp, &child_tx, 1_000_000)
+
+	// Get descendants of parent — should include child
+	p := _make_params(json.Value(json.String(_hash_to_hex(parent_txid))))
+	resp := _handle_getmempooldescendants(srv, p)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "should not error")
+
+	arr, ok := resp.result.(json.Array)
+	testing.expect(t, ok, "result should be array")
+	if !ok { return }
+
+	testing.expect_value(t, len(arr), 1)
+	desc_hex, s_ok := arr[0].(json.String)
+	testing.expect(t, s_ok, "descendant should be string")
+	testing.expect(t, desc_hex == _hash_to_hex(child_txid), "descendant should be child txid")
+
+	// Get descendants of child — should be empty
+	p2 := _make_params(json.Value(json.String(_hash_to_hex(child_txid))))
+	resp2 := _handle_getmempooldescendants(srv, p2)
+	_, has_err2 := resp2.error.?
+	testing.expect(t, !has_err2, "should not error for child")
+
+	arr2, ok2 := resp2.result.(json.Array)
+	testing.expect(t, ok2, "result should be array")
+	if ok2 {
+		testing.expect_value(t, len(arr2), 0)
+	}
+}
+
+@(test)
+test_gettxoutproof_and_verify :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "txproof", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	// Get coinbase txid from block at height 2
+	cb_txid := _get_coinbase_txid(2)
+	cb_txid_hex := _hash_to_hex(cb_txid)
+
+	// Get the block hash at height 2
+	block_hash := cs.active_chain[2]
+	block_hash_hex := _hash_to_hex(block_hash)
+
+	// Build proof
+	txids_arr := make(json.Array, 1, context.temp_allocator)
+	txids_arr[0] = json.Value(json.String(cb_txid_hex))
+
+	p := _make_params(json.Value(txids_arr), json.Value(json.String(block_hash_hex)))
+	resp := _handle_gettxoutproof(srv, p)
+
+	err_val, has_err := resp.error.?
+	testing.expect(t, !has_err, fmt.tprintf("gettxoutproof should not error: %v", err_val))
+
+	proof_hex, ok := resp.result.(json.String)
+	testing.expect(t, ok, "result should be hex string")
+	if !ok { return }
+
+	// Proof should be at least 80 bytes (header) + 4 (total_txs) = 168 hex chars
+	testing.expect(t, len(proof_hex) >= 168, fmt.tprintf("proof too short: %d chars", len(proof_hex)))
+
+	// Now verify the proof
+	p2 := _make_params(json.Value(json.String(proof_hex)))
+	resp2 := _handle_verifytxoutproof(srv, p2)
+
+	_, has_err2 := resp2.error.?
+	testing.expect(t, !has_err2, "verifytxoutproof should not error")
+
+	arr, arr_ok := resp2.result.(json.Array)
+	testing.expect(t, arr_ok, "result should be array")
+	if !arr_ok { return }
+
+	testing.expect_value(t, len(arr), 1)
+	verified_txid, v_ok := arr[0].(json.String)
+	testing.expect(t, v_ok, "verified txid should be string")
+	testing.expect(t, verified_txid == cb_txid_hex, fmt.tprintf("verified txid mismatch: got %s, expected %s", verified_txid, cb_txid_hex))
+}
+
+@(test)
+test_verifytxoutproof_invalid :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "txproof_inv", 5)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	// Empty proof
+	p := _make_params(json.Value(json.String("00")))
+	resp := _handle_verifytxoutproof(srv, p)
+	_, has_err := resp.error.?
+	testing.expect(t, has_err, "should error on invalid proof")
 }

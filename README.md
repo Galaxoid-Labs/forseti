@@ -2,11 +2,11 @@
 
 A Bitcoin full node implementation written in [Odin](https://odin-lang.org/). Built from scratch with no Bitcoin library dependencies — only libsecp256k1 for elliptic curve cryptography, vendored RIPEMD-160, and vendored LevelDB for storage.
 
-This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, mempool with RBF, and a JSON-RPC interface with 37 methods.
+This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, mempool with RBF, and a JSON-RPC interface with 42 methods.
 
 ## Status
 
-**247 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Builds on macOS and Linux.
+**252 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Builds on macOS and Linux.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
@@ -18,7 +18,7 @@ This is an educational/experimental project. It implements the core components o
 | 5 | Persistent Storage (LevelDB) | Complete (16 tests) |
 | 6 | P2P Networking | Complete (12 tests) |
 | 7 | Mempool + Persistence + RBF | Complete (24 tests) |
-| 8 | RPC Interface (37 methods) | Complete (47 tests) |
+| 8 | RPC Interface (42 methods) | Complete (52 tests) |
 | 9 | P2P Integration + CLI + Shutdown | Complete |
 | 10 | Signet Sync (BIP325) | Complete |
 | 11 | LevelDB Storage Migration | Complete |
@@ -39,6 +39,7 @@ This is an educational/experimental project. It implements the core components o
 | 26 | Cross-thread RPC Relay Safety | Complete |
 | 27 | Address Pool Lifetime Fix | Complete |
 | 28 | Test Coverage Expansion (+38 tests) | Complete |
+| 29 | Blockchain RPC Expansion (+5 methods) | Complete |
 
 ## Dependencies
 
@@ -217,11 +218,11 @@ curl -s --data '{"method":"getblockchaininfo","params":[],"id":1}' \
 bitcoin-cli -rpcport=18443 getblockchaininfo
 ```
 
-### Bitcoin Core RPC Coverage (37 / 78 non-wallet RPCs)
+### Bitcoin Core RPC Coverage (42 / 78 non-wallet RPCs)
 
 The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are intentionally excluded.
 
-**Blockchain (15/25):**
+**Blockchain (20/25):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
@@ -236,20 +237,20 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `getchaintips` | Yes | |
 | `getchaintxstats` | Yes | |
 | `getdifficulty` | Yes | |
-| `getmempoolancestors` | — | Ancestor tracking not implemented |
-| `getmempooldescendants` | — | Descendant tracking not implemented |
+| `getmempoolancestors` | Yes | Verbose and non-verbose modes |
+| `getmempooldescendants` | Yes | Verbose and non-verbose modes |
 | `getmempoolentry` | Yes | |
 | `getmempoolinfo` | Yes | |
 | `getrawmempool` | Yes | |
 | `gettxout` | Yes | |
-| `gettxoutproof` | — | Merkle proof generation |
-| `gettxoutsetinfo` | — | Full UTXO set scan |
+| `gettxoutproof` | Yes | Partial merkle tree proof |
+| `gettxoutsetinfo` | Yes | UTXO count + total amount |
 | `preciousblock` | — | Manual best-chain override |
 | `pruneblockchain` | — | No pruning support |
 | `savemempool` | Yes | |
 | `scantxoutset` | — | UTXO set descriptor scan |
 | `verifychain` | — | Block-by-block re-verification |
-| `verifytxoutproof` | — | Merkle proof verification |
+| `verifytxoutproof` | Yes | Merkle proof verification |
 
 **Control (6/6):**
 
@@ -337,19 +338,19 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 ## Testing
 
 ```bash
-# Run all 209 tests
+# Run all 252 tests
 make test
 
 # Test individual packages
-odin test crypto          # 24 tests
-odin test wire            # 24 tests
+odin test crypto          # 29 tests
+odin test wire            # 30 tests
 odin test script          # 50 tests (use -define:ODIN_TEST_THREADS=1 if flaky)
-odin test consensus       # 15 tests
-odin test storage         # 13 tests
-odin test chain           # 10 tests
-odin test p2p             #  6 tests
-odin test mempool         # 20 tests
-odin test rpc             # 47 tests
+odin test consensus       # 21 tests
+odin test storage         # 16 tests
+odin test chain           # 18 tests
+odin test p2p             # 12 tests
+odin test mempool         # 24 tests
+odin test rpc             # 52 tests
 ```
 
 ## Project Structure
@@ -366,7 +367,7 @@ bitcoin-node-odin/
 ├── chain/                 # UTXO cache, block index (skip list), undo data, chain state
 ├── p2p/                   # Peer connections, sync manager, connection manager
 ├── mempool/               # Fee rates, relay policy, validation pipeline, RBF, persistence
-├── rpc/                   # JSON-RPC server (37 methods), handlers, types
+├── rpc/                   # JSON-RPC server (42 methods), handlers, types
 └── deps/                  # C/C++ dependencies
     ├── libsecp256k1/      # Git submodule (bitcoin-core/secp256k1)
     ├── leveldb/           # Vendored LevelDB C++ source

@@ -344,6 +344,84 @@ mempool_has :: proc(mp: ^Mempool, txid: Hash256) -> bool {
 	return txid in mp.entries
 }
 
+// Get all in-mempool ancestors of a transaction (BFS upward through inputs).
+mempool_get_ancestors :: proc(mp: ^Mempool, txid: Hash256) -> [dynamic]Hash256 {
+	seen := make(map[Hash256]bool, 32, context.temp_allocator)
+	queue := make([dynamic]Hash256, 0, 32, context.temp_allocator)
+
+	// Seed with the target tx's parents
+	entry, found := mp.entries[txid]
+	if !found {
+		return make([dynamic]Hash256, 0, 0, context.temp_allocator)
+	}
+
+	for in_idx in 0 ..< len(entry.tx.inputs) {
+		prev_txid := entry.tx.inputs[in_idx].previous_output.hash
+		if prev_txid in mp.entries && !(prev_txid in seen) {
+			seen[prev_txid] = true
+			append(&queue, prev_txid)
+		}
+	}
+
+	// BFS: for each ancestor, also check its parents
+	qi := 0
+	for qi < len(queue) {
+		anc_txid := queue[qi]
+		qi += 1
+		anc_entry, anc_found := mp.entries[anc_txid]
+		if !anc_found { continue }
+		for in_idx in 0 ..< len(anc_entry.tx.inputs) {
+			prev_txid := anc_entry.tx.inputs[in_idx].previous_output.hash
+			if prev_txid in mp.entries && !(prev_txid in seen) {
+				seen[prev_txid] = true
+				append(&queue, prev_txid)
+			}
+		}
+	}
+
+	return queue
+}
+
+// Get all in-mempool descendants of a transaction (BFS downward through spent_outpoints).
+mempool_get_descendants :: proc(mp: ^Mempool, txid: Hash256) -> [dynamic]Hash256 {
+	seen := make(map[Hash256]bool, 32, context.temp_allocator)
+	queue := make([dynamic]Hash256, 0, 32, context.temp_allocator)
+
+	// Seed with the target tx's children
+	entry, found := mp.entries[txid]
+	if !found {
+		return make([dynamic]Hash256, 0, 0, context.temp_allocator)
+	}
+
+	for out_idx in 0 ..< len(entry.tx.outputs) {
+		child_outpoint := wire.Outpoint{hash = txid, index = u32(out_idx)}
+		child_txid, child_exists := mp.spent_outpoints[child_outpoint]
+		if child_exists && !(child_txid in seen) {
+			seen[child_txid] = true
+			append(&queue, child_txid)
+		}
+	}
+
+	// BFS: for each descendant, also check its children
+	qi := 0
+	for qi < len(queue) {
+		desc_txid := queue[qi]
+		qi += 1
+		desc_entry, desc_found := mp.entries[desc_txid]
+		if !desc_found { continue }
+		for out_idx in 0 ..< len(desc_entry.tx.outputs) {
+			child_outpoint := wire.Outpoint{hash = desc_txid, index = u32(out_idx)}
+			child_txid, child_exists := mp.spent_outpoints[child_outpoint]
+			if child_exists && !(child_txid in seen) {
+				seen[child_txid] = true
+				append(&queue, child_txid)
+			}
+		}
+	}
+
+	return queue
+}
+
 // --- RBF (BIP125) helpers ---
 
 // Check if a transaction signals replaceability (nSequence < 0xfffffffe on any input).

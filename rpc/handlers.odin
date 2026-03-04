@@ -484,6 +484,373 @@ _handle_gettxout :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 	return _make_result(json.Value(json.Null(nil)), srv._current_id)
 }
 
+// --- gettxoutsetinfo ---
+
+_handle_gettxoutsetinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	tip_hash, height := chain.chain_tip(srv.chain)
+
+	// Scan UTXO database for flushed stats
+	db_count, db_amount := storage.utxo_db_scan_stats(srv.chain.coins.db)
+
+	// Also count cache entries not yet flushed to LevelDB
+	cache_count: u32 = 0
+	cache_amount: i64 = 0
+	for _, ce in srv.chain.coins.cache {
+		// Skip spent sentinels (Dirty + zeroed coin + not Fresh)
+		is_sentinel := ce.coin.amount == 0 && ce.coin.height == 0 &&
+		               !ce.coin.is_coinbase && len(ce.coin.script) == 0 &&
+		               .Dirty in ce.flags && .Fresh not_in ce.flags
+		if is_sentinel { continue }
+
+		if .Fresh in ce.flags {
+			// Fresh = only in cache, not yet in DB
+			cache_count += 1
+			cache_amount += ce.coin.amount
+		}
+	}
+
+	total_count := i64(db_count) + i64(cache_count)
+	total_amount := db_amount + cache_amount
+
+	// Estimate disk size
+	disk_size := i64(db_count) * 100
+
+	obj := make(json.Object, 8, context.temp_allocator)
+	obj["height"] = json.Value(json.Integer(height))
+	obj["bestblock"] = json.Value(json.String(_hash_to_hex(tip_hash)))
+	obj["txouts"] = json.Value(json.Integer(total_count))
+	obj["total_amount"] = json.Value(json.Float(_satoshi_to_btc(total_amount)))
+	obj["disk_size"] = json.Value(json.Integer(disk_size))
+	obj["hash_serialized_2"] = json.Value(json.String(""))
+
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// --- getmempoolancestors ---
+
+_handle_getmempoolancestors :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	txid_hex, ok := _get_string_param(params, 0)
+	if !ok {
+		return _make_error(.Invalid_Params, "Missing txid parameter", srv._current_id)
+	}
+
+	txid, hash_ok := _hex_to_hash(txid_hex)
+	if !hash_ok {
+		return _make_error(.Invalid_Params, "Invalid txid", srv._current_id)
+	}
+
+	if !mempool.mempool_has(srv.mp, txid) {
+		return _make_error(.Block_Not_Found, "Transaction not in mempool", srv._current_id)
+	}
+
+	ancestors := mempool.mempool_get_ancestors(srv.mp, txid)
+	verbose := _get_bool_param(params, 1, false)
+
+	if verbose {
+		obj := make(json.Object, len(ancestors), context.temp_allocator)
+		for anc_txid in ancestors {
+			entry, found := mempool.mempool_get(srv.mp, anc_txid)
+			if found {
+				obj[_hash_to_hex(anc_txid)] = json.Value(_format_mempool_entry(srv, entry))
+			}
+		}
+		return _make_result(json.Value(obj), srv._current_id)
+	} else {
+		arr := make(json.Array, len(ancestors), context.temp_allocator)
+		for i in 0 ..< len(ancestors) {
+			arr[i] = json.Value(json.String(_hash_to_hex(ancestors[i])))
+		}
+		return _make_result(json.Value(arr), srv._current_id)
+	}
+}
+
+// --- getmempooldescendants ---
+
+_handle_getmempooldescendants :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	txid_hex, ok := _get_string_param(params, 0)
+	if !ok {
+		return _make_error(.Invalid_Params, "Missing txid parameter", srv._current_id)
+	}
+
+	txid, hash_ok := _hex_to_hash(txid_hex)
+	if !hash_ok {
+		return _make_error(.Invalid_Params, "Invalid txid", srv._current_id)
+	}
+
+	if !mempool.mempool_has(srv.mp, txid) {
+		return _make_error(.Block_Not_Found, "Transaction not in mempool", srv._current_id)
+	}
+
+	descendants := mempool.mempool_get_descendants(srv.mp, txid)
+	verbose := _get_bool_param(params, 1, false)
+
+	if verbose {
+		obj := make(json.Object, len(descendants), context.temp_allocator)
+		for desc_txid in descendants {
+			entry, found := mempool.mempool_get(srv.mp, desc_txid)
+			if found {
+				obj[_hash_to_hex(desc_txid)] = json.Value(_format_mempool_entry(srv, entry))
+			}
+		}
+		return _make_result(json.Value(obj), srv._current_id)
+	} else {
+		arr := make(json.Array, len(descendants), context.temp_allocator)
+		for i in 0 ..< len(descendants) {
+			arr[i] = json.Value(json.String(_hash_to_hex(descendants[i])))
+		}
+		return _make_result(json.Value(arr), srv._current_id)
+	}
+}
+
+// --- gettxoutproof ---
+
+_handle_gettxoutproof :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	txids_val, txids_ok := _get_param(params, 0)
+	if !txids_ok {
+		return _make_error(.Invalid_Params, "Missing txids parameter", srv._current_id)
+	}
+
+	txids_arr, is_arr := txids_val.(json.Array)
+	if !is_arr || len(txids_arr) == 0 {
+		return _make_error(.Invalid_Params, "txids must be a non-empty array", srv._current_id)
+	}
+
+	// Parse txids
+	target_txids := make([]Hash256, len(txids_arr), context.temp_allocator)
+	for i in 0 ..< len(txids_arr) {
+		hex_str, h_ok := txids_arr[i].(json.String)
+		if !h_ok {
+			return _make_error(.Invalid_Params, fmt.tprintf("txid %d: must be a string", i), srv._current_id)
+		}
+		h, hh_ok := _hex_to_hash(hex_str)
+		if !hh_ok {
+			return _make_error(.Invalid_Params, fmt.tprintf("txid %d: invalid hash", i), srv._current_id)
+		}
+		target_txids[i] = h
+	}
+
+	// Optional blockhash
+	block_hash: Hash256
+	have_blockhash := false
+	bh_hex, bh_ok := _get_string_param(params, 1)
+	if bh_ok {
+		h, hh_ok := _hex_to_hash(bh_hex)
+		if !hh_ok {
+			return _make_error(.Invalid_Params, "Invalid blockhash", srv._current_id)
+		}
+		block_hash = h
+		have_blockhash = true
+	}
+
+	if !have_blockhash {
+		// Look up from UTXO set to find block height, then get hash
+		outpoint := wire.Outpoint{hash = target_txids[0], index = 0}
+		coin, found := chain.coins_cache_get(&srv.chain.coins, outpoint)
+		if !found {
+			return _make_error(.Misc_Error, "Transaction not yet in block or UTXO spent", srv._current_id)
+		}
+		h := int(coin.height)
+		if h < 0 || h >= len(srv.chain.active_chain) {
+			return _make_error(.Internal_Error, "Block height out of range", srv._current_id)
+		}
+		block_hash = srv.chain.active_chain[h]
+		have_blockhash = true
+	}
+
+	// Load block
+	entry, found := srv.chain.block_index.entries[block_hash]
+	if !found {
+		return _make_error(.Block_Not_Found, "Block not found", srv._current_id)
+	}
+	if .Has_Data not_in entry.status {
+		return _make_error(.Block_Not_Found, "Block data not available", srv._current_id)
+	}
+
+	loc := storage.Block_Location {
+		file_num    = entry.file_num,
+		data_offset = entry.data_offset,
+		data_size   = entry.data_size,
+	}
+	block, berr := storage.block_db_read(&srv.chain.block_db, loc, context.temp_allocator)
+	if berr != .None {
+		return _make_error(.Internal_Error, "Failed to read block", srv._current_id)
+	}
+
+	// Compute all txids
+	all_txids := make([]Hash256, len(block.txs), context.temp_allocator)
+	for i in 0 ..< len(block.txs) {
+		all_txids[i] = wire.tx_id(&block.txs[i])
+	}
+
+	// Build match set
+	match_set := make(map[Hash256]bool, len(target_txids), context.temp_allocator)
+	for txid in target_txids {
+		match_set[txid] = true
+	}
+
+	// Verify all target txids are in the block
+	for txid in target_txids {
+		found_in_block := false
+		for btxid in all_txids {
+			if btxid == txid {
+				found_in_block = true
+				break
+			}
+		}
+		if !found_in_block {
+			return _make_error(.Misc_Error, "Not all transactions found in specified block", srv._current_id)
+		}
+	}
+
+	// Build partial merkle tree
+	hashes, flags, flags_len := crypto.merkle_build_partial_tree(all_txids, match_set)
+
+	// Serialize proof: header(80) + total_txs(4 LE) + varint(num_hashes) + hashes + varint(num_flag_bytes) + flags
+	w := wire.writer_init(context.temp_allocator)
+
+	// Block header (80 bytes)
+	wire.serialize_block_header(&w, &block.header)
+
+	// total_txs (4 LE)
+	wire.write_u32le(&w, u32(len(block.txs)))
+
+	// varint(num_hashes) + hashes
+	wire.write_compact_size(&w, u64(len(hashes)))
+	for h in hashes {
+		h := h
+		wire.write_bytes(&w, h[:])
+	}
+
+	// varint(num_flag_bytes) + flags
+	wire.write_compact_size(&w, u64(flags_len))
+	wire.write_bytes(&w, flags[:flags_len])
+
+	raw := wire.writer_bytes(&w)
+	return _make_result(json.Value(json.String(_bytes_to_hex(raw))), srv._current_id)
+}
+
+// --- verifytxoutproof ---
+
+_handle_verifytxoutproof :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	proof_hex, ok := _get_string_param(params, 0)
+	if !ok {
+		return _make_error(.Invalid_Params, "Missing proof parameter", srv._current_id)
+	}
+
+	raw, decode_ok := _hex_decode(proof_hex)
+	if !decode_ok {
+		return _make_error(.Invalid_Params, "Invalid hex string", srv._current_id)
+	}
+
+	if len(raw) < 84 { // 80 header + 4 total_txs minimum
+		return _make_error(.Invalid_Params, "Proof too short", srv._current_id)
+	}
+
+	// Deserialize block header (80 bytes)
+	reader := wire.reader_init(raw)
+	header, hdr_err := wire.deserialize_block_header(&reader)
+	if hdr_err != nil {
+		return _make_error(.Invalid_Params, "Failed to deserialize block header", srv._current_id)
+	}
+
+	// total_txs (4 LE)
+	total_txs_val, tt_err := wire.read_u32le(&reader)
+	if tt_err != nil {
+		return _make_error(.Invalid_Params, "Failed to read total_txs", srv._current_id)
+	}
+	total_txs := int(total_txs_val)
+
+	// varint(num_hashes) + hashes
+	num_hashes_val, nh_err := wire.read_compact_size(&reader)
+	if nh_err != nil {
+		return _make_error(.Invalid_Params, "Failed to read num_hashes", srv._current_id)
+	}
+	num_hashes := int(num_hashes_val)
+	proof_hashes := make([]Hash256, num_hashes, context.temp_allocator)
+	for i in 0 ..< num_hashes {
+		h, hb_err := wire.read_hash(&reader)
+		if hb_err != nil {
+			return _make_error(.Invalid_Params, "Failed to read hash", srv._current_id)
+		}
+		proof_hashes[i] = h
+	}
+
+	// varint(num_flag_bytes) + flags
+	num_flags_val, nf_err := wire.read_compact_size(&reader)
+	if nf_err != nil {
+		return _make_error(.Invalid_Params, "Failed to read num_flag_bytes", srv._current_id)
+	}
+	flag_bytes, fb_err := wire.read_bytes(&reader, int(num_flags_val), context.temp_allocator)
+	if fb_err != nil {
+		return _make_error(.Invalid_Params, "Failed to read flags", srv._current_id)
+	}
+
+	// Verify
+	root, matched, verify_ok := crypto.merkle_verify_partial_tree(proof_hashes, flag_bytes, total_txs)
+	if !verify_ok {
+		arr := make(json.Array, 0, context.temp_allocator)
+		return _make_result(json.Value(arr), srv._current_id)
+	}
+
+	// Check root matches header
+	if root != header.merkle_root {
+		arr := make(json.Array, 0, context.temp_allocator)
+		return _make_result(json.Value(arr), srv._current_id)
+	}
+
+	// Verify the block exists in our index
+	block_hash := wire.block_header_hash(&header)
+	entry, bfound := srv.chain.block_index.entries[block_hash]
+	if !bfound || .Valid_Header not_in entry.status {
+		arr := make(json.Array, 0, context.temp_allocator)
+		return _make_result(json.Value(arr), srv._current_id)
+	}
+
+	// Return matched txids
+	arr := make(json.Array, len(matched), context.temp_allocator)
+	for i in 0 ..< len(matched) {
+		arr[i] = json.Value(json.String(_hash_to_hex(matched[i])))
+	}
+	return _make_result(json.Value(arr), srv._current_id)
+}
+
+// --- Format mempool entry (shared helper) ---
+
+_format_mempool_entry :: proc(srv: ^RPC_Server, entry: ^mempool.Mempool_Entry) -> json.Object {
+	obj := make(json.Object, 8, context.temp_allocator)
+	obj["vsize"] = json.Value(json.Integer(entry.vsize))
+	obj["weight"] = json.Value(json.Integer(consensus.get_tx_weight(&entry.tx)))
+	obj["time"] = json.Value(json.Integer(entry.time))
+
+	fees := make(json.Object, 1, context.temp_allocator)
+	fees["base"] = json.Value(json.Float(_satoshi_to_btc(entry.fee)))
+	obj["fees"] = json.Value(fees)
+
+	// depends: parent txids that are also in mempool
+	dep_count := 0
+	for in_idx in 0 ..< len(entry.tx.inputs) {
+		prev_txid := entry.tx.inputs[in_idx].previous_output.hash
+		if mempool.mempool_has(srv.mp, prev_txid) {
+			dep_count += 1
+		}
+	}
+	depends := make(json.Array, dep_count, context.temp_allocator)
+	dep_idx := 0
+	for in_idx in 0 ..< len(entry.tx.inputs) {
+		prev_txid := entry.tx.inputs[in_idx].previous_output.hash
+		if mempool.mempool_has(srv.mp, prev_txid) {
+			depends[dep_idx] = json.Value(json.String(_hash_to_hex(prev_txid)))
+			dep_idx += 1
+		}
+	}
+	obj["depends"] = json.Value(depends)
+
+	replaceable := srv.mp.fullrbf || mempool.tx_signals_rbf(&entry.tx)
+	obj["bip125-replaceable"] = json.Value(json.Boolean(replaceable))
+
+	return obj
+}
+
 // --- Helpers ---
 
 _satoshi_to_btc :: proc(satoshi: i64) -> f64 {
@@ -927,38 +1294,7 @@ _handle_getmempoolentry :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Res
 		return _make_error(.Block_Not_Found, "Transaction not in mempool", srv._current_id)
 	}
 
-	obj := make(json.Object, 8, context.temp_allocator)
-	obj["vsize"] = json.Value(json.Integer(entry.vsize))
-	obj["weight"] = json.Value(json.Integer(consensus.get_tx_weight(&entry.tx)))
-	obj["time"] = json.Value(json.Integer(entry.time))
-
-	fees := make(json.Object, 1, context.temp_allocator)
-	fees["base"] = json.Value(json.Float(_satoshi_to_btc(entry.fee)))
-	obj["fees"] = json.Value(fees)
-
-	// depends: parent txids that are also in mempool
-	dep_count := 0
-	for in_idx in 0 ..< len(entry.tx.inputs) {
-		prev_txid := entry.tx.inputs[in_idx].previous_output.hash
-		if mempool.mempool_has(srv.mp, prev_txid) {
-			dep_count += 1
-		}
-	}
-	depends := make(json.Array, dep_count, context.temp_allocator)
-	dep_idx := 0
-	for in_idx in 0 ..< len(entry.tx.inputs) {
-		prev_txid := entry.tx.inputs[in_idx].previous_output.hash
-		if mempool.mempool_has(srv.mp, prev_txid) {
-			depends[dep_idx] = json.Value(json.String(_hash_to_hex(prev_txid)))
-			dep_idx += 1
-		}
-	}
-	obj["depends"] = json.Value(depends)
-
-	// bip125-replaceable: true if tx signals RBF or fullrbf is enabled
-	replaceable := srv.mp.fullrbf || mempool.tx_signals_rbf(&entry.tx)
-	obj["bip125-replaceable"] = json.Value(json.Boolean(replaceable))
-
+	obj := _format_mempool_entry(srv, entry)
 	return _make_result(json.Value(obj), srv._current_id)
 }
 
@@ -1371,6 +1707,8 @@ RPC_METHODS := [?]string{
 	"getchaintxstats",
 	"getconnectioncount",
 	"getdifficulty",
+	"getmempoolancestors",
+	"getmempooldescendants",
 	"getmempoolentry",
 	"getmempoolinfo",
 	"getmemoryinfo",
@@ -1383,6 +1721,8 @@ RPC_METHODS := [?]string{
 	"getrawtransaction",
 	"getrpcinfo",
 	"gettxout",
+	"gettxoutproof",
+	"gettxoutsetinfo",
 	"help",
 	"logging",
 	"ping",
@@ -1393,6 +1733,7 @@ RPC_METHODS := [?]string{
 	"testmempoolaccept",
 	"uptime",
 	"validateaddress",
+	"verifytxoutproof",
 }
 
 _handle_help :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
@@ -1445,11 +1786,15 @@ _get_method_help :: proc(method: string) -> string {
 	case "uptime":               return "uptime\nReturns the total uptime of the server in seconds."
 	case "decoderawtransaction": return "decoderawtransaction \"hexstring\"\nReturn a JSON object representing the serialized, hex-encoded transaction."
 	case "decodescript":         return "decodescript \"hexstring\"\nDecode a hex-encoded script."
+	case "getmempoolancestors":  return "getmempoolancestors \"txid\" ( verbose )\nReturns all in-mempool ancestors of a transaction."
+	case "getmempooldescendants": return "getmempooldescendants \"txid\" ( verbose )\nReturns all in-mempool descendants of a transaction."
 	case "getmempoolentry":      return "getmempoolentry \"txid\"\nReturns mempool data for given transaction."
 	case "testmempoolaccept":    return "testmempoolaccept [\"rawtx\",...]\nReturns result of mempool acceptance tests."
 	case "getchaintips":         return "getchaintips\nReturn information about all known tips in the block tree."
 	case "getchaintxstats":      return "getchaintxstats ( nblocks \"blockhash\" )\nCompute statistics about the total number and rate of transactions in the chain."
 	case "getblockstats":        return "getblockstats hash_or_height\nCompute per block statistics for a given window."
+	case "gettxoutproof":        return "gettxoutproof [\"txid\",...] ( \"blockhash\" )\nReturns a hex-encoded proof that one or more txids were included in a block."
+	case "gettxoutsetinfo":      return "gettxoutsetinfo\nReturns statistics about the unspent transaction output set."
 	case "help":                 return "help ( \"method\" )\nList all commands, or get help for a specified command."
 	case "getmininginfo":        return "getmininginfo\nReturns a json object containing mining-related information."
 	case "getnetworkhashps":     return "getnetworkhashps ( nblocks height )\nReturns the estimated network hashes per second."
@@ -1463,6 +1808,7 @@ _get_method_help :: proc(method: string) -> string {
 	case "createrawtransaction":        return "createrawtransaction [{\"txid\":\"hex\",\"vout\":n},...] [{\"address\":amount},...] ( locktime replaceable )\nCreate a transaction spending the given inputs and creating new outputs."
 	case "combinerawtransaction":       return "combinerawtransaction [\"hex\",...]\nCombine multiple partially signed transactions into one transaction."
 	case "signrawtransactionwithkey":   return "signrawtransactionwithkey \"hex\" [\"privatekey\",...] ( [{\"txid\":\"hex\",\"vout\":n,\"scriptPubKey\":\"hex\",\"amount\":n},...] \"sighashtype\" )\nSign inputs for raw transaction with provided private keys."
+	case "verifytxoutproof":           return "verifytxoutproof \"proof\"\nVerifies that a proof points to a transaction in a block, returning the txids."
 	}
 	return fmt.tprintf("%s\nNo detailed help available.", method)
 }
