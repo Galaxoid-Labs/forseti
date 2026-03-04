@@ -343,6 +343,11 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 			mempool.mempool_update_tip(sm.mp)
 		}
 
+		// Announce the new block to peers (only when in sync — skip during IBD).
+		if sm.state == .In_Sync {
+			_announce_block(sm, peer_id, block, block_hash, peers)
+		}
+
 		remaining := sm.best_header_height - height
 		progress_pct := f64(height) / f64(max(sm.best_header_height, 1)) * 100.0
 		progress_interval := height / 1000 > prev_height / 1000
@@ -897,21 +902,8 @@ sync_handle_compact_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, cmpct: ^w
 		return
 	}
 
-	// Compute SipHash key: SHA256(block_hash || nonce_le) → k0, k1.
-	key_buf: [40]byte
-	copy(key_buf[:32], block_hash[:])
-	nonce := cmpct.nonce
-	key_buf[32] = u8(nonce)
-	key_buf[33] = u8(nonce >> 8)
-	key_buf[34] = u8(nonce >> 16)
-	key_buf[35] = u8(nonce >> 24)
-	key_buf[36] = u8(nonce >> 32)
-	key_buf[37] = u8(nonce >> 40)
-	key_buf[38] = u8(nonce >> 48)
-	key_buf[39] = u8(nonce >> 56)
-	key_hash := crypto.sha256_hash(key_buf[:])
-	k0 := _u64le(key_hash[:8])
-	k1 := _u64le(key_hash[8:16])
+	// Compute SipHash key from block_hash + nonce.
+	k0, k1 := crypto.compact_block_sipkeys(block_hash, cmpct.nonce)
 
 	// Total tx count = shortids + prefilled.
 	total_txs := len(cmpct.shortids) + len(cmpct.prefilled_txs)
@@ -1213,6 +1205,35 @@ _u64le :: proc(data: []byte) -> u64 {
 		u64(data[5]) << 40 |
 		u64(data[6]) << 48 |
 		u64(data[7]) << 56
+}
+
+// Announce a newly connected block to all peers (except sender).
+// Compact-capable peers get a cmpctblock; sendheaders peers get headers; others get inv.
+_announce_block :: proc(sm: ^Sync_Manager, from_peer: Peer_Id, block: ^wire.Block, block_hash: Hash256,
+	peers: ^map[Peer_Id]^Peer) {
+
+	// Generate a deterministic-ish nonce for the compact block.
+	nonce := u64(time.to_unix_seconds(time.now())) ~ u64(block.header.nonce) ~ u64(block.header.timestamp)
+
+	// Build compact block once (reused for all compact-capable peers).
+	cmpct := wire.create_compact_block(block, nonce, context.temp_allocator)
+
+	// Single-element header slice for BIP130 announcement.
+	hdr_slice := [1]wire.Block_Header{block.header}
+
+	for id, peer in peers {
+		if id == from_peer || peer.state != .Active {
+			continue
+		}
+
+		if peer.compact_version >= 2 && peer.send_compact {
+			peer_send_cmpctblock(peer, &cmpct)
+		} else if peer.send_headers {
+			peer_send_block_headers(peer, hdr_slice[:])
+		} else {
+			peer_send_block_inv(peer, block_hash)
+		}
+	}
 }
 
 // Build the download queue: all block index entries that have Valid_Header but not Has_Data.

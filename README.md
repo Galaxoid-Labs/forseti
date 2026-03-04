@@ -6,12 +6,12 @@ This is an educational/experimental project. It implements the core components o
 
 ## Status
 
-**272 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Builds on macOS and Linux.
+**275 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Builds on macOS and Linux.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
 | 0 | Crypto + C Bindings | Complete (31 tests) |
-| 1 | Wire Protocol + Serialization | Complete (35 tests) |
+| 1 | Wire Protocol + Serialization | Complete (38 tests) |
 | 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH, Taproot) | Complete (50 tests) |
 | 3 | Consensus Rules + Block Validation | Complete (22 tests) |
 | 4 | UTXO Set + Chain State | Complete (20 tests) |
@@ -42,7 +42,7 @@ This is an educational/experimental project. It implements the core components o
 | 29 | Blockchain RPC Expansion (+5 methods) | Complete |
 | 30 | BIP 68 + BIP 113 Lock-time Enforcement | Complete |
 | 31 | Mempool Configuration (Bitcoin Core parity) | Complete |
-| 32 | Compact Block Relay (BIP152) | Complete |
+| 32 | Compact Block Relay — receive + send (BIP152) | Complete |
 | 33 | RPC Authentication (cookie + Basic Auth) | Complete |
 | 34 | BIP 133 feefilter + BIP 339 wtxid relay | Complete |
 | 35 | BIP 155 addr relay + addrv2 | Complete |
@@ -406,12 +406,12 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 ## Testing
 
 ```bash
-# Run all 272 tests
+# Run all 275 tests
 make test
 
 # Test individual packages
 odin test crypto          # 31 tests
-odin test wire            # 35 tests
+odin test wire            # 38 tests
 odin test script          # 50 tests (use -define:ODIN_TEST_THREADS=1 if flaky)
 odin test consensus       # 22 tests
 odin test storage         # 16 tests
@@ -481,7 +481,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Graceful shutdown**: SIGINT/SIGTERM triggers mempool save, atomic UTXO + metadata flush to LevelDB, then clean exit
 - **Headers-first sync**: Single lead peer downloads headers via `getheaders`/`headers`, with automatic failover if the lead disconnects. Headers are batched into single WriteBatch transactions (up to 2000 per batch)
 - **Multi-peer block download**: Fastest-first block assignment across all active peers (up to 8) — peers are sorted by throughput and the fastest peer gets tip-adjacent blocks so slow peers can't block chain progress. Bandwidth-based scoring: fast peers get more slots (up to 16), slow peers fewer (minimum 4), new peers get a trial allocation of 8 blocks
-- **Compact block relay (BIP152)**: Receive-side implementation — negotiates compact block v2 (wtxid-based short IDs) with peers, reconstructs blocks from mempool using SipHash-2-4 short ID matching, requests missing transactions via `getblocktxn`/`blocktxn`, falls back to full block download after 10s timeout. Reduces block relay bandwidth by ~90% when mempool is populated
+- **Compact block relay (BIP152)**: Full send + receive implementation — negotiates compact block v2 (wtxid-based short IDs) with peers. **Receive**: reconstructs blocks from mempool using SipHash-2-4 short ID matching, requests missing transactions via `getblocktxn`/`blocktxn`, falls back to full block download after 10s timeout. **Send**: announces newly connected blocks to compact-capable peers via `cmpctblock`, `sendheaders` peers via `headers`, and legacy peers via `inv`. Serves `getblocktxn` requests by reading blocks from flat files. Serves full blocks via `getdata`. Reduces block relay bandwidth by ~90% when mempool is populated
 - **Steady-state sync**: BIP130 `sendheaders` for header announcements, periodic `getheaders` polling (120s), and `inv`-triggered header requests keep the node up-to-date after IBD
 - **Adaptive stall detection**: Bitcoin Core-style stall handling — default 10s timeout, doubles on disconnect (max 64s), decays by 0.85x on successful block connects. Slow peers (throughput <10% of fastest) are evicted after a trial period. Disconnected peers are replaced via DNS discovery
 - **Peer discovery + addr relay (BIP155)**: DNS seeds populate an address manager at startup. After handshake, `sendaddrv2` is negotiated and `getaddr` requests peers' address lists. Inbound `addr`/`addrv2` messages add to the address manager (FNV-1a dedup, 5000 entry cap). Small announcements (≤10 entries) are forwarded to 1-2 random peers with automatic v1↔v2 format conversion. Replacement peers are drawn from the address manager. Configurable via `--maxconnections=N` (default 8)

@@ -1,5 +1,7 @@
 package wire
 
+import "../crypto"
+
 // BIP152 compact block relay message types.
 
 Prefilled_Tx :: struct {
@@ -137,6 +139,37 @@ deserialize_block_txn :: proc(r: ^Wire_Reader, allocator := context.allocator) -
 		msg.txs[i] = deserialize_tx(r, allocator) or_return
 	}
 	return msg, nil
+}
+
+// --- Compact block creation ---
+
+// Build a Compact_Block_Message from a full block.
+// Coinbase (index 0) is prefilled; remaining txs become SipHash shortids.
+create_compact_block :: proc(block: ^Block, nonce: u64, allocator := context.allocator) -> Compact_Block_Message {
+	block_hash := block_header_hash(&block.header)
+	k0, k1 := crypto.compact_block_sipkeys(block_hash, nonce)
+
+	tx_count := len(block.txs)
+
+	// Prefill coinbase at index 0.
+	prefilled := make([]Prefilled_Tx, 1, allocator)
+	prefilled[0] = Prefilled_Tx{index = 0, tx = block.txs[0]}
+
+	// Compute shortids for txs 1..N-1.
+	sid_count := max(tx_count - 1, 0)
+	shortids := make([]u64, sid_count, allocator)
+	for i in 1 ..< tx_count {
+		tx := block.txs[i]
+		wtxid := tx_witness_id(&tx)
+		shortids[i - 1] = crypto.compact_block_shortid(k0, k1, wtxid)
+	}
+
+	return Compact_Block_Message{
+		header        = block.header,
+		nonce         = nonce,
+		shortids      = shortids,
+		prefilled_txs = prefilled,
+	}
 }
 
 // --- Helpers ---

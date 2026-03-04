@@ -784,6 +784,145 @@ test_block_txn_roundtrip :: proc(t: ^testing.T) {
 	testing.expect_value(t, msg2.txs[0].outputs[0].value, i64(1000))
 }
 
+// --- BIP152 Compact block creation tests ---
+
+@(test)
+test_compact_block_sipkeys :: proc(t: ^testing.T) {
+	// Verify compact_block_sipkeys matches manual key derivation.
+	block_hash: Hash256
+	block_hash[0] = 0x42
+	block_hash[31] = 0xFF
+	nonce: u64 = 0xDEADBEEFCAFE
+
+	k0, k1 := crypto.compact_block_sipkeys(block_hash, nonce)
+
+	// Manual computation: SHA256(block_hash || nonce_le) -> k0, k1
+	buf: [40]byte
+	copy(buf[:32], block_hash[:])
+	buf[32] = u8(nonce)
+	buf[33] = u8(nonce >> 8)
+	buf[34] = u8(nonce >> 16)
+	buf[35] = u8(nonce >> 24)
+	buf[36] = u8(nonce >> 32)
+	buf[37] = u8(nonce >> 40)
+	buf[38] = u8(nonce >> 48)
+	buf[39] = u8(nonce >> 56)
+	h := crypto.sha256_hash(buf[:])
+
+	expected_k0 := u64(h[0]) | u64(h[1])<<8 | u64(h[2])<<16 | u64(h[3])<<24 |
+		u64(h[4])<<32 | u64(h[5])<<40 | u64(h[6])<<48 | u64(h[7])<<56
+	expected_k1 := u64(h[8]) | u64(h[9])<<8 | u64(h[10])<<16 | u64(h[11])<<24 |
+		u64(h[12])<<32 | u64(h[13])<<40 | u64(h[14])<<48 | u64(h[15])<<56
+
+	testing.expect_value(t, k0, expected_k0)
+	testing.expect_value(t, k1, expected_k1)
+}
+
+@(test)
+test_create_compact_block :: proc(t: ^testing.T) {
+	// Build a block with coinbase + 2 regular txs.
+	cb_inputs := make([]Tx_In, 1, context.temp_allocator)
+	cb_inputs[0] = Tx_In{
+		previous_output = Outpoint{hash = HASH_ZERO, index = 0xffffffff},
+		script_sig = hex_decode("04ffff001d0101"),
+		sequence = 0xffffffff,
+	}
+	cb_outputs := make([]Tx_Out, 1, context.temp_allocator)
+	cb_outputs[0] = Tx_Out{value = 50_0000_0000, script_pubkey = hex_decode("6a")}
+
+	// Regular tx 1
+	tx1_inputs := make([]Tx_In, 1, context.temp_allocator)
+	tx1_inputs[0] = Tx_In{
+		previous_output = Outpoint{index = 0},
+		script_sig = hex_decode("00"),
+		sequence = 0xffffffff,
+	}
+	tx1_outputs := make([]Tx_Out, 1, context.temp_allocator)
+	tx1_outputs[0] = Tx_Out{value = 1000, script_pubkey = hex_decode("6a")}
+
+	// Regular tx 2
+	tx2_inputs := make([]Tx_In, 1, context.temp_allocator)
+	tx2_inputs[0] = Tx_In{
+		previous_output = Outpoint{index = 1},
+		script_sig = hex_decode("0102"),
+		sequence = 0xfffffffe,
+	}
+	tx2_outputs := make([]Tx_Out, 1, context.temp_allocator)
+	tx2_outputs[0] = Tx_Out{value = 2000, script_pubkey = hex_decode("51")}
+
+	txs := make([]Tx, 3, context.temp_allocator)
+	txs[0] = Tx{version = 1, inputs = cb_inputs, outputs = cb_outputs, locktime = 0}
+	txs[1] = Tx{version = 2, inputs = tx1_inputs, outputs = tx1_outputs, locktime = 0}
+	txs[2] = Tx{version = 2, inputs = tx2_inputs, outputs = tx2_outputs, locktime = 100}
+
+	block := Block{
+		header = Block_Header{version = 1, timestamp = 1231006505, bits = 0x1d00ffff, nonce = 2083236893},
+		txs = txs,
+	}
+
+	nonce: u64 = 0xCAFEBABE
+	cmpct := create_compact_block(&block, nonce, context.temp_allocator)
+
+	// Verify structure.
+	testing.expect_value(t, cmpct.nonce, nonce)
+	testing.expect_value(t, cmpct.header.version, i32(1))
+	testing.expect_value(t, len(cmpct.prefilled_txs), 1)
+	testing.expect_value(t, cmpct.prefilled_txs[0].index, u64(0))
+	testing.expect_value(t, cmpct.prefilled_txs[0].tx.outputs[0].value, i64(50_0000_0000))
+	testing.expect_value(t, len(cmpct.shortids), 2)
+
+	// Verify shortids match independent computation.
+	block_hash := block_header_hash(&block.header)
+	k0, k1 := crypto.compact_block_sipkeys(block_hash, nonce)
+
+	tx1 := txs[1]
+	wtxid1 := tx_witness_id(&tx1)
+	expected_sid1 := crypto.compact_block_shortid(k0, k1, wtxid1)
+	testing.expect_value(t, cmpct.shortids[0], expected_sid1)
+
+	tx2 := txs[2]
+	wtxid2 := tx_witness_id(&tx2)
+	expected_sid2 := crypto.compact_block_shortid(k0, k1, wtxid2)
+	testing.expect_value(t, cmpct.shortids[1], expected_sid2)
+
+	// Roundtrip: serialize → deserialize.
+	w := writer_init(context.temp_allocator)
+	serialize_compact_block(&w, &cmpct)
+	r := reader_init(writer_bytes(&w))
+	cmpct2, err := deserialize_compact_block(&r, context.temp_allocator)
+	testing.expect(t, err == nil, "deserialize should succeed")
+	testing.expect_value(t, len(cmpct2.shortids), 2)
+	testing.expect_value(t, cmpct2.shortids[0], expected_sid1)
+	testing.expect_value(t, cmpct2.shortids[1], expected_sid2)
+	testing.expect_value(t, len(cmpct2.prefilled_txs), 1)
+}
+
+@(test)
+test_create_compact_block_coinbase_only :: proc(t: ^testing.T) {
+	// Block with only the coinbase tx → 0 shortids, 1 prefilled.
+	cb_inputs := make([]Tx_In, 1, context.temp_allocator)
+	cb_inputs[0] = Tx_In{
+		previous_output = Outpoint{hash = HASH_ZERO, index = 0xffffffff},
+		script_sig = hex_decode("04ffff001d0101"),
+		sequence = 0xffffffff,
+	}
+	cb_outputs := make([]Tx_Out, 1, context.temp_allocator)
+	cb_outputs[0] = Tx_Out{value = 50_0000_0000, script_pubkey = hex_decode("6a")}
+
+	txs := make([]Tx, 1, context.temp_allocator)
+	txs[0] = Tx{version = 1, inputs = cb_inputs, outputs = cb_outputs, locktime = 0}
+
+	block := Block{
+		header = Block_Header{version = 1, timestamp = 1000, bits = 0x1d00ffff, nonce = 1},
+		txs = txs,
+	}
+
+	cmpct := create_compact_block(&block, 12345, context.temp_allocator)
+	testing.expect_value(t, len(cmpct.shortids), 0)
+	testing.expect_value(t, len(cmpct.prefilled_txs), 1)
+	testing.expect_value(t, cmpct.prefilled_txs[0].index, u64(0))
+}
+
 // --- BIP155 addrv2 message tests ---
 
 @(test)

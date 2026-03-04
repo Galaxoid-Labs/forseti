@@ -52,6 +52,25 @@ siphash_2_4 :: proc(k0, k1: u64, data: []byte) -> u64 {
 	return v0 ~ v1 ~ v2 ~ v3
 }
 
+// BIP152 SipHash key derivation: SHA256(block_hash || nonce_le) → k0, k1.
+compact_block_sipkeys :: proc(block_hash: Hash256, nonce: u64) -> (k0, k1: u64) {
+	block_hash := block_hash
+	buf: [40]byte
+	copy(buf[:32], block_hash[:])
+	buf[32] = u8(nonce)
+	buf[33] = u8(nonce >> 8)
+	buf[34] = u8(nonce >> 16)
+	buf[35] = u8(nonce >> 24)
+	buf[36] = u8(nonce >> 32)
+	buf[37] = u8(nonce >> 40)
+	buf[38] = u8(nonce >> 48)
+	buf[39] = u8(nonce >> 56)
+	h := sha256_hash(buf[:])
+	k0 = _siphash_u64le(h[:8])
+	k1 = _siphash_u64le(h[8:16])
+	return k0, k1
+}
+
 // BIP152 short ID: low 6 bytes of SipHash-2-4(k0, k1, wtxid).
 // Key derivation: SHA256(block_header_hash || nonce_le) → k0 = bytes[0:8] LE, k1 = bytes[8:16] LE.
 compact_block_shortid :: proc(k0, k1: u64, wtxid: Hash256) -> u64 {

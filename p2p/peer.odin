@@ -404,6 +404,41 @@ peer_send_sendcmpct :: proc(peer: ^Peer, announce: bool, version: u64) -> Net_Er
 	return peer_send_message(peer, wire.CMD_SENDCMPCT, wire.writer_bytes(&w))
 }
 
+// Send cmpctblock (BIP152) announcement to a peer.
+peer_send_cmpctblock :: proc(peer: ^Peer, msg: ^wire.Compact_Block_Message) -> Net_Error {
+	w := wire.writer_init()
+	defer wire.writer_destroy(&w)
+	wire.serialize_compact_block(&w, msg)
+	return peer_send_message(peer, wire.CMD_CMPCTBLOCK, wire.writer_bytes(&w))
+}
+
+// Send blocktxn (BIP152) response to a peer's getblocktxn request.
+peer_send_blocktxn :: proc(peer: ^Peer, msg: ^wire.Block_Txn_Message) -> Net_Error {
+	w := wire.writer_init()
+	defer wire.writer_destroy(&w)
+	wire.serialize_block_txn(&w, msg)
+	return peer_send_message(peer, wire.CMD_BLOCKTXN, wire.writer_bytes(&w))
+}
+
+// Send headers (BIP130) block announcement — single-element header list.
+peer_send_block_headers :: proc(peer: ^Peer, headers: []wire.Block_Header) -> Net_Error {
+	msg := wire.Headers_Message{headers = headers}
+	w := wire.writer_init()
+	defer wire.writer_destroy(&w)
+	wire.serialize_headers(&w, &msg)
+	return peer_send_message(peer, wire.CMD_HEADERS, wire.writer_bytes(&w))
+}
+
+// Send inv for a block (legacy announcement).
+peer_send_block_inv :: proc(peer: ^Peer, block_hash: Hash256) -> Net_Error {
+	inv := [1]wire.Inv_Vector{{type = .Block, hash = block_hash}}
+	inv_msg := wire.Inv_Message{inventory = inv[:]}
+	w := wire.writer_init()
+	defer wire.writer_destroy(&w)
+	wire.serialize_inv(&w, &inv_msg)
+	return peer_send_message(peer, wire.CMD_INV, wire.writer_bytes(&w))
+}
+
 // Send getblocktxn (BIP152) to request missing transactions.
 peer_send_getblocktxn :: proc(peer: ^Peer, block_hash: Hash256, indices: []u64) -> Net_Error {
 	msg := wire.Get_Block_Txn_Message{block_hash = block_hash, indices = indices}

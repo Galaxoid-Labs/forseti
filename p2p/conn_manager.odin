@@ -11,6 +11,7 @@ import "core:time"
 import "../chain"
 import "../consensus"
 import "../mempool"
+import "../storage"
 import "../wire"
 
 Conn_Manager :: struct {
@@ -361,7 +362,7 @@ _conn_manager_dispatch :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, cmd: string,
 	case wire.CMD_BLOCKTXN:
 		_conn_manager_handle_blocktxn(cm, peer_id, payload)
 	case wire.CMD_GETBLOCKTXN:
-		// Receive-only: we don't serve compact block requests.
+		_conn_manager_handle_getblocktxn(cm, peer_id, payload)
 	case wire.CMD_FEEFILTER:
 		_conn_manager_handle_feefilter(cm, peer_id, payload)
 	case wire.CMD_WTXIDRELAY:
@@ -647,6 +648,22 @@ _conn_manager_handle_getdata :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 			w := wire.writer_init(context.temp_allocator)
 			wire.serialize_tx(&w, &entry.tx)
 			peer_send_message(peer, wire.CMD_TX, wire.writer_bytes(&w))
+		case .Block, .Witness_Block:
+			// Serve full blocks from flat files.
+			idx_entry, known := cm.chain.block_index.entries[iv.hash]
+			if !known || .Has_Data not_in idx_entry.status {
+				continue
+			}
+			loc := storage.Block_Location{
+				file_num    = idx_entry.file_num,
+				data_offset = idx_entry.data_offset,
+				data_size   = idx_entry.data_size,
+			}
+			raw, rerr := storage.block_db_read_raw(&cm.chain.block_db, loc, context.temp_allocator)
+			if rerr != .None {
+				continue
+			}
+			peer_send_message(peer, wire.CMD_BLOCK, raw)
 		}
 	}
 }
@@ -737,6 +754,50 @@ _conn_manager_handle_blocktxn :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, paylo
 	}
 
 	sync_handle_block_txn(&cm.sync_mgr, peer_id, &msg, &cm.peers)
+}
+
+// Handle inbound getblocktxn (BIP152): serve requested transactions from a block.
+_conn_manager_handle_getblocktxn :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []byte) {
+	peer, found := cm.peers[peer_id]
+	if !found || peer.state != .Active {
+		return
+	}
+
+	r := wire.reader_init(payload)
+	msg, err := wire.deserialize_get_block_txn(&r, context.temp_allocator)
+	if err != .None {
+		return
+	}
+
+	// Look up the block in the index.
+	idx_entry, known := cm.chain.block_index.entries[msg.block_hash]
+	if !known || .Has_Data not_in idx_entry.status {
+		return
+	}
+
+	// Read the full block from flat files.
+	loc := storage.Block_Location{
+		file_num    = idx_entry.file_num,
+		data_offset = idx_entry.data_offset,
+		data_size   = idx_entry.data_size,
+	}
+	block, rerr := storage.block_db_read(&cm.chain.block_db, loc, context.temp_allocator)
+	if rerr != .None {
+		return
+	}
+
+	// Extract requested txs.
+	txs := make([]wire.Tx, len(msg.indices), context.temp_allocator)
+	for i in 0 ..< len(msg.indices) {
+		idx := int(msg.indices[i])
+		if idx >= len(block.txs) {
+			return // Invalid index — abort.
+		}
+		txs[i] = block.txs[idx]
+	}
+
+	response := wire.Block_Txn_Message{block_hash = msg.block_hash, txs = txs}
+	peer_send_blocktxn(peer, &response)
 }
 
 // Handle inbound feefilter (BIP133): store peer's minimum fee rate.
