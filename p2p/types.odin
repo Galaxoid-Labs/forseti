@@ -70,6 +70,8 @@ BLOCK_STALL_TIMEOUT_MAX     :: 64  // Max after repeated doublings
 STALL_CHECK_INTERVAL_SECS   :: 1
 HEADER_REQUEST_TIMEOUT_SECS :: 60
 HEADER_REFRESH_SECS         :: 120  // Periodic getheaders while In_Sync
+COMPACT_BLOCK_VERSION       :: u64(2) // v2 = wtxid-based short IDs (BIP152)
+COMPACT_BLOCK_TIMEOUT       :: 10     // seconds before fallback to full block
 
 // Services flags.
 NODE_NETWORK         :: u64(1)

@@ -29,6 +29,10 @@ Peer :: struct {
 	last_recv:      i64,   // unix timestamp of last message received
 	bytes_sent:     i64,   // total bytes sent
 	bytes_recv:     i64,   // total bytes received
+	// BIP152 compact block support
+	compact_version:  u64,  // 0 = not negotiated, 2 = v2
+	compact_announce: bool, // peer will send us cmpctblock proactively
+	send_compact:     bool, // we've sent sendcmpct to this peer
 	// nbio fields
 	read_buf:       [65536]byte,  // fixed buffer for async recv
 	send_queue:     [dynamic][]byte, // queued outbound messages (owned bytes)
@@ -380,4 +384,23 @@ peer_send_getdata :: proc(peer: ^Peer, inventory: []wire.Inv_Vector) -> Net_Erro
 // Send sendheaders (BIP130, empty payload).
 peer_send_sendheaders :: proc(peer: ^Peer) -> Net_Error {
 	return peer_send_message(peer, wire.CMD_SENDHEADERS, nil)
+}
+
+// Send sendcmpct (BIP152).
+peer_send_sendcmpct :: proc(peer: ^Peer, announce: bool, version: u64) -> Net_Error {
+	msg := wire.Send_Compact_Message{announce = announce, version = version}
+	w := wire.writer_init()
+	defer wire.writer_destroy(&w)
+	wire.serialize_sendcmpct(&w, &msg)
+	peer.send_compact = true
+	return peer_send_message(peer, wire.CMD_SENDCMPCT, wire.writer_bytes(&w))
+}
+
+// Send getblocktxn (BIP152) to request missing transactions.
+peer_send_getblocktxn :: proc(peer: ^Peer, block_hash: Hash256, indices: []u64) -> Net_Error {
+	msg := wire.Get_Block_Txn_Message{block_hash = block_hash, indices = indices}
+	w := wire.writer_init()
+	defer wire.writer_destroy(&w)
+	wire.serialize_get_block_txn(&w, &msg)
+	return peer_send_message(peer, wire.CMD_GETBLOCKTXN, wire.writer_bytes(&w))
 }

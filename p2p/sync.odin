@@ -8,6 +8,7 @@ import "core:time"
 
 import "../chain"
 import "../consensus"
+import "../crypto"
 import "../mempool"
 import "../storage"
 import "../wire"
@@ -27,6 +28,20 @@ Peer_Sync_State :: struct {
 	last_block_received: i64,
 	blocks_delivered:    int,
 	tracking_since:      i64,
+}
+
+Compact_Block_State :: struct {
+	header:          wire.Block_Header,
+	block_hash:      Hash256,
+	sipkey_k0:       u64,
+	sipkey_k1:       u64,
+	txs:             []^wire.Tx,  // nil entries = missing
+	txs_owned:       []wire.Tx,   // heap-cloned prefilled txs (owned memory)
+	total_txs:       int,
+	missing_count:   int,
+	missing_indices: []u64,
+	from_peer:       Peer_Id,
+	requested_at:    i64,
 }
 
 Sync_Manager :: struct {
@@ -49,6 +64,7 @@ Sync_Manager :: struct {
 	header_lead_peer:   Peer_Id, // fastest responder becomes lead for header sync
 	stall_timeout:      i64,     // adaptive stall timeout (seconds), doubles on disconnect, decays on connect
 	last_disconnect:    i64,     // timestamp of last stall disconnect (rate limit)
+	compact_state:      ^Compact_Block_State, // pending compact block reconstruction (nil = none)
 }
 
 sync_manager_init :: proc(sm: ^Sync_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) {
@@ -74,6 +90,7 @@ sync_manager_init :: proc(sm: ^Sync_Manager, cs: ^chain.Chain_State, params: ^co
 }
 
 sync_manager_destroy :: proc(sm: ^Sync_Manager) {
+	_compact_state_destroy(sm)
 	delete(sm.blocks_in_flight)
 	delete(sm.block_request_time)
 	delete(sm.blocks_to_download)
@@ -845,6 +862,357 @@ _request_announced_blocks :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, headers: 
 		log.infof("Requesting %d announced block(s) from peer %d", len(inv), peer_id)
 		peer_send_getdata(peer, inv[:])
 	}
+}
+
+// --- BIP152 Compact Block Reconstruction ---
+
+// Handle an inbound compact block message. Attempts to reconstruct the full block
+// from mempool transactions. If transactions are missing, sends getblocktxn.
+sync_handle_compact_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, cmpct: ^wire.Compact_Block_Message,
+	peers: ^map[Peer_Id]^Peer, mp: ^mempool.Mempool) {
+
+	// Only process compact blocks when in sync (mempool is empty during IBD).
+	if sm.state != .In_Sync {
+		return
+	}
+
+	// Already processing a compact block — ignore.
+	if sm.compact_state != nil {
+		return
+	}
+
+	block_hash := wire.block_header_hash(&cmpct.header)
+
+	// Validate header.
+	hdr := cmpct.header
+	_, herr := chain.accept_block_header(sm.chain, &hdr)
+	if herr != .None {
+		log.debugf("Compact block header rejected: %v", herr)
+		return
+	}
+
+	// Already have block data — ignore.
+	entry, known := sm.chain.block_index.entries[block_hash]
+	if known && .Has_Data in entry.status {
+		return
+	}
+
+	// Compute SipHash key: SHA256(block_hash || nonce_le) → k0, k1.
+	key_buf: [40]byte
+	copy(key_buf[:32], block_hash[:])
+	nonce := cmpct.nonce
+	key_buf[32] = u8(nonce)
+	key_buf[33] = u8(nonce >> 8)
+	key_buf[34] = u8(nonce >> 16)
+	key_buf[35] = u8(nonce >> 24)
+	key_buf[36] = u8(nonce >> 32)
+	key_buf[37] = u8(nonce >> 40)
+	key_buf[38] = u8(nonce >> 48)
+	key_buf[39] = u8(nonce >> 56)
+	key_hash := crypto.sha256_hash(key_buf[:])
+	k0 := _u64le(key_hash[:8])
+	k1 := _u64le(key_hash[8:16])
+
+	// Total tx count = shortids + prefilled.
+	total_txs := len(cmpct.shortids) + len(cmpct.prefilled_txs)
+	if total_txs == 0 {
+		return
+	}
+
+	// Build shortid→mempool tx map.
+	sid_map := make(map[u64]^wire.Tx, len(cmpct.shortids) * 2, context.temp_allocator)
+	collisions := make(map[u64]bool, 0, context.temp_allocator)
+
+	if mp != nil {
+		for _, mp_entry in mp.entries {
+			wtxid := wire.tx_witness_id(&mp_entry.tx)
+			sid := crypto.compact_block_shortid(k0, k1, wtxid)
+			// Handle collision: if two mempool txs produce same shortid, mark as ambiguous.
+			if sid in sid_map {
+				collisions[sid] = true
+			} else {
+				sid_map[sid] = &mp_entry.tx
+			}
+		}
+	}
+	// Remove collisions from map.
+	for sid in collisions {
+		delete_key(&sid_map, sid)
+	}
+
+	// Allocate tx pointer array and fill from prefilled + shortids.
+	tx_ptrs := make([]^wire.Tx, total_txs)
+	// Deep-clone prefilled txs to heap (compact block data is temp-allocated).
+	txs_owned := make([]wire.Tx, len(cmpct.prefilled_txs))
+
+	// Build a set of prefilled indices for position mapping.
+	prefilled_positions := make(map[u64]int, len(cmpct.prefilled_txs), context.temp_allocator)
+	for i in 0 ..< len(cmpct.prefilled_txs) {
+		prefilled_positions[cmpct.prefilled_txs[i].index] = i
+	}
+
+	// Fill tx_ptrs: iterate 0..total_txs, for each position check if prefilled or shortid.
+	shortid_cursor := 0
+	missing_count := 0
+	missing_indices := make([dynamic]u64, 0, 16, context.temp_allocator)
+
+	for pos in 0 ..< total_txs {
+		pi, is_prefilled := prefilled_positions[u64(pos)]
+		if is_prefilled {
+			// Deep clone the prefilled tx.
+			txs_owned[pi] = _clone_tx(&cmpct.prefilled_txs[pi].tx)
+			tx_ptrs[pos] = &txs_owned[pi]
+		} else {
+			// Map from shortid.
+			if shortid_cursor < len(cmpct.shortids) {
+				sid := cmpct.shortids[shortid_cursor]
+				shortid_cursor += 1
+				mp_tx, found := sid_map[sid]
+				if found {
+					tx_ptrs[pos] = mp_tx
+				} else {
+					missing_count += 1
+					append(&missing_indices, u64(pos))
+				}
+			} else {
+				missing_count += 1
+				append(&missing_indices, u64(pos))
+			}
+		}
+	}
+
+	if missing_count == 0 {
+		// All txs found — assemble and process block.
+		block := _assemble_block(&cmpct.header, tx_ptrs)
+		log.infof("Compact block reconstructed from mempool (%d txs)", total_txs)
+
+		// IMPORTANT: free owned txs AFTER sync_handle_block, because the
+		// assembled block's tx slices point into txs_owned/mempool memory.
+		sync_handle_block(sm, peer_id, &block, peers)
+
+		for i in 0 ..< len(txs_owned) {
+			_free_cloned_tx(&txs_owned[i])
+		}
+		delete(txs_owned)
+		delete(tx_ptrs)
+		return
+	}
+
+	// Missing txs — save state, send getblocktxn.
+	now := time.to_unix_seconds(time.now())
+	state := new(Compact_Block_State)
+	state.header = cmpct.header
+	state.block_hash = block_hash
+	state.sipkey_k0 = k0
+	state.sipkey_k1 = k1
+	state.txs = tx_ptrs
+	state.txs_owned = txs_owned
+	state.total_txs = total_txs
+	state.missing_count = missing_count
+	state.missing_indices = make([]u64, len(missing_indices))
+	copy(state.missing_indices, missing_indices[:])
+	state.from_peer = peer_id
+	state.requested_at = now
+
+	sm.compact_state = state
+
+	peer, found := peers[peer_id]
+	if found {
+		log.infof("Sending getblocktxn for %d missing txs", missing_count)
+		peer_send_getblocktxn(peer, block_hash, state.missing_indices)
+	} else {
+		// Peer gone — fallback.
+		_compact_state_fallback(sm, peers)
+	}
+}
+
+// Handle blocktxn response: fill missing slots and assemble block.
+sync_handle_block_txn :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, msg: ^wire.Block_Txn_Message, peers: ^map[Peer_Id]^Peer) {
+	cs := sm.compact_state
+	if cs == nil {
+		return
+	}
+
+	// Verify block hash matches.
+	if cs.block_hash != msg.block_hash {
+		log.warnf("blocktxn hash mismatch — ignoring")
+		return
+	}
+
+	// Verify tx count matches missing count.
+	if len(msg.txs) != cs.missing_count {
+		log.warnf("blocktxn tx count mismatch: got %d, want %d — falling back", len(msg.txs), cs.missing_count)
+		_compact_state_fallback(sm, peers)
+		return
+	}
+
+	// Extend owned txs array to include blocktxn responses.
+	old_owned := cs.txs_owned
+	new_owned := make([]wire.Tx, len(old_owned) + len(msg.txs))
+	copy(new_owned, old_owned)
+	owned_cursor := len(old_owned)
+
+	// Fill missing slots.
+	for i in 0 ..< cs.missing_count {
+		idx := cs.missing_indices[i]
+		new_owned[owned_cursor] = _clone_tx(&msg.txs[i])
+		cs.txs[idx] = &new_owned[owned_cursor]
+		owned_cursor += 1
+	}
+
+	// Free old owned array (new one supersedes it).
+	delete(old_owned)
+	cs.txs_owned = new_owned
+
+	// Assemble block.
+	block := _assemble_block(&cs.header, cs.txs)
+	log.infof("Compact block reconstructed after blocktxn (%d txs, %d were missing)", cs.total_txs, cs.missing_count)
+
+	from_peer := cs.from_peer
+
+	// IMPORTANT: destroy compact state AFTER sync_handle_block, because the
+	// assembled block's tx slices point into cs.txs_owned memory. Destroying
+	// before store_block would be use-after-free.
+	sync_handle_block(sm, from_peer, &block, peers)
+	_compact_state_destroy(sm)
+}
+
+// Assemble a full block from header + array of tx pointers.
+_assemble_block :: proc(header: ^wire.Block_Header, tx_ptrs: []^wire.Tx) -> wire.Block {
+	txs := make([]wire.Tx, len(tx_ptrs), context.temp_allocator)
+	for i in 0 ..< len(tx_ptrs) {
+		if tx_ptrs[i] != nil {
+			txs[i] = tx_ptrs[i]^
+		}
+	}
+	return wire.Block{header = header^, txs = txs}
+}
+
+// Fallback: request full block via getdata, destroy compact state.
+_compact_state_fallback :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
+	cs := sm.compact_state
+	if cs == nil {
+		return
+	}
+
+	block_hash := cs.block_hash
+	from_peer := cs.from_peer
+	_compact_state_destroy(sm)
+
+	// Request full block from the same peer (or any active peer).
+	inv := [1]wire.Inv_Vector{{type = .Witness_Block, hash = block_hash}}
+	peer, found := peers[from_peer]
+	if found && peer.state == .Active {
+		peer_send_getdata(peer, inv[:])
+	} else {
+		for _, p in peers {
+			if p.state == .Active {
+				peer_send_getdata(p, inv[:])
+				break
+			}
+		}
+	}
+}
+
+// Free compact block state and all owned resources.
+_compact_state_destroy :: proc(sm: ^Sync_Manager) {
+	cs := sm.compact_state
+	if cs == nil {
+		return
+	}
+
+	// Free owned (heap-cloned) txs.
+	for i in 0 ..< len(cs.txs_owned) {
+		_free_cloned_tx(&cs.txs_owned[i])
+	}
+	delete(cs.txs_owned)
+	delete(cs.txs)
+	delete(cs.missing_indices)
+	free(cs)
+	sm.compact_state = nil
+}
+
+// Deep-clone a transaction to heap.
+_clone_tx :: proc(tx: ^wire.Tx) -> wire.Tx {
+	result: wire.Tx
+	result.version = tx.version
+	result.locktime = tx.locktime
+
+	// Clone inputs.
+	result.inputs = make([]wire.Tx_In, len(tx.inputs))
+	for i in 0 ..< len(tx.inputs) {
+		result.inputs[i].previous_output = tx.inputs[i].previous_output
+		result.inputs[i].sequence = tx.inputs[i].sequence
+		if len(tx.inputs[i].script_sig) > 0 {
+			result.inputs[i].script_sig = make([]byte, len(tx.inputs[i].script_sig))
+			copy(result.inputs[i].script_sig, tx.inputs[i].script_sig)
+		}
+	}
+
+	// Clone outputs.
+	result.outputs = make([]wire.Tx_Out, len(tx.outputs))
+	for i in 0 ..< len(tx.outputs) {
+		result.outputs[i].value = tx.outputs[i].value
+		if len(tx.outputs[i].script_pubkey) > 0 {
+			result.outputs[i].script_pubkey = make([]byte, len(tx.outputs[i].script_pubkey))
+			copy(result.outputs[i].script_pubkey, tx.outputs[i].script_pubkey)
+		}
+	}
+
+	// Clone witness.
+	if tx.witness != nil {
+		result.witness = make([][][]byte, len(tx.witness))
+		for i in 0 ..< len(tx.witness) {
+			if tx.witness[i] != nil {
+				result.witness[i] = make([][]byte, len(tx.witness[i]))
+				for j in 0 ..< len(tx.witness[i]) {
+					if len(tx.witness[i][j]) > 0 {
+						result.witness[i][j] = make([]byte, len(tx.witness[i][j]))
+						copy(result.witness[i][j], tx.witness[i][j])
+					}
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+// Free a heap-cloned transaction.
+_free_cloned_tx :: proc(tx: ^wire.Tx) {
+	for i in 0 ..< len(tx.inputs) {
+		delete(tx.inputs[i].script_sig)
+	}
+	delete(tx.inputs)
+
+	for i in 0 ..< len(tx.outputs) {
+		delete(tx.outputs[i].script_pubkey)
+	}
+	delete(tx.outputs)
+
+	if tx.witness != nil {
+		for i in 0 ..< len(tx.witness) {
+			if tx.witness[i] != nil {
+				for j in 0 ..< len(tx.witness[i]) {
+					delete(tx.witness[i][j])
+				}
+				delete(tx.witness[i])
+			}
+		}
+		delete(tx.witness)
+	}
+}
+
+// Read u64 little-endian from a byte slice.
+_u64le :: proc(data: []byte) -> u64 {
+	return u64(data[0]) |
+		u64(data[1]) << 8 |
+		u64(data[2]) << 16 |
+		u64(data[3]) << 24 |
+		u64(data[4]) << 32 |
+		u64(data[5]) << 40 |
+		u64(data[6]) << 48 |
+		u64(data[7]) << 56
 }
 
 // Build the download queue: all block index entries that have Valid_Header but not Has_Data.

@@ -27,6 +27,9 @@ CMD_ADDR        :: "addr"
 CMD_GETADDR     :: "getaddr"
 CMD_SENDHEADERS :: "sendheaders"
 CMD_SENDCMPCT   :: "sendcmpct"
+CMD_CMPCTBLOCK  :: "cmpctblock"
+CMD_GETBLOCKTXN :: "getblocktxn"
+CMD_BLOCKTXN    :: "blocktxn"
 CMD_FEEFILTER   :: "feefilter"
 CMD_REJECT      :: "reject"
 CMD_WTXIDRELAY  :: "wtxidrelay"
@@ -81,6 +84,9 @@ command_from_bytes :: proc(cmd: [COMMAND_SIZE]byte) -> string {
 	case CMD_GETADDR:     return CMD_GETADDR
 	case CMD_SENDHEADERS: return CMD_SENDHEADERS
 	case CMD_SENDCMPCT:   return CMD_SENDCMPCT
+	case CMD_CMPCTBLOCK:  return CMD_CMPCTBLOCK
+	case CMD_GETBLOCKTXN: return CMD_GETBLOCKTXN
+	case CMD_BLOCKTXN:    return CMD_BLOCKTXN
 	case CMD_FEEFILTER:   return CMD_FEEFILTER
 	case CMD_REJECT:      return CMD_REJECT
 	case CMD_WTXIDRELAY:  return CMD_WTXIDRELAY

@@ -4,7 +4,7 @@
 
 ```bash
 make              # Build deps + binary
-make test         # Run all 262 tests (9 packages)
+make test         # Run all 269 tests (9 packages)
 make debug        # Build with debug symbols
 odin build . -out:btcnode   # Build binary only
 odin test <pkg>   # Test single package (crypto, wire, script, consensus, storage, chain, p2p, mempool, rpc)
@@ -22,8 +22,8 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 
 ## Project Structure
 
-- `crypto/` — SHA-256d, RIPEMD-160, HASH160, secp256k1 bindings (verify+sign), Merkle root, Base58Check, Bech32/Bech32m, WIF decode
-- `wire/` — Protocol types, CompactSize, tx/block serialization, message framing
+- `crypto/` — SHA-256d, RIPEMD-160, HASH160, secp256k1 bindings (verify+sign), Merkle root, Base58Check, Bech32/Bech32m, WIF decode, SipHash-2-4
+- `wire/` — Protocol types, CompactSize, tx/block serialization, message framing, compact block messages (BIP152)
 - `script/` — Script interpreter, opcodes, standard types, Taproot (BIP341/342)
 - `consensus/` — Chain params, PoW, difficulty, block/tx validation, BIP325 signet
 - `storage/` — LevelDB bindings + wrapper, flat files, block DB, index DB, UTXO DB (8 files)
@@ -38,7 +38,7 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 - **Storage**: Two LevelDB instances — `<datadir>/chainstate/` (UTXOs + meta tip) and `<datadir>/blocks/index/` (block index). Cache budget configurable via `--dbcache=<MB>` (default 450), split per Bitcoin Core's algorithm: index_db=min(total/8, 2MB), chainstate_db=min(remaining/2, 8MB), coins_cache=rest. 2MB write buffers, bloom filter, no Snappy. Blocks stored in flat files (`blk*.dat`, `rev*.dat`).
 - **Crash consistency**: Atomic WriteBatch commits UTXO changes + chain tip metadata together. Recovery strips Valid_Chain from blocks above the last flush point and replays from flat files.
 - **UTXO cache**: Write-back with Dirty/Fresh flags. Budget-based flushing (flush when mem_usage >= coins_cache_budget, or every 5000 blocks as safety net). Rollback on block validation failure.
-- **Sync**: Headers-first with batched WriteBatch, then multi-peer block download (getdata with Witness_Block, up to 64 blocks per peer). Bandwidth-based scoring allocates more slots to faster peers. Stall detection requeues blocks after 30s. Steady-state via BIP130 sendheaders + periodic getheaders.
+- **Sync**: Headers-first with batched WriteBatch, then multi-peer block download (getdata with Witness_Block, up to 64 blocks per peer). Bandwidth-based scoring allocates more slots to faster peers. Stall detection requeues blocks after 30s. Steady-state via BIP130 sendheaders + periodic getheaders. BIP152 compact block relay (receive-side) for bandwidth-efficient block propagation at tip.
 - **Sighash cache**: BIP143 + BIP341 intermediate hashes cached per-tx. Eagerly pre-computed before parallel dispatch so workers read immutable data.
 - **Parallel script verification**: Two-phase `connect_block` — Phase 1 processes UTXOs sequentially, Phase 2 dispatches script checks to a persistent thread pool (`--par=N`, auto-detect by default). Serial fallback for small blocks (<16 inputs). Workers get 8MB pre-allocated arena buffers from a mutex-protected pool.
 - **Assumevalid**: Skip script verification below hardcoded heights (mainnet=880k, testnet3=2.1M, testnet4=200k, signet=267k). `--assumevalid=<height>` CLI flag (0=disable).

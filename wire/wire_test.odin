@@ -685,3 +685,101 @@ test_build_message :: proc(t: ^testing.T) {
 	cmd := command_from_bytes(hdr.command)
 	testing.expect_value(t, cmd, CMD_PING)
 }
+
+// --- BIP152 Compact Block message tests ---
+
+@(test)
+test_compact_block_roundtrip :: proc(t: ^testing.T) {
+	// Build a compact block with header, nonce, 2 shortids, 1 prefilled tx (coinbase at idx 0).
+	cb_inputs := make([]Tx_In, 1, context.temp_allocator)
+	cb_inputs[0] = Tx_In{
+		previous_output = Outpoint{hash = HASH_ZERO, index = 0xffffffff},
+		script_sig = hex_decode("04ffff001d0101"),
+		sequence = 0xffffffff,
+	}
+	cb_outputs := make([]Tx_Out, 1, context.temp_allocator)
+	cb_outputs[0] = Tx_Out{value = 50_0000_0000, script_pubkey = hex_decode("6a")}
+
+	msg := Compact_Block_Message{
+		header = Block_Header{version = 1, timestamp = 1000, bits = 0x1d00ffff, nonce = 7},
+		nonce = 0xDEADBEEF,
+		shortids = []u64{0x112233445566, 0xAABBCCDDEEFF},
+		prefilled_txs = []Prefilled_Tx{
+			{index = 0, tx = Tx{version = 1, inputs = cb_inputs, outputs = cb_outputs, locktime = 0}},
+		},
+	}
+
+	w := writer_init(context.temp_allocator)
+	serialize_compact_block(&w, &msg)
+
+	r := reader_init(writer_bytes(&w))
+	msg2, err := deserialize_compact_block(&r, context.temp_allocator)
+	testing.expect(t, err == nil, "deserialize should succeed")
+	testing.expect_value(t, msg2.header.version, i32(1))
+	testing.expect_value(t, msg2.nonce, u64(0xDEADBEEF))
+	testing.expect_value(t, len(msg2.shortids), 2)
+	testing.expect_value(t, msg2.shortids[0], u64(0x112233445566))
+	testing.expect_value(t, msg2.shortids[1], u64(0xAABBCCDDEEFF))
+	testing.expect_value(t, len(msg2.prefilled_txs), 1)
+	testing.expect_value(t, msg2.prefilled_txs[0].index, u64(0))
+	testing.expect_value(t, msg2.prefilled_txs[0].tx.outputs[0].value, i64(50_0000_0000))
+}
+
+@(test)
+test_get_block_txn_roundtrip :: proc(t: ^testing.T) {
+	block_hash: Hash256
+	block_hash[0] = 0xAB
+	block_hash[31] = 0xCD
+
+	// Indices 1, 3, 5 — differential encoding: 1, 1, 1 (absolute diffs: 1, 3-1-1=1, 5-3-1=1).
+	msg := Get_Block_Txn_Message{
+		block_hash = block_hash,
+		indices = []u64{1, 3, 5},
+	}
+
+	w := writer_init(context.temp_allocator)
+	serialize_get_block_txn(&w, &msg)
+
+	r := reader_init(writer_bytes(&w))
+	msg2, err := deserialize_get_block_txn(&r, context.temp_allocator)
+	testing.expect(t, err == nil, "deserialize should succeed")
+	testing.expect_value(t, msg2.block_hash[0], u8(0xAB))
+	testing.expect_value(t, msg2.block_hash[31], u8(0xCD))
+	testing.expect_value(t, len(msg2.indices), 3)
+	testing.expect_value(t, msg2.indices[0], u64(1))
+	testing.expect_value(t, msg2.indices[1], u64(3))
+	testing.expect_value(t, msg2.indices[2], u64(5))
+}
+
+@(test)
+test_block_txn_roundtrip :: proc(t: ^testing.T) {
+	block_hash: Hash256
+	block_hash[0] = 0xEE
+
+	inputs := make([]Tx_In, 1, context.temp_allocator)
+	inputs[0] = Tx_In{
+		previous_output = Outpoint{hash = HASH_ZERO, index = 0},
+		script_sig = hex_decode("00"),
+		sequence = 0xffffffff,
+	}
+	outputs := make([]Tx_Out, 1, context.temp_allocator)
+	outputs[0] = Tx_Out{value = 1000, script_pubkey = hex_decode("6a")}
+
+	msg := Block_Txn_Message{
+		block_hash = block_hash,
+		txs = []Tx{
+			{version = 2, inputs = inputs, outputs = outputs, locktime = 0},
+		},
+	}
+
+	w := writer_init(context.temp_allocator)
+	serialize_block_txn(&w, &msg)
+
+	r := reader_init(writer_bytes(&w))
+	msg2, err := deserialize_block_txn(&r, context.temp_allocator)
+	testing.expect(t, err == nil, "deserialize should succeed")
+	testing.expect_value(t, msg2.block_hash[0], u8(0xEE))
+	testing.expect_value(t, len(msg2.txs), 1)
+	testing.expect_value(t, msg2.txs[0].version, i32(2))
+	testing.expect_value(t, msg2.txs[0].outputs[0].value, i64(1000))
+}

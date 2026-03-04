@@ -339,3 +339,82 @@ test_wif_decode :: proc(t: ^testing.T) {
 	_, _, bad_ok := wif_decode("1InvalidWIFString1234567890123456789012345678901")
 	testing.expect(t, !bad_ok, "invalid WIF should fail")
 }
+
+// --- SipHash-2-4 tests ---
+
+@(test)
+test_siphash_vectors :: proc(t: ^testing.T) {
+	// SipHash-2-4 test vectors from the SipHash paper (Appendix A).
+	// Key: 00 01 02 ... 0f
+	// Input: 00 (1 byte) → expected hash, 00 01 (2 bytes), etc.
+	k0 := u64(0x0706050403020100)
+	k1 := u64(0x0f0e0d0c0b0a0908)
+
+	// Expected outputs for inputs of length 0..15 (from reference implementation).
+	expected := [16]u64{
+		0x726fdb47dd0e0e31, 0x74f839c593dc67fd,
+		0x0d6c8009d9a94f5a, 0x85676696d7fb7e2d,
+		0xcf2794e0277187b7, 0x18765564cd99a68d,
+		0xcbc9466e58fee3ce, 0xab0200f58b01d137,
+		0x93f5f5799a932462, 0x9e0082df0ba9e4b0,
+		0x7a5dbbc594ddb9f3, 0xf4b32f46226bada7,
+		0x751e8fbc860ee5fb, 0x14ea5627c0843d90,
+		0xf723ca908e7af2ee, 0xa129ca6149be45e5,
+	}
+
+	for i in 0 ..< 16 {
+		input: [16]byte
+		for j in 0 ..< i {
+			input[j] = u8(j)
+		}
+		result := siphash_2_4(k0, k1, input[:i])
+		testing.expectf(t, result == expected[i],
+			"siphash(len=%d): got 0x%016x, want 0x%016x", i, result, expected[i])
+	}
+}
+
+@(test)
+test_compact_block_shortid :: proc(t: ^testing.T) {
+	// End-to-end BIP152 shortid: SHA256(header_hash || nonce_le) → k0,k1 → SipHash → 6 bytes.
+	// Use a known block header hash and nonce to derive keys, then compute shortid of a wtxid.
+	header_hash: Hash256
+	header_hash[0] = 0xab
+	header_hash[1] = 0xcd
+	nonce: u64 = 42
+
+	// Key derivation: SHA256(header_hash || nonce_le)
+	nonce_bytes: [8]byte
+	nonce_bytes[0] = u8(nonce)
+	nonce_bytes[1] = u8(nonce >> 8)
+	nonce_bytes[2] = u8(nonce >> 16)
+	nonce_bytes[3] = u8(nonce >> 24)
+	nonce_bytes[4] = u8(nonce >> 32)
+	nonce_bytes[5] = u8(nonce >> 40)
+	nonce_bytes[6] = u8(nonce >> 48)
+	nonce_bytes[7] = u8(nonce >> 56)
+
+	key_buf: [40]byte
+	copy(key_buf[:32], header_hash[:])
+	copy(key_buf[32:], nonce_bytes[:])
+	key_hash := sha256_hash(key_buf[:])
+
+	k0 := _siphash_u64le(key_hash[:8])
+	k1 := _siphash_u64le(key_hash[8:16])
+
+	wtxid: Hash256
+	wtxid[0] = 0x01
+	wtxid[31] = 0xff
+
+	shortid := compact_block_shortid(k0, k1, wtxid)
+
+	// Verify it's masked to 6 bytes (high 2 bytes zero).
+	testing.expect(t, shortid & 0xffff000000000000 == 0, "shortid high 2 bytes should be zero")
+	// Verify deterministic (same inputs → same output).
+	shortid2 := compact_block_shortid(k0, k1, wtxid)
+	testing.expect_value(t, shortid, shortid2)
+	// Different wtxid → different shortid.
+	other_wtxid: Hash256
+	other_wtxid[0] = 0x02
+	other_shortid := compact_block_shortid(k0, k1, other_wtxid)
+	testing.expect(t, shortid != other_shortid, "different wtxids should produce different shortids")
+}

@@ -308,3 +308,183 @@ test_dns_seed_selection :: proc(t: ^testing.T) {
 	testing.expect_value(t, DEFAULT_PORT_TESTNET3, 18333)
 	testing.expect_value(t, DEFAULT_PORT_REGTEST, 18444)
 }
+
+// --- Compact block reconstruction tests ---
+
+// Helper: make a simple tx with a given "fingerprint" byte in the locktime field
+// so we can verify it's the right tx after reconstruction.
+_make_cmpct_test_tx :: proc(fingerprint: u32) -> wire.Tx {
+	inputs := make([]wire.Tx_In, 1, context.temp_allocator)
+	inputs[0] = wire.Tx_In{
+		previous_output = wire.Outpoint{hash = HASH_ZERO, index = fingerprint},
+		script_sig      = nil,
+		sequence        = 0xffffffff,
+	}
+	outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
+	outputs[0] = wire.Tx_Out{value = i64(fingerprint) * 1000, script_pubkey = nil}
+	return wire.Tx{version = 2, inputs = inputs, outputs = outputs, locktime = fingerprint}
+}
+
+@(test)
+test_compact_block_reconstruction :: proc(t: ^testing.T) {
+	// Build a compact block with 3 txs: coinbase (prefilled) + 2 regular txs (as shortids).
+	// Populate a mock shortid→tx map simulating mempool match.
+
+	coinbase_tx := _make_cmpct_test_tx(0)
+	tx1 := _make_cmpct_test_tx(1)
+	tx2 := _make_cmpct_test_tx(2)
+
+	// Compute wtxids for the two regular txs.
+	wtxid1 := wire.tx_witness_id(&tx1)
+	wtxid2 := wire.tx_witness_id(&tx2)
+
+	// Use a fixed nonce and block header for key derivation.
+	header := wire.Block_Header{version = 1, timestamp = 12345, bits = 0x1d00ffff, nonce = 99}
+	block_hash := wire.block_header_hash(&header)
+	cmpct_nonce: u64 = 42
+
+	// Compute SipHash keys (same logic as sync_handle_compact_block).
+	key_buf: [40]byte
+	copy(key_buf[:32], block_hash[:])
+	key_buf[32] = u8(cmpct_nonce)
+	key_hash := crypto.sha256_hash(key_buf[:])
+	k0 := _u64le(key_hash[:8])
+	k1 := _u64le(key_hash[8:16])
+
+	// Compute shortids.
+	sid1 := crypto.compact_block_shortid(k0, k1, wtxid1)
+	sid2 := crypto.compact_block_shortid(k0, k1, wtxid2)
+
+	// Verify shortids are 6 bytes.
+	testing.expect(t, sid1 & 0xffff000000000000 == 0, "sid1 should be 6 bytes")
+	testing.expect(t, sid2 & 0xffff000000000000 == 0, "sid2 should be 6 bytes")
+
+	// Build shortid→tx map (simulating mempool lookup).
+	sid_map := make(map[u64]^wire.Tx, 4, context.temp_allocator)
+	sid_map[sid1] = &tx1
+	sid_map[sid2] = &tx2
+
+	// Build the compact block message.
+	prefilled := []wire.Prefilled_Tx{{index = 0, tx = coinbase_tx}}
+	shortids := []u64{sid1, sid2}
+
+	// Simulate reconstruction: total_txs = 3 (1 prefilled + 2 shortids).
+	total_txs := len(shortids) + len(prefilled)
+	testing.expect_value(t, total_txs, 3)
+
+	// Build tx_ptrs.
+	tx_ptrs := make([]^wire.Tx, total_txs, context.temp_allocator)
+	shortid_cursor := 0
+	missing_count := 0
+
+	prefilled_positions := make(map[u64]int, len(prefilled), context.temp_allocator)
+	for i in 0 ..< len(prefilled) {
+		prefilled_positions[prefilled[i].index] = i
+	}
+
+	for pos in 0 ..< total_txs {
+		pi, is_prefilled := prefilled_positions[u64(pos)]
+		if is_prefilled {
+			tx_ptrs[pos] = &prefilled[pi].tx
+		} else {
+			sid := shortids[shortid_cursor]
+			shortid_cursor += 1
+			mp_tx, found := sid_map[sid]
+			if found {
+				tx_ptrs[pos] = mp_tx
+			} else {
+				missing_count += 1
+			}
+		}
+	}
+
+	// All txs should be found.
+	testing.expect_value(t, missing_count, 0)
+
+	// Verify correct txs at each position.
+	testing.expect_value(t, tx_ptrs[0].locktime, u32(0)) // coinbase
+	testing.expect_value(t, tx_ptrs[1].locktime, u32(1)) // tx1
+	testing.expect_value(t, tx_ptrs[2].locktime, u32(2)) // tx2
+
+	// Assemble block and verify.
+	block := _assemble_block(&header, tx_ptrs)
+	testing.expect_value(t, len(block.txs), 3)
+	testing.expect_value(t, block.txs[0].locktime, u32(0))
+	testing.expect_value(t, block.txs[1].locktime, u32(1))
+	testing.expect_value(t, block.txs[2].locktime, u32(2))
+}
+
+@(test)
+test_compact_block_missing_tx :: proc(t: ^testing.T) {
+	// Same as above but one tx is NOT in the simulated mempool.
+	coinbase_tx := _make_cmpct_test_tx(0)
+	tx1 := _make_cmpct_test_tx(1)
+	tx2 := _make_cmpct_test_tx(2)
+
+	wtxid1 := wire.tx_witness_id(&tx1)
+	wtxid2 := wire.tx_witness_id(&tx2)
+
+	header := wire.Block_Header{version = 1, timestamp = 54321, bits = 0x1d00ffff, nonce = 77}
+	block_hash := wire.block_header_hash(&header)
+	cmpct_nonce: u64 = 99
+
+	key_buf: [40]byte
+	copy(key_buf[:32], block_hash[:])
+	key_buf[32] = u8(cmpct_nonce)
+	key_hash := crypto.sha256_hash(key_buf[:])
+	k0 := _u64le(key_hash[:8])
+	k1 := _u64le(key_hash[8:16])
+
+	sid1 := crypto.compact_block_shortid(k0, k1, wtxid1)
+	sid2 := crypto.compact_block_shortid(k0, k1, wtxid2)
+
+	// Only tx1 is in the "mempool" — tx2 is missing.
+	sid_map := make(map[u64]^wire.Tx, 4, context.temp_allocator)
+	sid_map[sid1] = &tx1
+
+	prefilled := []wire.Prefilled_Tx{{index = 0, tx = coinbase_tx}}
+	shortids := []u64{sid1, sid2}
+	total_txs := len(shortids) + len(prefilled)
+
+	tx_ptrs := make([]^wire.Tx, total_txs, context.temp_allocator)
+	shortid_cursor := 0
+	missing_count := 0
+	missing_indices := make([dynamic]u64, 0, 4, context.temp_allocator)
+
+	prefilled_positions := make(map[u64]int, len(prefilled), context.temp_allocator)
+	for i in 0 ..< len(prefilled) {
+		prefilled_positions[prefilled[i].index] = i
+	}
+
+	for pos in 0 ..< total_txs {
+		pi, is_prefilled := prefilled_positions[u64(pos)]
+		if is_prefilled {
+			tx_ptrs[pos] = &prefilled[pi].tx
+		} else {
+			sid := shortids[shortid_cursor]
+			shortid_cursor += 1
+			mp_tx, found := sid_map[sid]
+			if found {
+				tx_ptrs[pos] = mp_tx
+			} else {
+				missing_count += 1
+				append(&missing_indices, u64(pos))
+			}
+		}
+	}
+
+	// Exactly 1 tx should be missing.
+	testing.expect_value(t, missing_count, 1)
+	testing.expect_value(t, len(missing_indices), 1)
+	testing.expect_value(t, missing_indices[0], u64(2)) // tx2 was at position 2
+
+	// Simulate blocktxn response: fill the missing slot.
+	tx_ptrs[missing_indices[0]] = &tx2
+
+	// Assemble block and verify.
+	block := _assemble_block(&header, tx_ptrs)
+	testing.expect_value(t, len(block.txs), 3)
+	testing.expect_value(t, block.txs[0].locktime, u32(0))
+	testing.expect_value(t, block.txs[1].locktime, u32(1))
+	testing.expect_value(t, block.txs[2].locktime, u32(2))
+}

@@ -216,6 +216,15 @@ _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 		_conn_manager_replace_peer(cm)
 	}
 
+	// Check compact block timeout — fallback to full block if stalled.
+	if cm.sync_mgr.compact_state != nil {
+		cs := cm.sync_mgr.compact_state
+		if now - cs.requested_at > COMPACT_BLOCK_TIMEOUT {
+			log.warnf("Compact block request timed out, falling back to full block")
+			_compact_state_fallback(&cm.sync_mgr, &cm.peers)
+		}
+	}
+
 	// Periodic getheaders while in sync.
 	if now - cm.last_header_refresh >= HEADER_REFRESH_SECS && cm.sync_mgr.state == .In_Sync {
 		cm.last_header_refresh = now
@@ -352,8 +361,16 @@ _conn_manager_dispatch :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, cmd: string,
 		_conn_manager_handle_tx(cm, peer_id, payload)
 	case wire.CMD_GETDATA:
 		_conn_manager_handle_getdata(cm, peer_id, payload)
-	case wire.CMD_SENDCMPCT, wire.CMD_FEEFILTER, wire.CMD_WTXIDRELAY, wire.CMD_ADDRV2, wire.CMD_ADDR:
-		// Ignored for now.
+	case wire.CMD_SENDCMPCT:
+		_conn_manager_handle_sendcmpct(cm, peer_id, payload)
+	case wire.CMD_CMPCTBLOCK:
+		_conn_manager_handle_cmpctblock(cm, peer_id, payload)
+	case wire.CMD_BLOCKTXN:
+		_conn_manager_handle_blocktxn(cm, peer_id, payload)
+	case wire.CMD_GETBLOCKTXN:
+		// Receive-only: we don't serve compact block requests.
+	case wire.CMD_FEEFILTER, wire.CMD_WTXIDRELAY, wire.CMD_ADDRV2, wire.CMD_ADDR:
+		// Ignored.
 	case:
 		// Unknown command — ignore.
 	}
@@ -402,6 +419,9 @@ _conn_manager_handle_verack :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 
 		// Send sendheaders (BIP130).
 		peer_send_sendheaders(peer)
+
+		// Send sendcmpct (BIP152): announce=true, version=2 (wtxid-based).
+		peer_send_sendcmpct(peer, true, COMPACT_BLOCK_VERSION)
 
 		// Register peer for sync tracking.
 		sync_add_peer(&cm.sync_mgr, peer_id)
@@ -623,6 +643,54 @@ conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid: Hash256) {
 	}
 }
 
+
+// Handle sendcmpct message: record peer's compact block version and announce preference.
+_conn_manager_handle_sendcmpct :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []byte) {
+	peer, found := cm.peers[peer_id]
+	if !found {
+		return
+	}
+
+	r := wire.reader_init(payload)
+	msg, err := wire.deserialize_sendcmpct(&r)
+	if err != .None {
+		return
+	}
+
+	// Only accept version 2 (wtxid-based short IDs).
+	if msg.version == COMPACT_BLOCK_VERSION {
+		peer.compact_version = msg.version
+		peer.compact_announce = msg.announce
+		log.debugf("Peer %d supports compact blocks v%d (announce=%v)", peer_id, msg.version, msg.announce)
+	}
+}
+
+// Handle compact block message: deserialize and attempt reconstruction.
+_conn_manager_handle_cmpctblock :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []byte) {
+	r := wire.reader_init(payload)
+	cmpct, err := wire.deserialize_compact_block(&r, context.temp_allocator)
+	if err != .None {
+		log.warnf("Bad cmpctblock from peer %d", peer_id)
+		return
+	}
+
+	log.debugf("Received compact block from peer %d (%d shortids, %d prefilled)",
+		peer_id, len(cmpct.shortids), len(cmpct.prefilled_txs))
+
+	sync_handle_compact_block(&cm.sync_mgr, peer_id, &cmpct, &cm.peers, cm.mp)
+}
+
+// Handle blocktxn response: fill missing transactions and assemble block.
+_conn_manager_handle_blocktxn :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []byte) {
+	r := wire.reader_init(payload)
+	msg, err := wire.deserialize_block_txn(&r, context.temp_allocator)
+	if err != .None {
+		log.warnf("Bad blocktxn from peer %d", peer_id)
+		return
+	}
+
+	sync_handle_block_txn(&cm.sync_mgr, peer_id, &msg, &cm.peers)
+}
 
 // Try to connect a replacement peer when a slot opens.
 _conn_manager_replace_peer :: proc(cm: ^Conn_Manager) {
