@@ -1,6 +1,6 @@
 # bitcoin-node-odin
 
-A Bitcoin full node implementation written in [Odin](https://odin-lang.org/). Built from scratch with no Bitcoin library dependencies — only libsecp256k1 for elliptic curve cryptography, vendored RIPEMD-160, and vendored LevelDB for storage.
+A Bitcoin full node implementation written in [Odin](https://odin-lang.org/). Built from scratch with no Bitcoin library dependencies — only libsecp256k1 for elliptic curve cryptography, vendored RIPEMD-160, and LevelDB for storage.
 
 This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, compact block relay (BIP152), feefilter (BIP133), wtxid relay (BIP339), addr relay with addrv2 (BIP155), mempool with RBF, and a JSON-RPC interface with 42 methods.
 
@@ -57,8 +57,8 @@ This is an educational/experimental project. It implements the core components o
 - `autoconf`, `automake`, `libtool` (for building libsecp256k1)
 
 **C/C++ libraries (built automatically):**
-- [libsecp256k1](https://github.com/bitcoin-core/secp256k1) — included as a git submodule, built with schnorrsig + recovery + extrakeys modules
-- [LevelDB](https://github.com/google/leveldb) — vendored C++ source in `deps/leveldb/`
+- [libsecp256k1](https://github.com/bitcoin-core/secp256k1) v0.7.1 — git submodule, built with schnorrsig + recovery + extrakeys modules
+- [LevelDB](https://github.com/google/leveldb) 1.23 — git submodule, compiled as static library with C++17
 - RIPEMD-160 — vendored C implementation in `deps/ripemd160/`
 
 ## Building
@@ -428,8 +428,8 @@ bitcoin-node-odin/
 ├── mempool/               # Fee rates, relay policy, validation pipeline, RBF, persistence, configurable limits
 ├── rpc/                   # JSON-RPC server (42 methods), handlers, types
 └── deps/                  # C/C++ dependencies
-    ├── libsecp256k1/      # Git submodule (bitcoin-core/secp256k1)
-    ├── leveldb/           # Vendored LevelDB C++ source
+    ├── libsecp256k1/      # Git submodule (bitcoin-core/secp256k1 v0.7.1)
+    ├── leveldb/           # Git submodule (google/leveldb 1.23)
     ├── ripemd160/         # Vendored C implementation
     └── lib/               # Built static libraries (generated)
 ```
