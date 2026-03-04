@@ -10,6 +10,7 @@ endif
 all: deps build
 
 deps:
+	git submodule update --init --recursive
 	./deps/build.sh
 
 build: deps
