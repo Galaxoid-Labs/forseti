@@ -83,6 +83,9 @@ conn_manager_destroy :: proc(cm: ^Conn_Manager) {
 		_peer_free(peer)
 	}
 	delete(cm.peers)
+	for addr in cm.address_pool {
+		delete(addr)
+	}
 	delete(cm.address_pool)
 	delete(cm.relay_queue)
 
@@ -151,7 +154,7 @@ conn_manager_discover_peers :: proc(cm: ^Conn_Manager) -> [dynamic]string {
 				continue
 			}
 			addr := rec.address
-			addr_str := fmt.tprintf("%d.%d.%d.%d", addr[0], addr[1], addr[2], addr[3])
+			addr_str := fmt.aprintf("%d.%d.%d.%d", addr[0], addr[1], addr[2], addr[3])
 			append(&addresses, addr_str)
 
 			if len(addresses) >= MAX_OUTBOUND_PEERS * 2 {
@@ -633,6 +636,9 @@ _conn_manager_replace_peer :: proc(cm: ^Conn_Manager) {
 	// Pool exhausted — re-discover via DNS.
 	if cm.address_pool_cursor >= len(cm.address_pool) {
 		log.debug("Address pool exhausted, re-discovering via DNS")
+		for addr in cm.address_pool {
+			delete(addr)
+		}
 		delete(cm.address_pool)
 		cm.address_pool = conn_manager_discover_peers(cm)
 		cm.address_pool_cursor = 0

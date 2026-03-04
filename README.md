@@ -37,6 +37,7 @@ This is an educational/experimental project. It implements the core components o
 | 24 | Assumevalid + Txid Optimization | Complete |
 | 25 | nbio Async I/O Migration | Complete |
 | 26 | Cross-thread RPC Relay Safety | Complete |
+| 27 | Address Pool Lifetime Fix | Complete |
 
 ## Dependencies
 
@@ -417,7 +418,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Multi-peer block download**: Fastest-first block assignment across all active peers (up to 8) — peers are sorted by throughput and the fastest peer gets tip-adjacent blocks so slow peers can't block chain progress. Bandwidth-based scoring: fast peers get more slots (up to 16), slow peers fewer (minimum 4), new peers get a trial allocation of 8 blocks
 - **Steady-state sync**: BIP130 `sendheaders` for header announcements, periodic `getheaders` polling (120s), and `inv`-triggered header requests keep the node up-to-date after IBD
 - **Adaptive stall detection**: Bitcoin Core-style stall handling — default 10s timeout, doubles on disconnect (max 64s), decays by 0.85x on successful block connects. Slow peers (throughput <10% of fastest) are evicted after a trial period. Disconnected peers are replaced via DNS discovery
-- **DNS peer discovery**: Resolves all A records from DNS seeds (typically 20+ addresses per seed), connects up to 8 outbound peers
+- **DNS peer discovery**: Resolves all A records from DNS seeds (typically 20+ addresses per seed), connects up to 8 outbound peers. Address pool strings are heap-allocated for stable lifetimes across event loop ticks
 - **Write-back UTXO cache**: In-memory cache with dirty/fresh flags, flushed atomically to LevelDB when memory usage exceeds the configurable budget (`--dbcache`, default 450 MiB). Rollback support for failed block validation
 - **Block index**: In-memory tree with skip list pointers for O(log n) ancestor lookup, persisted to LevelDB. `by_prev` index provides O(1) next-block lookup for chain traversal
 - **Sighash caching**: BIP143 (SegWit v0) and BIP341 (Taproot) intermediate hashes are cached per-transaction, avoiding O(n^2) re-computation for transactions with many inputs
