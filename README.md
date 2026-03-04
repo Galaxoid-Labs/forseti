@@ -89,28 +89,39 @@ The binary is output as `btcnode` in the project root.
 ./btcnode --help
 
 # Start in regtest mode (no peers needed, good for RPC testing)
-./btcnode --network=regtest --no-p2p
+./btcnode --network=regtest --no-p2p --rpcuser=user --rpcpassword=pass
+
+# Query it
+curl -s -u user:pass --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:18443/
 ```
 
 ### Syncing a Network
 
-Each network syncs via P2P and stores data in its own directory. Run in the background with `nohup` and monitor via the log file:
+Each network syncs via P2P and stores data in its own directory. The examples below set explicit RPC credentials so you can query the node immediately. Run in the background with `nohup` and monitor via the log file:
 
 **Mainnet:**
 ```bash
 # Start syncing mainnet (full validation, ~939k blocks)
 nohup ./btcnode --network=mainnet --datadir=/tmp/btcnode-mainnet --dbcache=4096 \
-  > /tmp/btcnode-mainnet.log 2>&1 &
+  --rpcuser=user --rpcpassword=pass > /tmp/btcnode-mainnet.log 2>&1 &
 
 # Monitor sync progress
 tail -f /tmp/btcnode-mainnet.log | grep "Blocks:"
 
 # Check current block height via RPC
-curl -s -u "$(cat /tmp/btcnode-mainnet/.cookie)" \
+curl -s -u user:pass \
      --data '{"method":"getblockcount","params":[],"id":1}' http://127.0.0.1:8332/
 
+# Check sync status
+curl -s -u user:pass \
+     --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:8332/ | python3 -m json.tool
+
+# Check peer connections
+curl -s -u user:pass \
+     --data '{"method":"getpeerinfo","params":[],"id":1}' http://127.0.0.1:8332/ | python3 -m json.tool
+
 # Stop gracefully (saves mempool, flushes UTXO cache)
-curl -s -u "$(cat /tmp/btcnode-mainnet/.cookie)" \
+curl -s -u user:pass \
      --data '{"method":"stop","params":[],"id":1}' http://127.0.0.1:8332/
 # or: kill -SIGINT $(pgrep -f "btcnode.*mainnet")
 ```
@@ -118,32 +129,34 @@ curl -s -u "$(cat /tmp/btcnode-mainnet/.cookie)" \
 **Signet:**
 ```bash
 nohup ./btcnode --network=signet --datadir=/tmp/btcnode-signet --dbcache=4096 \
-  > /tmp/btcnode-signet.log 2>&1 &
+  --rpcuser=user --rpcpassword=pass > /tmp/btcnode-signet.log 2>&1 &
 
 tail -f /tmp/btcnode-signet.log | grep "Blocks:"
-curl -s -u "$(cat /tmp/btcnode-signet/.cookie)" \
+curl -s -u user:pass \
      --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:38332/
 ```
 
 **Testnet4:**
 ```bash
 nohup ./btcnode --network=testnet4 --datadir=/tmp/btcnode-testnet4 --dbcache=4096 \
-  > /tmp/btcnode-testnet4.log 2>&1 &
+  --rpcuser=user --rpcpassword=pass > /tmp/btcnode-testnet4.log 2>&1 &
 
 tail -f /tmp/btcnode-testnet4.log | grep "Blocks:"
-curl -s -u "$(cat /tmp/btcnode-testnet4/.cookie)" \
+curl -s -u user:pass \
      --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:48332/
 ```
 
 **Testnet3:**
 ```bash
 nohup ./btcnode --network=testnet3 --datadir=/tmp/btcnode-testnet3 --dbcache=4096 \
-  > /tmp/btcnode-testnet3.log 2>&1 &
+  --rpcuser=user --rpcpassword=pass > /tmp/btcnode-testnet3.log 2>&1 &
 
 tail -f /tmp/btcnode-testnet3.log | grep "Blocks:"
-curl -s -u "$(cat /tmp/btcnode-testnet3/.cookie)" \
+curl -s -u user:pass \
      --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:18332/
 ```
+
+> **Tip:** If you omit `--rpcuser`/`--rpcpassword`, a `.cookie` file is generated in the data directory (Bitcoin Core compatible). Use `-u "$(cat /tmp/btcnode-signet/.cookie)"` with curl in that case. Use `--server=0` to disable the RPC server entirely.
 
 ### Monitoring
 
@@ -154,15 +167,11 @@ tail -f /tmp/btcnode-mainnet.log | grep "Blocks:"
 # Check for validation errors
 grep -iE "FAIL|Bad_Script|halting|consensus" /tmp/btcnode-mainnet.log
 
-# Check peer connections
-curl -s -u "$(cat /tmp/btcnode-mainnet/.cookie)" \
-     --data '{"method":"getpeerinfo","params":[],"id":1}' http://127.0.0.1:8332/ | python3 -m json.tool
-
 # Check memory/resource usage
 ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "$6/1024"MB"}'
 
 # Reduce memory usage on constrained machines
-./btcnode --network=signet --dbcache=64
+./btcnode --network=signet --dbcache=64 --rpcuser=user --rpcpassword=pass
 ```
 
 ### CLI Flags
