@@ -57,6 +57,9 @@ CLI_Flag :: enum {
 	Permit_Bare_Multisig,
 	Blocks_Only,
 	Persist_Mempool,
+	Rpc_User,
+	Rpc_Password,
+	Server,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
 
@@ -85,6 +88,9 @@ CLI_Config :: struct {
 	permit_bare_multisig:   bool,
 	blocks_only:            bool,
 	persist_mempool:        bool,
+	rpc_user:               string,
+	rpc_password:           string,
+	server:                 bool,   // default true
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -111,6 +117,7 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 	cfg.permit_bare_multisig = true
 	cfg.blocks_only = false
 	cfg.persist_mempool = true
+	cfg.server = true
 
 	for arg in os.args[1:] {
 		if arg == "--help" || arg == "-h" {
@@ -272,6 +279,16 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 			val := arg[len("--persistmempool="):]
 			cfg.persist_mempool = val == "1" || val == "true"
 			flags_set += {.Persist_Mempool}
+		} else if strings.has_prefix(arg, "--rpcuser=") {
+			cfg.rpc_user = arg[len("--rpcuser="):]
+			flags_set += {.Rpc_User}
+		} else if strings.has_prefix(arg, "--rpcpassword=") {
+			cfg.rpc_password = arg[len("--rpcpassword="):]
+			flags_set += {.Rpc_Password}
+		} else if strings.has_prefix(arg, "--server=") {
+			val := arg[len("--server="):]
+			cfg.server = val == "1" || val == "true"
+			flags_set += {.Server}
 		} else {
 			fmt.eprintln("Error: unknown flag:", arg)
 			_print_usage()
@@ -289,6 +306,9 @@ _print_usage :: proc() {
 	fmt.println("  --network=<network>   Network: mainnet, testnet3, testnet4, signet, regtest (default: regtest)")
 	fmt.println("  --datadir=<path>      Data directory (default: /tmp/btcnode-data)")
 	fmt.println("  --rpcport=<port>      RPC port (default: network-appropriate)")
+	fmt.println("  --rpcuser=<user>      RPC auth username (default: cookie auth)")
+	fmt.println("  --rpcpassword=<pass>  RPC auth password (must set both user and password)")
+	fmt.println("  --server=<0|1>        Enable/disable RPC server (default: 1)")
 	fmt.println("  --connect=<ip:port>   Connect to specific peer instead of DNS discovery")
 	fmt.println("  --p2p-port=<port>     P2P listen port (default: network-appropriate)")
 	fmt.println("  --no-p2p              Disable P2P networking (RPC-only mode)")
@@ -522,6 +542,24 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 			cfg.persist_mempool = val == "1" || val == "true" || val == "yes"
 		}
 	}
+
+	if .Rpc_User not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "rpcuser"); found {
+			cfg.rpc_user = val
+		}
+	}
+
+	if .Rpc_Password not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "rpcpassword"); found {
+			cfg.rpc_password = val
+		}
+	}
+
+	if .Server not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "server"); found {
+			cfg.server = val == "1" || val == "true" || val == "yes"
+		}
+	}
 }
 
 // Resolve par_threads: 0 = auto-detect, 1 = serial, >= 2 = parallel.
@@ -606,6 +644,61 @@ main :: proc() {
 	// Load config file (CLI flags take precedence).
 	_load_config_file(fmt.tprintf("%s/btcnode.conf", cfg.data_dir), &cfg, flags_set)
 
+	// Validate rpcuser/rpcpassword: must set both or neither.
+	has_user := len(cfg.rpc_user) > 0
+	has_pass := len(cfg.rpc_password) > 0
+	if has_user != has_pass {
+		fmt.eprintln("Error: must set both rpcuser and rpcpassword")
+		return
+	}
+
+	// Generate cookie file if no explicit credentials and server is enabled.
+	cookie_path := ""
+	if !has_user && cfg.server {
+		cookie_path = fmt.aprintf("%s/.cookie", cfg.data_dir)
+
+		// Read 32 random bytes from /dev/urandom → 64 hex chars.
+		random_bytes: [32]byte
+		urandom_handle, urandom_err := os.open("/dev/urandom")
+		if urandom_err != os.ERROR_NONE {
+			fmt.eprintln("Error: failed to open /dev/urandom for cookie generation")
+			return
+		}
+		_, read_err := os.read(urandom_handle, random_bytes[:])
+		os.close(urandom_handle)
+		if read_err != os.ERROR_NONE {
+			fmt.eprintln("Error: failed to read random bytes for cookie generation")
+			return
+		}
+
+		hex_chars := "0123456789abcdef"
+		hex_buf: [64]byte
+		for i in 0 ..< 32 {
+			hex_buf[i * 2] = hex_chars[random_bytes[i] >> 4]
+			hex_buf[i * 2 + 1] = hex_chars[random_bytes[i] & 0x0f]
+		}
+		cookie_hex := string(hex_buf[:])
+
+		cookie_content := fmt.aprintf("__cookie__:%s\n", cookie_hex)
+		defer delete(cookie_content)
+
+		if !os.write_entire_file(cookie_path, transmute([]byte)cookie_content) {
+			fmt.eprintln("Error: failed to write cookie file:", cookie_path)
+			delete(cookie_path)
+			return
+		}
+
+		cfg.rpc_user = "__cookie__"
+		cfg.rpc_password = strings.clone(cookie_hex)
+		log.infof("Cookie file: %s", cookie_path)
+	}
+	defer {
+		if len(cookie_path) > 0 {
+			os.remove(cookie_path)
+			delete(cookie_path)
+		}
+	}
+
 	crypto.init_secp256k1()
 	defer crypto.destroy_secp256k1()
 
@@ -689,29 +782,40 @@ main :: proc() {
 	}
 
 	// Start RPC server (cm wired below after P2P init).
-	srv := new(rpc.RPC_Server)
-	rpc.rpc_server_init(srv, cs, mp, params, rpc_port, data_dir = cfg.data_dir)
+	srv: ^rpc.RPC_Server
+	rpc_thread: ^thread.Thread
 
-	if !rpc.rpc_server_start(srv) {
-		log.errorf("Failed to start RPC server on port %d", rpc_port)
-		return
+	if cfg.server {
+		srv = new(rpc.RPC_Server)
+		rpc.rpc_server_init(srv, cs, mp, params, rpc_port, data_dir = cfg.data_dir, rpc_user = cfg.rpc_user, rpc_password = cfg.rpc_password)
+
+		if !rpc.rpc_server_start(srv) {
+			log.errorf("Failed to start RPC server on port %d", rpc_port)
+			return
+		}
+
+		log.infof("RPC listening on 127.0.0.1:%d", rpc_port)
+
+		// Set global pointer for signal handler.
+		_g_rpc_server = srv
+
+		// Run RPC server on a background thread.
+		rpc_thread = thread.create_and_start_with_data(
+			rawptr(srv),
+			proc(data: rawptr) {
+				context.logger = log.create_console_logger(.Debug, {.Level, .Time, .Terminal_Color})
+				s := cast(^rpc.RPC_Server)data
+				rpc.rpc_server_run(s)
+			},
+		)
+	} else {
+		log.info("RPC server disabled (--server=0)")
 	}
-	defer rpc.rpc_server_stop(srv)
-
-	log.infof("RPC listening on 127.0.0.1:%d", rpc_port)
-
-	// Set global pointer for signal handler.
-	_g_rpc_server = srv
-
-	// Run RPC server on a background thread.
-	rpc_thread := thread.create_and_start_with_data(
-		rawptr(srv),
-		proc(data: rawptr) {
-			context.logger = log.create_console_logger(.Debug, {.Level, .Time, .Terminal_Color})
-			s := cast(^rpc.RPC_Server)data
-			rpc.rpc_server_run(s)
-		},
-	)
+	defer {
+		if srv != nil {
+			rpc.rpc_server_stop(srv)
+		}
+	}
 
 	// Initialize P2P connection manager (unless --no-p2p).
 	cm: ^p2p.Conn_Manager
@@ -741,7 +845,9 @@ main :: proc() {
 			_g_conn_manager = cm
 
 			// Wire connection manager into RPC server.
-			srv.cm = cm
+			if srv != nil {
+				srv.cm = cm
+			}
 
 			// Run P2P on a background thread.
 			p2p_thread = thread.create_and_start_with_data(
@@ -764,21 +870,30 @@ main :: proc() {
 	posix.signal(.SIGINT, _signal_handler)
 	posix.signal(.SIGTERM, _signal_handler)
 
-	if cfg.no_p2p {
+	if !cfg.server && cfg.no_p2p {
+		log.info("Node ready (no RPC, no P2P). Nothing to do.")
+		return
+	} else if !cfg.server {
+		log.info("Node ready (RPC disabled, P2P running).")
+	} else if cfg.no_p2p {
 		log.info("Node ready (RPC-only mode, P2P disabled).")
 	} else if cm != nil {
 		log.info("Node ready. RPC and P2P running.")
 	} else {
 		log.info("Node ready. RPC running (P2P init failed).")
 	}
-	log.infof("Use bitcoin-cli -rpcport=%d to interact.", rpc_port)
+	if cfg.server {
+		log.infof("Use bitcoin-cli -rpcport=%d to interact.", rpc_port)
+	}
 
 	// Wait for threads to finish.
 	// If P2P is running, wait for it first (signal handler will stop both).
 	if p2p_thread != nil {
 		thread.join(p2p_thread)
 		// P2P done — also stop RPC.
-		rpc.rpc_server_stop(srv)
+		if srv != nil {
+			rpc.rpc_server_stop(srv)
+		}
 	}
 
 	if rpc_thread != nil {

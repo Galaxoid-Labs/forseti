@@ -1,5 +1,6 @@
 package rpc
 
+import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
 import "core:log"
@@ -14,26 +15,30 @@ import "../mempool"
 import "../p2p"
 
 RPC_Server :: struct {
-	listener:    tcp.TCP_Socket,
-	chain:       ^chain.Chain_State,
-	mp:          ^mempool.Mempool,
-	params:      ^consensus.Chain_Params,
-	cm:          ^p2p.Conn_Manager,
-	running:     bool,
-	port:        int,
-	start_time:  i64,
-	data_dir:    string,
-	_current_id: json.Value, // tracks request id for current dispatch
+	listener:     tcp.TCP_Socket,
+	chain:        ^chain.Chain_State,
+	mp:           ^mempool.Mempool,
+	params:       ^consensus.Chain_Params,
+	cm:           ^p2p.Conn_Manager,
+	running:      bool,
+	port:         int,
+	start_time:   i64,
+	data_dir:     string,
+	rpc_user:     string,
+	rpc_password: string,
+	_current_id:  json.Value, // tracks request id for current dispatch
 }
 
 // Initialize the RPC server with references to chain state and mempool.
-rpc_server_init :: proc(srv: ^RPC_Server, cs: ^chain.Chain_State, mp: ^mempool.Mempool, params: ^consensus.Chain_Params, port: int, cm: ^p2p.Conn_Manager = nil, data_dir: string = "") {
+rpc_server_init :: proc(srv: ^RPC_Server, cs: ^chain.Chain_State, mp: ^mempool.Mempool, params: ^consensus.Chain_Params, port: int, cm: ^p2p.Conn_Manager = nil, data_dir: string = "", rpc_user: string = "", rpc_password: string = "") {
 	srv.chain = cs
 	srv.mp = mp
 	srv.params = params
 	srv.port = port
 	srv.cm = cm
 	srv.data_dir = data_dir
+	srv.rpc_user = rpc_user
+	srv.rpc_password = rpc_password
 	srv.running = false
 	srv.start_time = time.to_unix_seconds(time.now())
 }
@@ -77,8 +82,15 @@ rpc_server_run :: proc(srv: ^RPC_Server) {
 		}
 
 		// Read HTTP request body
-		body, ok := _read_http_request(client)
+		body, auth_header, ok := _read_http_request(client)
 		if ok {
+			// Check authentication if credentials are configured.
+			if len(srv.rpc_user) > 0 && !_check_auth(srv, auth_header) {
+				_send_http_401(client)
+				tcp.close(client)
+				continue
+			}
+
 			// Parse JSON-RPC request
 			req, parse_err := _parse_request(body)
 			if parse_err != nil {
@@ -97,8 +109,8 @@ rpc_server_run :: proc(srv: ^RPC_Server) {
 	}
 }
 
-// Read an HTTP POST request body. Parses Content-Length to read the exact body.
-_read_http_request :: proc(socket: tcp.TCP_Socket) -> (body: []byte, ok: bool) {
+// Read an HTTP POST request body. Parses Content-Length and Authorization header.
+_read_http_request :: proc(socket: tcp.TCP_Socket) -> (body: []byte, auth_header: string, ok: bool) {
 	buf := make([dynamic]byte, 0, 4096, context.temp_allocator)
 	recv_buf: [4096]byte
 
@@ -107,7 +119,7 @@ _read_http_request :: proc(socket: tcp.TCP_Socket) -> (body: []byte, ok: bool) {
 	for {
 		n, err := tcp.recv_tcp(socket, recv_buf[:])
 		if err != nil || n == 0 {
-			return nil, false
+			return nil, "", false
 		}
 		append(&buf, ..recv_buf[:n])
 
@@ -126,14 +138,15 @@ _read_http_request :: proc(socket: tcp.TCP_Socket) -> (body: []byte, ok: bool) {
 	}
 
 	if header_end < 0 {
-		return nil, false
+		return nil, "", false
 	}
 
-	// Parse Content-Length from headers
+	// Parse Content-Length and Authorization from headers
 	header_str := string(buf[:header_end])
 	content_length := _parse_content_length(header_str)
+	auth_header = _parse_authorization(header_str)
 	if content_length < 0 {
-		return nil, false
+		return nil, "", false
 	}
 
 	// Body starts after \r\n\r\n
@@ -144,13 +157,13 @@ _read_http_request :: proc(socket: tcp.TCP_Socket) -> (body: []byte, ok: bool) {
 	for body_have < content_length {
 		n, err := tcp.recv_tcp(socket, recv_buf[:])
 		if err != nil || n == 0 {
-			return nil, false
+			return nil, "", false
 		}
 		append(&buf, ..recv_buf[:n])
 		body_have = len(buf) - body_start
 	}
 
-	return buf[body_start:body_start + content_length], true
+	return buf[body_start:body_start + content_length], auth_header, true
 }
 
 // Extract Content-Length value from HTTP headers.
@@ -167,6 +180,53 @@ _parse_content_length :: proc(headers: string) -> int {
 		}
 	}
 	return -1
+}
+
+// Extract Authorization header value from HTTP headers.
+_parse_authorization :: proc(headers: string) -> string {
+	lines := strings.split(headers, "\r\n", context.temp_allocator)
+	for line in lines {
+		lower := strings.to_lower(line, context.temp_allocator)
+		if strings.has_prefix(lower, "authorization:") {
+			return strings.trim_space(line[len("authorization:"):])
+		}
+	}
+	return ""
+}
+
+// Validate HTTP Basic Auth against server credentials.
+_check_auth :: proc(srv: ^RPC_Server, auth_header: string) -> bool {
+	if !strings.has_prefix(auth_header, "Basic ") {
+		return false
+	}
+	encoded := auth_header[len("Basic "):]
+
+	decoded_bytes, decode_err := base64.decode(encoded, allocator = context.temp_allocator)
+	if decode_err != nil {
+		return false
+	}
+	decoded := string(decoded_bytes)
+
+	// Split on first ':' — password may contain colons.
+	colon_idx := strings.index_byte(decoded, ':')
+	if colon_idx < 0 {
+		return false
+	}
+
+	user := decoded[:colon_idx]
+	pass := decoded[colon_idx + 1:]
+
+	return user == srv.rpc_user && pass == srv.rpc_password
+}
+
+// Send an HTTP 401 Unauthorized response.
+_send_http_401 :: proc(socket: tcp.TCP_Socket) {
+	body := `{"result":null,"error":{"code":-32600,"message":"Unauthorized"},"id":null}`
+	header := fmt.tprintf(
+		"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"jsonrpc\"\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+		len(body))
+	tcp.send_tcp(socket, transmute([]byte)header)
+	tcp.send_tcp(socket, transmute([]byte)body)
 }
 
 // Send an HTTP 200 response with JSON body.

@@ -43,6 +43,7 @@ This is an educational/experimental project. It implements the core components o
 | 30 | BIP 68 + BIP 113 Lock-time Enforcement | Complete |
 | 31 | Mempool Configuration (Bitcoin Core parity) | Complete |
 | 32 | Compact Block Relay (BIP152) | Complete |
+| 33 | RPC Authentication (cookie + Basic Auth) | Complete |
 
 ## Dependencies
 
@@ -103,10 +104,12 @@ nohup ./btcnode --network=mainnet --datadir=/tmp/btcnode-mainnet --dbcache=4096 
 tail -f /tmp/btcnode-mainnet.log | grep "Blocks:"
 
 # Check current block height via RPC
-curl -s --data '{"method":"getblockcount","params":[],"id":1}' http://127.0.0.1:8332/
+curl -s -u "$(cat /tmp/btcnode-mainnet/.cookie)" \
+     --data '{"method":"getblockcount","params":[],"id":1}' http://127.0.0.1:8332/
 
 # Stop gracefully (saves mempool, flushes UTXO cache)
-curl -s --data '{"method":"stop","params":[],"id":1}' http://127.0.0.1:8332/
+curl -s -u "$(cat /tmp/btcnode-mainnet/.cookie)" \
+     --data '{"method":"stop","params":[],"id":1}' http://127.0.0.1:8332/
 # or: kill -SIGINT $(pgrep -f "btcnode.*mainnet")
 ```
 
@@ -116,7 +119,8 @@ nohup ./btcnode --network=signet --datadir=/tmp/btcnode-signet --dbcache=4096 \
   > /tmp/btcnode-signet.log 2>&1 &
 
 tail -f /tmp/btcnode-signet.log | grep "Blocks:"
-curl -s --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:38332/
+curl -s -u "$(cat /tmp/btcnode-signet/.cookie)" \
+     --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:38332/
 ```
 
 **Testnet4:**
@@ -125,7 +129,8 @@ nohup ./btcnode --network=testnet4 --datadir=/tmp/btcnode-testnet4 --dbcache=409
   > /tmp/btcnode-testnet4.log 2>&1 &
 
 tail -f /tmp/btcnode-testnet4.log | grep "Blocks:"
-curl -s --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:48332/
+curl -s -u "$(cat /tmp/btcnode-testnet4/.cookie)" \
+     --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:48332/
 ```
 
 **Testnet3:**
@@ -134,7 +139,8 @@ nohup ./btcnode --network=testnet3 --datadir=/tmp/btcnode-testnet3 --dbcache=409
   > /tmp/btcnode-testnet3.log 2>&1 &
 
 tail -f /tmp/btcnode-testnet3.log | grep "Blocks:"
-curl -s --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:18332/
+curl -s -u "$(cat /tmp/btcnode-testnet3/.cookie)" \
+     --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:18332/
 ```
 
 ### Monitoring
@@ -147,7 +153,8 @@ tail -f /tmp/btcnode-mainnet.log | grep "Blocks:"
 grep -iE "FAIL|Bad_Script|halting|consensus" /tmp/btcnode-mainnet.log
 
 # Check peer connections
-curl -s --data '{"method":"getpeerinfo","params":[],"id":1}' http://127.0.0.1:8332/ | python3 -m json.tool
+curl -s -u "$(cat /tmp/btcnode-mainnet/.cookie)" \
+     --data '{"method":"getpeerinfo","params":[],"id":1}' http://127.0.0.1:8332/ | python3 -m json.tool
 
 # Check memory/resource usage
 ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "$6/1024"MB"}'
@@ -165,6 +172,9 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | `--network=<name>` | `mainnet`, `testnet3`, `testnet4`, `signet`, `regtest` | `regtest` |
 | `--datadir=<path>` | Data directory for blocks, index, UTXO database | `/tmp/btcnode-data` |
 | `--rpcport=<port>` | JSON-RPC port | Network default |
+| `--rpcuser=<user>` | RPC auth username | Cookie auth |
+| `--rpcpassword=<pass>` | RPC auth password (must set both user and password) | Cookie auth |
+| `--server=<0\|1>` | Enable/disable RPC server | `1` |
 | `--connect=<ip:port>` | Connect to a specific peer | DNS discovery |
 | `--p2p-port=<port>` | P2P listen port | Network default |
 | `--no-p2p` | Disable P2P (RPC-only mode) | `false` |
@@ -203,6 +213,9 @@ The node reads an optional `btcnode.conf` from the data directory (`<datadir>/bt
 
 network=regtest
 rpcport=18443
+rpcuser=myuser
+rpcpassword=mypassword
+server=1
 connect=127.0.0.1:18444
 no-p2p=1
 dbcache=450
@@ -243,14 +256,20 @@ Values in a network-specific section (e.g. `[regtest]`) take priority over globa
 
 ## RPC Interface
 
-The node exposes a JSON-RPC 1.0 interface over HTTP. Use `bitcoin-cli` or `curl` to interact:
+The node exposes a JSON-RPC 1.0 interface over HTTP with authentication. By default, a `.cookie` file is generated in the data directory (matching Bitcoin Core's cookie auth). You can also set explicit credentials with `--rpcuser` and `--rpcpassword`.
 
 ```bash
-# Using curl
-curl -s --data '{"method":"getblockchaininfo","params":[],"id":1}' \
+# Using curl with cookie auth (default)
+curl -s -u "$(cat /tmp/btcnode-data/.cookie)" \
+     --data '{"method":"getblockchaininfo","params":[],"id":1}' \
      http://127.0.0.1:18443/
 
-# Using bitcoin-cli
+# Using curl with explicit credentials
+curl -s -u myuser:mypassword \
+     --data '{"method":"getblockchaininfo","params":[],"id":1}' \
+     http://127.0.0.1:18443/
+
+# Using bitcoin-cli (reads cookie file automatically)
 bitcoin-cli -rpcport=18443 getblockchaininfo
 ```
 
