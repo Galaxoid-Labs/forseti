@@ -268,6 +268,72 @@ deserialize_addr :: proc(r: ^Wire_Reader, allocator := context.allocator) -> (ms
 	return msg, nil
 }
 
+// --- Addr V2 message (BIP155) ---
+
+Addr_V2_Message :: struct {
+	addresses: []Addr_V2_Address,
+}
+
+serialize_addr_v2 :: proc(w: ^Wire_Writer, msg: ^Addr_V2_Message) {
+	write_compact_size(w, u64(len(msg.addresses)))
+	for &entry in msg.addresses {
+		write_u32le(w, entry.timestamp)
+		write_compact_size(w, entry.services)
+		write_byte(w, u8(entry.net))
+		write_compact_size(w, u64(len(entry.addr)))
+		write_bytes(w, entry.addr)
+		// Port is big-endian on wire.
+		write_byte(w, u8(entry.port >> 8))
+		write_byte(w, u8(entry.port))
+	}
+}
+
+deserialize_addr_v2 :: proc(r: ^Wire_Reader, allocator := context.allocator) -> (msg: Addr_V2_Message, err: Wire_Error) {
+	count := read_compact_size(r) or_return
+	if count > 1000 {
+		return {}, .Payload_Too_Large
+	}
+
+	addrs := make([dynamic]Addr_V2_Address, 0, int(count), allocator)
+
+	for _ in 0 ..< int(count) {
+		timestamp := read_u32le(r) or_return
+		services := read_compact_size(r) or_return
+		net_byte := read_byte(r) or_return
+		addr_len := read_compact_size(r) or_return
+
+		if addr_len > 512 {
+			return {}, .Invalid_Data
+		}
+
+		addr_bytes := read_bytes(r, int(addr_len), allocator) or_return
+
+		// Port is big-endian on wire.
+		hi := read_byte(r) or_return
+		lo := read_byte(r) or_return
+		port := u16(hi) << 8 | u16(lo)
+
+		net := Addr_V2_Net(net_byte)
+		expected := addr_v2_expected_len(net)
+
+		// Skip unknown network types or wrong-length addresses.
+		if expected == 0 || int(addr_len) != expected {
+			continue
+		}
+
+		append(&addrs, Addr_V2_Address{
+			timestamp = timestamp,
+			services  = services,
+			net       = net,
+			addr      = addr_bytes,
+			port      = port,
+		})
+	}
+
+	msg.addresses = addrs[:]
+	return msg, nil
+}
+
 // --- SendHeaders (empty payload, BIP130) ---
 // No struct needed — just send/expect an empty payload.
 

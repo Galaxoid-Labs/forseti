@@ -2,16 +2,16 @@
 
 A Bitcoin full node implementation written in [Odin](https://odin-lang.org/). Built from scratch with no Bitcoin library dependencies — only libsecp256k1 for elliptic curve cryptography, vendored RIPEMD-160, and vendored LevelDB for storage.
 
-This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, compact block relay (BIP152), feefilter (BIP133), wtxid relay (BIP339), mempool with RBF, and a JSON-RPC interface with 42 methods.
+This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, compact block relay (BIP152), feefilter (BIP133), wtxid relay (BIP339), addr relay with addrv2 (BIP155), mempool with RBF, and a JSON-RPC interface with 42 methods.
 
 ## Status
 
-**270 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Builds on macOS and Linux.
+**272 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Builds on macOS and Linux.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
 | 0 | Crypto + C Bindings | Complete (31 tests) |
-| 1 | Wire Protocol + Serialization | Complete (33 tests) |
+| 1 | Wire Protocol + Serialization | Complete (35 tests) |
 | 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH, Taproot) | Complete (50 tests) |
 | 3 | Consensus Rules + Block Validation | Complete (22 tests) |
 | 4 | UTXO Set + Chain State | Complete (20 tests) |
@@ -45,6 +45,7 @@ This is an educational/experimental project. It implements the core components o
 | 32 | Compact Block Relay (BIP152) | Complete |
 | 33 | RPC Authentication (cookie + Basic Auth) | Complete |
 | 34 | BIP 133 feefilter + BIP 339 wtxid relay | Complete |
+| 35 | BIP 155 addr relay + addrv2 | Complete |
 
 ## Dependencies
 
@@ -179,6 +180,7 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | `--connect=<ip:port>` | Connect to a specific peer | DNS discovery |
 | `--p2p-port=<port>` | P2P listen port | Network default |
 | `--no-p2p` | Disable P2P (RPC-only mode) | `false` |
+| `--maxconnections=<N>` | Maximum outbound peer connections | `8` |
 | `--dbcache=<MB>` | Database cache size in MiB | `450` |
 | `--par=<N>` | Script verification threads (0=auto, 1=serial, 2+=parallel) | `0` |
 | `--assumevalid=<height>` | Skip script verification below height (0=disable) | Network default |
@@ -222,6 +224,7 @@ no-p2p=1
 dbcache=450
 par=0
 assumevalid=880000
+maxconnections=8
 
 # Mempool settings (Bitcoin Core compatible)
 maxmempool=300
@@ -394,12 +397,12 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 ## Testing
 
 ```bash
-# Run all 270 tests
+# Run all 272 tests
 make test
 
 # Test individual packages
 odin test crypto          # 31 tests
-odin test wire            # 33 tests
+odin test wire            # 35 tests
 odin test script          # 50 tests (use -define:ODIN_TEST_THREADS=1 if flaky)
 odin test consensus       # 22 tests
 odin test storage         # 16 tests
@@ -416,12 +419,12 @@ bitcoin-node-odin/
 ├── main.odin              # Entry point, CLI parsing, config file, thread orchestration
 ├── Makefile               # Build system
 ├── crypto/                # SHA-256d, RIPEMD-160, HASH160, secp256k1 (verify+sign), Merkle root, address encoding, WIF, SipHash-2-4
-├── wire/                  # Protocol types, CompactSize, tx/block serialization, message framing, compact blocks (BIP152)
+├── wire/                  # Protocol types, CompactSize, tx/block serialization, message framing, compact blocks (BIP152), addrv2 (BIP155)
 ├── script/                # Script interpreter, opcodes, standard types, Taproot (BIP341/342)
 ├── consensus/             # Chain params, PoW, difficulty, block/tx validation, BIP325 signet
 ├── storage/               # LevelDB bindings + wrapper, flat files, block DB, index DB, UTXO DB
 ├── chain/                 # UTXO cache, block index (skip list), undo data, chain state
-├── p2p/                   # Peer connections, sync manager, connection manager
+├── p2p/                   # Peer connections, sync manager, connection manager, address manager
 ├── mempool/               # Fee rates, relay policy, validation pipeline, RBF, persistence, configurable limits
 ├── rpc/                   # JSON-RPC server (42 methods), handlers, types
 └── deps/                  # C/C++ dependencies
@@ -472,7 +475,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Compact block relay (BIP152)**: Receive-side implementation — negotiates compact block v2 (wtxid-based short IDs) with peers, reconstructs blocks from mempool using SipHash-2-4 short ID matching, requests missing transactions via `getblocktxn`/`blocktxn`, falls back to full block download after 10s timeout. Reduces block relay bandwidth by ~90% when mempool is populated
 - **Steady-state sync**: BIP130 `sendheaders` for header announcements, periodic `getheaders` polling (120s), and `inv`-triggered header requests keep the node up-to-date after IBD
 - **Adaptive stall detection**: Bitcoin Core-style stall handling — default 10s timeout, doubles on disconnect (max 64s), decays by 0.85x on successful block connects. Slow peers (throughput <10% of fastest) are evicted after a trial period. Disconnected peers are replaced via DNS discovery
-- **DNS peer discovery**: Resolves all A records from DNS seeds (typically 20+ addresses per seed), connects up to 8 outbound peers. Address pool strings are heap-allocated for stable lifetimes across event loop ticks
+- **Peer discovery + addr relay (BIP155)**: DNS seeds populate an address manager at startup. After handshake, `sendaddrv2` is negotiated and `getaddr` requests peers' address lists. Inbound `addr`/`addrv2` messages add to the address manager (FNV-1a dedup, 5000 entry cap). Small announcements (≤10 entries) are forwarded to 1-2 random peers with automatic v1↔v2 format conversion. Replacement peers are drawn from the address manager. Configurable via `--maxconnections=N` (default 8)
 - **Write-back UTXO cache**: In-memory cache with dirty/fresh flags, flushed atomically to LevelDB when memory usage exceeds the configurable budget (`--dbcache`, default 450 MiB). Rollback support for failed block validation
 - **Block index**: In-memory tree with skip list pointers for O(log n) ancestor lookup, persisted to LevelDB. `by_prev` index provides O(1) next-block lookup for chain traversal
 - **Sighash caching**: BIP143 (SegWit v0) and BIP341 (Taproot) intermediate hashes are cached per-transaction, avoiding O(n^2) re-computation for transactions with many inputs
@@ -481,7 +484,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Mempool configuration**: 16 configurable settings matching Bitcoin Core defaults — memory-based size limiting (`--maxmempool`, default 300 MB) with fee-based eviction and dynamic minimum fee, transaction expiry (`--mempoolexpiry`, default 336 hours), ancestor/descendant chain limits (count and size), configurable relay/dust/incremental fees, datacarrier toggle, bare multisig toggle, blocks-only mode (`--blocksonly`), and optional persistence (`--persistmempool`). All settings supported via CLI flags and `btcnode.conf`
 - **Memory-based mempool limiting**: Tracks total vsize of all entries. When usage exceeds the limit, lowest fee-rate transactions are evicted and the dynamic minimum fee (`mempoolminfee` in `getmempoolinfo`) is raised. Resets when usage drops below the limit after a block connect
 - **Mempool persistence**: Mempool is saved to `<datadir>/mempool.dat` on shutdown and reloaded/revalidated on startup (controlled by `--persistmempool`)
-- **Transaction relay**: P2P `inv`/`tx`/`getdata` handling for propagating mempool transactions to peers. BIP 133 feefilter: sends our minimum fee rate to peers after handshake, stores each peer's feefilter, skips peers whose feefilter exceeds the tx's fee rate during relay. BIP 339 wtxid relay: negotiates wtxid-based `inv` between `version` and `verack`, announces txs by wtxid to modern peers (txid fallback for legacy peers), mempool maintains a wtxid→txid reverse index for `getdata` lookups. Cross-thread safety: RPC thread pushes relay items (txid + wtxid + fee rate) to a mutex-protected queue, P2P event loop drains it. `--blocksonly` disables inbound and outbound tx relay (RPC `sendrawtransaction` still works)
+- **Transaction relay**: P2P `inv`/`tx`/`getdata` handling for propagating mempool transactions to peers. BIP 133 feefilter: sends our minimum fee rate to peers after handshake, stores each peer's feefilter, skips peers whose feefilter exceeds the tx's fee rate during relay. BIP 339 wtxid relay: negotiates wtxid-based `inv` between `version` and `verack`, announces txs by wtxid to modern peers (txid fallback for legacy peers), mempool maintains a wtxid→txid reverse index for `getdata` lookups. BIP 155 addr relay: negotiates `sendaddrv2` before `verack`, handles `addr`/`addrv2`/`getaddr` messages, forwards small announcements to peers. Cross-thread safety: RPC thread pushes relay items (txid + wtxid + fee rate) to a mutex-protected queue, P2P event loop drains it. `--blocksonly` disables inbound and outbound tx relay (RPC `sendrawtransaction` still works)
 - **RBF (BIP125)**: Full replace-by-fee support — signaling check (opt-in or fullrbf), no new unconfirmed parents, higher absolute fee, bandwidth fee (configurable via `--incrementalrelayfee`), max evictions (configurable)
 - **Lax DER signature parsing**: Pre-BIP66 transactions may contain non-strictly-encoded DER signatures. The verification path uses a lax DER parser (matching Bitcoin Core's `ecdsa_signature_parse_der_lax`), while strict DER validation is enforced separately by the script interpreter when BIP66 is active
 - **Address encoding**: Base58Check (P2PKH, P2SH) and Bech32/Bech32m (P2WPKH, P2WSH, P2TR) for both encoding and decoding, with network-aware validation

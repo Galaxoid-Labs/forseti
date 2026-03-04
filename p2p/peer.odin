@@ -34,6 +34,9 @@ Peer :: struct {
 	// BIP339 wtxid relay
 	wtxid_relay:      bool, // peer sent us wtxidrelay
 	wtxid_relay_us:   bool, // we sent wtxidrelay to peer
+	// BIP155 addrv2
+	addrv2_relay:     bool, // peer sent sendaddrv2
+	addr_sent:        bool, // we sent getaddr to this peer
 	// BIP152 compact block support
 	compact_version:  u64,  // 0 = not negotiated, 2 = v2
 	compact_announce: bool, // peer will send us cmpctblock proactively
@@ -422,4 +425,33 @@ peer_send_feefilter :: proc(peer: ^Peer, feerate: i64) -> Net_Error {
 // Send wtxidrelay (BIP339, empty payload). Must be sent between version and verack.
 peer_send_wtxidrelay :: proc(peer: ^Peer) -> Net_Error {
 	return peer_send_message(peer, wire.CMD_WTXIDRELAY, nil)
+}
+
+// Send sendaddrv2 (BIP155, empty payload). Must be sent between version and verack.
+peer_send_sendaddrv2 :: proc(peer: ^Peer) -> Net_Error {
+	return peer_send_message(peer, wire.CMD_SENDADDRV2, nil)
+}
+
+// Send getaddr (empty payload). Request peer's address list.
+peer_send_getaddr :: proc(peer: ^Peer) -> Net_Error {
+	peer.addr_sent = true
+	return peer_send_message(peer, wire.CMD_GETADDR, nil)
+}
+
+// Send addr (v1) message with a list of addresses.
+peer_send_addr :: proc(peer: ^Peer, addresses: []wire.Net_Address_Timestamp) -> Net_Error {
+	msg := wire.Addr_Message{addresses = addresses}
+	w := wire.writer_init()
+	defer wire.writer_destroy(&w)
+	wire.serialize_addr(&w, &msg)
+	return peer_send_message(peer, wire.CMD_ADDR, wire.writer_bytes(&w))
+}
+
+// Send addrv2 (BIP155) message with a list of v2 addresses.
+peer_send_addrv2 :: proc(peer: ^Peer, addresses: []wire.Addr_V2_Address) -> Net_Error {
+	msg := wire.Addr_V2_Message{addresses = addresses}
+	w := wire.writer_init()
+	defer wire.writer_destroy(&w)
+	wire.serialize_addr_v2(&w, &msg)
+	return peer_send_message(peer, wire.CMD_ADDRV2, wire.writer_bytes(&w))
 }

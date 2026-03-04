@@ -120,6 +120,36 @@ Net_Address_Timestamp :: struct {
 	address:   Net_Address,
 }
 
+// --- BIP 155: addrv2 types ---
+
+Addr_V2_Net :: enum u8 {
+	IPv4  = 1,   // 4 bytes
+	IPv6  = 2,   // 16 bytes
+	TorV3 = 4,   // 32 bytes
+	I2P   = 5,   // 32 bytes
+	CJDNS = 6,   // 16 bytes
+}
+
+Addr_V2_Address :: struct {
+	timestamp: u32,
+	services:  u64,
+	net:       Addr_V2_Net,
+	addr:      []byte,   // variable length per net type
+	port:      u16,
+}
+
+// Returns expected addr length for known BIP155 network types, 0 for unknown.
+addr_v2_expected_len :: proc(net: Addr_V2_Net) -> int {
+	switch net {
+	case .IPv4:  return 4
+	case .IPv6:  return 16
+	case .TorV3: return 32
+	case .I2P:   return 32
+	case .CJDNS: return 16
+	}
+	return 0
+}
+
 // --- Helpers ---
 
 tx_has_witness :: proc(tx: ^Tx) -> bool {

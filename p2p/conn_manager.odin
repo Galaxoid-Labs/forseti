@@ -23,9 +23,8 @@ Conn_Manager :: struct {
 	network_magic:      u32,
 	default_port:       int,
 	shutdown:           bool,
-	// Pool of discovered addresses for replacing disconnected peers.
-	address_pool:       [dynamic]string,
-	address_pool_cursor: int,
+	// Address manager for peer discovery and addr relay (BIP155).
+	addr_mgr:           Addr_Manager,
 	// nbio event loop reference for cross-thread operations.
 	event_loop:         ^nbio.Event_Loop,
 	// Pre-configured peer address (from --connect), connected during conn_manager_run.
@@ -41,6 +40,8 @@ Conn_Manager :: struct {
 	relay_queue:        [dynamic]Relay_Item,
 	// Blocks-only mode: reject inbound txs, skip tx relay.
 	blocks_only:        bool,
+	// Maximum outbound peer connections (default: MAX_OUTBOUND_PEERS).
+	max_outbound:       int,
 }
 
 conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) -> Net_Error {
@@ -50,6 +51,7 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 	cm.network_magic = params.network_magic
 	cm.next_peer_id = 1
 	cm.shutdown = false
+	cm.max_outbound = MAX_OUTBOUND_PEERS
 
 	// Set default port based on network.
 	switch params.network_magic {
@@ -61,12 +63,13 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 	case:                     cm.default_port = DEFAULT_PORT_MAINNET
 	}
 
-	cm.peers = make(map[Peer_Id]^Peer, MAX_OUTBOUND_PEERS * 2)
+	cm.peers = make(map[Peer_Id]^Peer, cm.max_outbound * 2)
 	cm.zombie_peers = make([dynamic]^Peer, 0, 8)
 	cm.relay_queue = make([dynamic]Relay_Item, 0, 16)
 	cm.last_ping_check = time.to_unix_seconds(time.now())
 	cm.last_header_refresh = time.to_unix_seconds(time.now())
 
+	addr_manager_init(&cm.addr_mgr)
 	sync_manager_init(&cm.sync_mgr, cs, params, mp)
 
 	return .None
@@ -85,10 +88,7 @@ conn_manager_destroy :: proc(cm: ^Conn_Manager) {
 		_peer_free(peer)
 	}
 	delete(cm.peers)
-	for addr in cm.address_pool {
-		delete(addr)
-	}
-	delete(cm.address_pool)
+	addr_manager_destroy(&cm.addr_mgr)
 	delete(cm.relay_queue)
 
 	sync_manager_destroy(&cm.sync_mgr)
@@ -96,7 +96,7 @@ conn_manager_destroy :: proc(cm: ^Conn_Manager) {
 
 // Start an async connect to a peer. Returns immediately.
 conn_manager_add_peer :: proc(cm: ^Conn_Manager, address: string, port: int) -> Net_Error {
-	if len(cm.peers) >= MAX_OUTBOUND_PEERS {
+	if len(cm.peers) >= cm.max_outbound {
 		return .Too_Many_Peers
 	}
 
@@ -118,11 +118,8 @@ conn_manager_remove_peer :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 	append(&cm.zombie_peers, peer)
 }
 
-// Discover peers via DNS seed resolution.
-// Resolves ALL A records from each seed to maximize peer diversity.
-conn_manager_discover_peers :: proc(cm: ^Conn_Manager) -> [dynamic]string {
-	addresses := make([dynamic]string, 0, 32)
-
+// Discover peers via DNS seed resolution and populate addr_mgr.
+conn_manager_discover_peers :: proc(cm: ^Conn_Manager) {
 	seeds: []string
 	switch cm.params.network_magic {
 	case wire.MAINNET_MAGIC:
@@ -138,8 +135,10 @@ conn_manager_discover_peers :: proc(cm: ^Conn_Manager) -> [dynamic]string {
 		s := SIGNET_SEEDS
 		seeds = s[:]
 	case:
-		return addresses
+		return
 	}
+
+	now := u32(time.to_unix_seconds(time.now()))
 
 	for seed in seeds {
 		records, dns_err := tcp.get_dns_records_from_os(seed, .IP4, context.temp_allocator)
@@ -155,21 +154,17 @@ conn_manager_discover_peers :: proc(cm: ^Conn_Manager) -> [dynamic]string {
 			if !ok {
 				continue
 			}
-			addr := rec.address
-			addr_str := fmt.aprintf("%d.%d.%d.%d", addr[0], addr[1], addr[2], addr[3])
-			append(&addresses, addr_str)
-
-			if len(addresses) >= MAX_OUTBOUND_PEERS * 2 {
-				break
+			addr_bytes := [4]byte{rec.address[0], rec.address[1], rec.address[2], rec.address[3]}
+			ka := Known_Address{
+				services  = NODE_NETWORK | NODE_WITNESS,
+				net       = .IPv4,
+				addr      = addr_bytes[:],
+				port      = u16(cm.default_port),
+				timestamp = now,
 			}
-		}
-
-		if len(addresses) >= MAX_OUTBOUND_PEERS * 2 {
-			break
+			addr_manager_add(&cm.addr_mgr, &ka)
 		}
 	}
-
-	return addresses
 }
 
 // Cleanly shut down the connection manager. Safe to call from any thread.
@@ -283,23 +278,21 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 
 	// Discover peers via DNS if no manual peer was configured.
 	if len(cm.peers) == 0 {
-		addresses := conn_manager_discover_peers(cm)
+		conn_manager_discover_peers(cm)
 
 		connected := 0
-		for addr in addresses {
-			if connected >= MAX_OUTBOUND_PEERS {
+		for connected < cm.max_outbound {
+			addr_str, port, ok := addr_manager_get_connectable(&cm.addr_mgr)
+			if !ok {
 				break
 			}
-			err := conn_manager_add_peer(cm, addr, cm.default_port)
+			err := conn_manager_add_peer(cm, addr_str, port)
 			if err == .None {
 				connected += 1
-				log.infof("Connecting to %s:%d", addr, cm.default_port)
+				log.infof("Connecting to %s:%d", addr_str, port)
 			}
+			delete(addr_str)
 		}
-
-		// Keep remaining addresses for reconnection.
-		cm.address_pool = addresses
-		cm.address_pool_cursor = min(connected, len(addresses))
 
 		if connected == 0 {
 			log.warn("No peers available. Exiting.")
@@ -373,8 +366,14 @@ _conn_manager_dispatch :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, cmd: string,
 		_conn_manager_handle_feefilter(cm, peer_id, payload)
 	case wire.CMD_WTXIDRELAY:
 		_conn_manager_handle_wtxidrelay(cm, peer_id)
-	case wire.CMD_ADDRV2, wire.CMD_ADDR:
-		// Ignored.
+	case wire.CMD_SENDADDRV2:
+		_conn_manager_handle_sendaddrv2(cm, peer_id)
+	case wire.CMD_ADDR:
+		_conn_manager_handle_addr(cm, peer_id, payload)
+	case wire.CMD_ADDRV2:
+		_conn_manager_handle_addrv2(cm, peer_id, payload)
+	case wire.CMD_GETADDR:
+		_conn_manager_handle_getaddr(cm, peer_id)
 	case:
 		// Unknown command — ignore.
 	}
@@ -406,6 +405,9 @@ _conn_manager_handle_version :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 	peer_send_wtxidrelay(peer)
 	peer.wtxid_relay_us = true
 
+	// BIP155: Send sendaddrv2 before verack.
+	peer_send_sendaddrv2(peer)
+
 	// Send verack in response.
 	peer_send_verack(peer)
 
@@ -436,6 +438,9 @@ _conn_manager_handle_verack :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 			our_fee := max(cm.mp.min_fee, cm.mp.config.min_relay_tx_fee)
 			peer_send_feefilter(peer, our_fee)
 		}
+
+		// Request peer's address list.
+		peer_send_getaddr(peer)
 
 		// Register peer for sync tracking.
 		sync_add_peer(&cm.sync_mgr, peer_id)
@@ -770,33 +775,283 @@ _conn_manager_handle_wtxidrelay :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 
 // Try to connect a replacement peer when a slot opens.
 _conn_manager_replace_peer :: proc(cm: ^Conn_Manager) {
-	if len(cm.peers) >= MAX_OUTBOUND_PEERS {
+	if len(cm.peers) >= cm.max_outbound {
 		return
 	}
 
-	// Try addresses from the pool.
-	attempts := 0
-	for cm.address_pool_cursor < len(cm.address_pool) && attempts < 5 {
-		addr := cm.address_pool[cm.address_pool_cursor]
-		cm.address_pool_cursor += 1
-		attempts += 1
-
-		err := conn_manager_add_peer(cm, addr, cm.default_port)
+	// Try addresses from the addr manager.
+	for attempt in 0 ..< 5 {
+		addr_str, port, ok := addr_manager_get_connectable(&cm.addr_mgr)
+		if !ok {
+			break
+		}
+		err := conn_manager_add_peer(cm, addr_str, port)
 		if err == .None {
-			log.infof("Replacement peer connecting: %s:%d", addr, cm.default_port)
+			log.infof("Replacement peer connecting: %s:%d", addr_str, port)
+			delete(addr_str)
 			return
+		}
+		delete(addr_str)
+	}
+
+	// No connectable addresses — re-discover via DNS.
+	if addr_manager_ipv4_count(&cm.addr_mgr) == 0 {
+		log.debug("No connectable addresses, re-discovering via DNS")
+		conn_manager_discover_peers(cm)
+	}
+}
+
+// Handle inbound sendaddrv2 (BIP155): mark peer as supporting addrv2.
+// Must arrive before verack per BIP155 — ignore if peer is already Active.
+_conn_manager_handle_sendaddrv2 :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
+	peer, found := cm.peers[peer_id]
+	if !found {
+		return
+	}
+
+	if peer.state == .Active {
+		return
+	}
+
+	peer.addrv2_relay = true
+	log.debugf("Peer %d supports addrv2", peer_id)
+}
+
+// Handle inbound addr (v1) message: add addresses to addr_mgr, forward small batches.
+_conn_manager_handle_addr :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []byte) {
+	r := wire.reader_init(payload)
+	msg, err := wire.deserialize_addr(&r, context.temp_allocator)
+	if err != .None {
+		return
+	}
+
+	added := 0
+	for &entry in msg.addresses {
+		// Extract IPv4 from IPv6-mapped address (::ffff:a.b.c.d).
+		is_ipv4 := true
+		for i in 0 ..< 10 {
+			if entry.address.ip[i] != 0 {
+				is_ipv4 = false
+				break
+			}
+		}
+		if is_ipv4 && entry.address.ip[10] == 0xFF && entry.address.ip[11] == 0xFF {
+			addr_bytes := entry.address.ip[12:16]
+			ka := Known_Address{
+				services  = entry.address.services,
+				net       = .IPv4,
+				addr      = addr_bytes,
+				port      = entry.address.port,
+				timestamp = entry.timestamp,
+			}
+			if addr_manager_add(&cm.addr_mgr, &ka) {
+				added += 1
+			}
+		} else {
+			// Full IPv6 address.
+			ka := Known_Address{
+				services  = entry.address.services,
+				net       = .IPv6,
+				addr      = entry.address.ip[:],
+				port      = entry.address.port,
+				timestamp = entry.timestamp,
+			}
+			if addr_manager_add(&cm.addr_mgr, &ka) {
+				added += 1
+			}
 		}
 	}
 
-	// Pool exhausted — re-discover via DNS.
-	if cm.address_pool_cursor >= len(cm.address_pool) {
-		log.debug("Address pool exhausted, re-discovering via DNS")
-		for addr in cm.address_pool {
-			delete(addr)
+	if added > 0 {
+		log.debugf("Peer %d: addr message added %d/%d addresses (total: %d)",
+			peer_id, added, len(msg.addresses), addr_manager_count(&cm.addr_mgr))
+	}
+
+	// Forward small batches (unsolicited announcements, ≤10 entries) to 1-2 random peers.
+	if len(msg.addresses) <= 10 {
+		_conn_manager_forward_addr(cm, peer_id, msg.addresses)
+	}
+}
+
+// Handle inbound addrv2 (BIP155) message.
+_conn_manager_handle_addrv2 :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []byte) {
+	peer, found := cm.peers[peer_id]
+	if !found {
+		return
+	}
+
+	// Only accept addrv2 from peers that sent sendaddrv2.
+	if !peer.addrv2_relay {
+		return
+	}
+
+	r := wire.reader_init(payload)
+	msg, err := wire.deserialize_addr_v2(&r, context.temp_allocator)
+	if err != .None {
+		return
+	}
+
+	added := 0
+	for &entry in msg.addresses {
+		ka := Known_Address{
+			services  = entry.services,
+			net       = entry.net,
+			addr      = entry.addr,
+			port      = entry.port,
+			timestamp = entry.timestamp,
 		}
-		delete(cm.address_pool)
-		cm.address_pool = conn_manager_discover_peers(cm)
-		cm.address_pool_cursor = 0
+		if addr_manager_add(&cm.addr_mgr, &ka) {
+			added += 1
+		}
+	}
+
+	if added > 0 {
+		log.debugf("Peer %d: addrv2 message added %d/%d addresses (total: %d)",
+			peer_id, added, len(msg.addresses), addr_manager_count(&cm.addr_mgr))
+	}
+
+	// Forward small batches to 1-2 random peers.
+	if len(msg.addresses) <= 10 {
+		_conn_manager_forward_addrv2(cm, peer_id, msg.addresses)
+	}
+}
+
+// Handle inbound getaddr: respond with up to 1000 random addresses.
+_conn_manager_handle_getaddr :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
+	peer, found := cm.peers[peer_id]
+	if !found || peer.state != .Active {
+		return
+	}
+
+	addrs := addr_manager_get_random(&cm.addr_mgr, 1000, context.temp_allocator)
+	if len(addrs) == 0 {
+		return
+	}
+
+	if peer.addrv2_relay {
+		// Send addrv2 to peers that negotiated it.
+		v2_addrs := make([]wire.Addr_V2_Address, len(addrs), context.temp_allocator)
+		for ka, i in addrs {
+			v2_addrs[i] = wire.Addr_V2_Address{
+				timestamp = ka.timestamp,
+				services  = ka.services,
+				net       = ka.net,
+				addr      = ka.addr,
+				port      = ka.port,
+			}
+		}
+		peer_send_addrv2(peer, v2_addrs)
+	} else {
+		// Send v1 addr (IPv4/IPv6 only).
+		v1_addrs := make([dynamic]wire.Net_Address_Timestamp, 0, len(addrs), context.temp_allocator)
+		for ka in addrs {
+			if ka.net == .IPv4 && len(ka.addr) == 4 {
+				na: wire.Net_Address
+				na.services = ka.services
+				na.port = ka.port
+				// IPv4-mapped IPv6.
+				na.ip[10] = 0xFF
+				na.ip[11] = 0xFF
+				copy(na.ip[12:], ka.addr)
+				append(&v1_addrs, wire.Net_Address_Timestamp{timestamp = ka.timestamp, address = na})
+			} else if ka.net == .IPv6 && len(ka.addr) == 16 {
+				na: wire.Net_Address
+				na.services = ka.services
+				na.port = ka.port
+				copy(na.ip[:], ka.addr)
+				append(&v1_addrs, wire.Net_Address_Timestamp{timestamp = ka.timestamp, address = na})
+			}
+		}
+		if len(v1_addrs) > 0 {
+			peer_send_addr(peer, v1_addrs[:])
+		}
+	}
+
+	log.debugf("Peer %d: responded to getaddr with %d addresses", peer_id, len(addrs))
+}
+
+// Forward addr v1 entries to 1-2 random active peers (skip sender).
+_conn_manager_forward_addr :: proc(cm: ^Conn_Manager, from_peer: Peer_Id, addresses: []wire.Net_Address_Timestamp) {
+	forwarded := 0
+	for id, peer in cm.peers {
+		if id == from_peer || peer.state != .Active {
+			continue
+		}
+		if forwarded >= 2 {
+			break
+		}
+
+		if peer.addrv2_relay {
+			// Convert v1 to v2 for addrv2 peers.
+			v2_addrs := make([dynamic]wire.Addr_V2_Address, 0, len(addresses), context.temp_allocator)
+			for &entry in addresses {
+				is_ipv4 := true
+				for i in 0 ..< 10 {
+					if entry.address.ip[i] != 0 {
+						is_ipv4 = false
+						break
+					}
+				}
+				if is_ipv4 && entry.address.ip[10] == 0xFF && entry.address.ip[11] == 0xFF {
+					append(&v2_addrs, wire.Addr_V2_Address{
+						timestamp = entry.timestamp, services = entry.address.services,
+						net = .IPv4, addr = entry.address.ip[12:16], port = entry.address.port,
+					})
+				} else {
+					append(&v2_addrs, wire.Addr_V2_Address{
+						timestamp = entry.timestamp, services = entry.address.services,
+						net = .IPv6, addr = entry.address.ip[:], port = entry.address.port,
+					})
+				}
+			}
+			if len(v2_addrs) > 0 {
+				peer_send_addrv2(peer, v2_addrs[:])
+			}
+		} else {
+			peer_send_addr(peer, addresses)
+		}
+		forwarded += 1
+	}
+}
+
+// Forward addrv2 entries to 1-2 random active peers (skip sender).
+_conn_manager_forward_addrv2 :: proc(cm: ^Conn_Manager, from_peer: Peer_Id, addresses: []wire.Addr_V2_Address) {
+	forwarded := 0
+	for id, peer in cm.peers {
+		if id == from_peer || peer.state != .Active {
+			continue
+		}
+		if forwarded >= 2 {
+			break
+		}
+
+		if peer.addrv2_relay {
+			peer_send_addrv2(peer, addresses)
+		} else {
+			// Downgrade to v1 for non-addrv2 peers (IPv4/IPv6 only).
+			v1_addrs := make([dynamic]wire.Net_Address_Timestamp, 0, len(addresses), context.temp_allocator)
+			for &entry in addresses {
+				if entry.net == .IPv4 && len(entry.addr) == 4 {
+					na: wire.Net_Address
+					na.services = entry.services
+					na.port = entry.port
+					na.ip[10] = 0xFF
+					na.ip[11] = 0xFF
+					copy(na.ip[12:], entry.addr)
+					append(&v1_addrs, wire.Net_Address_Timestamp{timestamp = entry.timestamp, address = na})
+				} else if entry.net == .IPv6 && len(entry.addr) == 16 {
+					na: wire.Net_Address
+					na.services = entry.services
+					na.port = entry.port
+					copy(na.ip[:], entry.addr)
+					append(&v1_addrs, wire.Net_Address_Timestamp{timestamp = entry.timestamp, address = na})
+				}
+			}
+			if len(v1_addrs) > 0 {
+				peer_send_addr(peer, v1_addrs[:])
+			}
+		}
+		forwarded += 1
 	}
 }
 

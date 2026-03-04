@@ -783,3 +783,64 @@ test_block_txn_roundtrip :: proc(t: ^testing.T) {
 	testing.expect_value(t, msg2.txs[0].version, i32(2))
 	testing.expect_value(t, msg2.txs[0].outputs[0].value, i64(1000))
 }
+
+// --- BIP155 addrv2 message tests ---
+
+@(test)
+test_addrv2_roundtrip :: proc(t: ^testing.T) {
+	// Build an addrv2 message with IPv4, IPv6, and TorV3 addresses.
+	ipv4_addr := make([]byte, 4, context.temp_allocator)
+	ipv4_addr[0] = 192; ipv4_addr[1] = 168; ipv4_addr[2] = 1; ipv4_addr[3] = 100
+
+	ipv6_addr := make([]byte, 16, context.temp_allocator)
+	ipv6_addr[0] = 0x20; ipv6_addr[1] = 0x01
+	ipv6_addr[15] = 0x01
+
+	torv3_addr := make([]byte, 32, context.temp_allocator)
+	torv3_addr[0] = 0xAA; torv3_addr[31] = 0xBB
+
+	msg := Addr_V2_Message{
+		addresses = []Addr_V2_Address{
+			{timestamp = 1700000000, services = 1033, net = .IPv4, addr = ipv4_addr, port = 8333},
+			{timestamp = 1700000100, services = 1, net = .IPv6, addr = ipv6_addr, port = 18333},
+			{timestamp = 1700000200, services = 0, net = .TorV3, addr = torv3_addr, port = 9050},
+		},
+	}
+
+	w := writer_init(context.temp_allocator)
+	serialize_addr_v2(&w, &msg)
+
+	r := reader_init(writer_bytes(&w))
+	msg2, err := deserialize_addr_v2(&r, context.temp_allocator)
+	testing.expect(t, err == nil, "deserialize should succeed")
+	testing.expect_value(t, len(msg2.addresses), 3)
+
+	// IPv4
+	testing.expect_value(t, msg2.addresses[0].net, Addr_V2_Net.IPv4)
+	testing.expect_value(t, len(msg2.addresses[0].addr), 4)
+	testing.expect_value(t, msg2.addresses[0].addr[0], u8(192))
+	testing.expect_value(t, msg2.addresses[0].port, u16(8333))
+	testing.expect_value(t, msg2.addresses[0].services, u64(1033))
+	testing.expect_value(t, msg2.addresses[0].timestamp, u32(1700000000))
+
+	// IPv6
+	testing.expect_value(t, msg2.addresses[1].net, Addr_V2_Net.IPv6)
+	testing.expect_value(t, len(msg2.addresses[1].addr), 16)
+	testing.expect_value(t, msg2.addresses[1].addr[0], u8(0x20))
+	testing.expect_value(t, msg2.addresses[1].port, u16(18333))
+
+	// TorV3
+	testing.expect_value(t, msg2.addresses[2].net, Addr_V2_Net.TorV3)
+	testing.expect_value(t, len(msg2.addresses[2].addr), 32)
+	testing.expect_value(t, msg2.addresses[2].addr[0], u8(0xAA))
+	testing.expect_value(t, msg2.addresses[2].addr[31], u8(0xBB))
+	testing.expect_value(t, msg2.addresses[2].port, u16(9050))
+}
+
+@(test)
+test_sendaddrv2_command :: proc(t: ^testing.T) {
+	// Verify CMD_SENDADDRV2 roundtrips through command_to_bytes/command_from_bytes.
+	bytes := command_to_bytes(CMD_SENDADDRV2)
+	back := command_from_bytes(bytes)
+	testing.expect_value(t, back, CMD_SENDADDRV2)
+}
