@@ -2,11 +2,11 @@
 
 A Bitcoin full node implementation written in [Odin](https://odin-lang.org/). Built from scratch with no Bitcoin library dependencies — only libsecp256k1 for elliptic curve cryptography, vendored RIPEMD-160, and vendored LevelDB for storage.
 
-This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync and compact block relay (BIP152), mempool with RBF, and a JSON-RPC interface with 42 methods.
+This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, compact block relay (BIP152), feefilter (BIP133), wtxid relay (BIP339), mempool with RBF, and a JSON-RPC interface with 42 methods.
 
 ## Status
 
-**269 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Builds on macOS and Linux.
+**270 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Builds on macOS and Linux.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
@@ -17,7 +17,7 @@ This is an educational/experimental project. It implements the core components o
 | 4 | UTXO Set + Chain State | Complete (20 tests) |
 | 5 | Persistent Storage (LevelDB) | Complete (16 tests) |
 | 6 | P2P Networking | Complete (14 tests) |
-| 7 | Mempool + Persistence + RBF + Config | Complete (31 tests) |
+| 7 | Mempool + Persistence + RBF + Config | Complete (32 tests) |
 | 8 | RPC Interface (42 methods) | Complete (52 tests) |
 | 9 | P2P Integration + CLI + Shutdown | Complete |
 | 10 | Signet Sync (BIP325) | Complete |
@@ -44,6 +44,7 @@ This is an educational/experimental project. It implements the core components o
 | 31 | Mempool Configuration (Bitcoin Core parity) | Complete |
 | 32 | Compact Block Relay (BIP152) | Complete |
 | 33 | RPC Authentication (cookie + Basic Auth) | Complete |
+| 34 | BIP 133 feefilter + BIP 339 wtxid relay | Complete |
 
 ## Dependencies
 
@@ -393,7 +394,7 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 ## Testing
 
 ```bash
-# Run all 269 tests
+# Run all 270 tests
 make test
 
 # Test individual packages
@@ -404,7 +405,7 @@ odin test consensus       # 22 tests
 odin test storage         # 16 tests
 odin test chain           # 20 tests
 odin test p2p             # 14 tests
-odin test mempool         # 31 tests
+odin test mempool         # 32 tests
 odin test rpc             # 52 tests
 ```
 
@@ -480,7 +481,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Mempool configuration**: 16 configurable settings matching Bitcoin Core defaults — memory-based size limiting (`--maxmempool`, default 300 MB) with fee-based eviction and dynamic minimum fee, transaction expiry (`--mempoolexpiry`, default 336 hours), ancestor/descendant chain limits (count and size), configurable relay/dust/incremental fees, datacarrier toggle, bare multisig toggle, blocks-only mode (`--blocksonly`), and optional persistence (`--persistmempool`). All settings supported via CLI flags and `btcnode.conf`
 - **Memory-based mempool limiting**: Tracks total vsize of all entries. When usage exceeds the limit, lowest fee-rate transactions are evicted and the dynamic minimum fee (`mempoolminfee` in `getmempoolinfo`) is raised. Resets when usage drops below the limit after a block connect
 - **Mempool persistence**: Mempool is saved to `<datadir>/mempool.dat` on shutdown and reloaded/revalidated on startup (controlled by `--persistmempool`)
-- **Transaction relay**: P2P `inv`/`tx`/`getdata` handling for propagating mempool transactions to peers. Cross-thread safety: RPC thread pushes txids to a mutex-protected relay queue, P2P event loop drains it — no direct cross-thread access to peer state. `--blocksonly` disables inbound and outbound tx relay (RPC `sendrawtransaction` still works)
+- **Transaction relay**: P2P `inv`/`tx`/`getdata` handling for propagating mempool transactions to peers. BIP 133 feefilter: sends our minimum fee rate to peers after handshake, stores each peer's feefilter, skips peers whose feefilter exceeds the tx's fee rate during relay. BIP 339 wtxid relay: negotiates wtxid-based `inv` between `version` and `verack`, announces txs by wtxid to modern peers (txid fallback for legacy peers), mempool maintains a wtxid→txid reverse index for `getdata` lookups. Cross-thread safety: RPC thread pushes relay items (txid + wtxid + fee rate) to a mutex-protected queue, P2P event loop drains it. `--blocksonly` disables inbound and outbound tx relay (RPC `sendrawtransaction` still works)
 - **RBF (BIP125)**: Full replace-by-fee support — signaling check (opt-in or fullrbf), no new unconfirmed parents, higher absolute fee, bandwidth fee (configurable via `--incrementalrelayfee`), max evictions (configurable)
 - **Lax DER signature parsing**: Pre-BIP66 transactions may contain non-strictly-encoded DER signatures. The verification path uses a lax DER parser (matching Bitcoin Core's `ecdsa_signature_parse_der_lax`), while strict DER validation is enforced separately by the script interpreter when BIP66 is active
 - **Address encoding**: Base58Check (P2PKH, P2SH) and Bech32/Bech32m (P2WPKH, P2WSH, P2TR) for both encoding and decoding, with network-aware validation

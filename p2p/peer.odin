@@ -29,6 +29,11 @@ Peer :: struct {
 	last_recv:      i64,   // unix timestamp of last message received
 	bytes_sent:     i64,   // total bytes sent
 	bytes_recv:     i64,   // total bytes received
+	// BIP133 feefilter
+	fee_filter:       i64,  // peer's min fee rate (sat/kvB), 0 = no filter
+	// BIP339 wtxid relay
+	wtxid_relay:      bool, // peer sent us wtxidrelay
+	wtxid_relay_us:   bool, // we sent wtxidrelay to peer
 	// BIP152 compact block support
 	compact_version:  u64,  // 0 = not negotiated, 2 = v2
 	compact_announce: bool, // peer will send us cmpctblock proactively
@@ -403,4 +408,18 @@ peer_send_getblocktxn :: proc(peer: ^Peer, block_hash: Hash256, indices: []u64) 
 	defer wire.writer_destroy(&w)
 	wire.serialize_get_block_txn(&w, &msg)
 	return peer_send_message(peer, wire.CMD_GETBLOCKTXN, wire.writer_bytes(&w))
+}
+
+// Send feefilter (BIP133) with our minimum fee rate.
+peer_send_feefilter :: proc(peer: ^Peer, feerate: i64) -> Net_Error {
+	msg := wire.Fee_Filter_Message{feerate = feerate}
+	w := wire.writer_init()
+	defer wire.writer_destroy(&w)
+	wire.serialize_feefilter(&w, &msg)
+	return peer_send_message(peer, wire.CMD_FEEFILTER, wire.writer_bytes(&w))
+}
+
+// Send wtxidrelay (BIP339, empty payload). Must be sent between version and verack.
+peer_send_wtxidrelay :: proc(peer: ^Peer) -> Net_Error {
+	return peer_send_message(peer, wire.CMD_WTXIDRELAY, nil)
 }

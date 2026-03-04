@@ -38,7 +38,7 @@ Conn_Manager :: struct {
 	zombie_peers:       [dynamic]^Peer,
 	// Cross-thread tx relay queue (RPC thread pushes, P2P thread drains).
 	relay_mutex:        sync.Mutex,
-	relay_queue:        [dynamic]Hash256,
+	relay_queue:        [dynamic]Relay_Item,
 	// Blocks-only mode: reject inbound txs, skip tx relay.
 	blocks_only:        bool,
 }
@@ -63,7 +63,7 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 
 	cm.peers = make(map[Peer_Id]^Peer, MAX_OUTBOUND_PEERS * 2)
 	cm.zombie_peers = make([dynamic]^Peer, 0, 8)
-	cm.relay_queue = make([dynamic]Hash256, 0, 16)
+	cm.relay_queue = make([dynamic]Relay_Item, 0, 16)
 	cm.last_ping_check = time.to_unix_seconds(time.now())
 	cm.last_header_refresh = time.to_unix_seconds(time.now())
 
@@ -195,8 +195,8 @@ _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 
 	// Drain cross-thread tx relay queue (pushed by RPC thread).
 	sync.mutex_lock(&cm.relay_mutex)
-	for txid in cm.relay_queue {
-		_conn_manager_relay_tx(cm, txid, Peer_Id(0))
+	for item in cm.relay_queue {
+		_conn_manager_relay_tx(cm, item.txid, item.wtxid, item.fee_rate_kvb, Peer_Id(0))
 	}
 	clear(&cm.relay_queue)
 	sync.mutex_unlock(&cm.relay_mutex)
@@ -369,7 +369,11 @@ _conn_manager_dispatch :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, cmd: string,
 		_conn_manager_handle_blocktxn(cm, peer_id, payload)
 	case wire.CMD_GETBLOCKTXN:
 		// Receive-only: we don't serve compact block requests.
-	case wire.CMD_FEEFILTER, wire.CMD_WTXIDRELAY, wire.CMD_ADDRV2, wire.CMD_ADDR:
+	case wire.CMD_FEEFILTER:
+		_conn_manager_handle_feefilter(cm, peer_id, payload)
+	case wire.CMD_WTXIDRELAY:
+		_conn_manager_handle_wtxidrelay(cm, peer_id)
+	case wire.CMD_ADDRV2, wire.CMD_ADDR:
 		// Ignored.
 	case:
 		// Unknown command — ignore.
@@ -398,6 +402,10 @@ _conn_manager_handle_version :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 	log.debugf("Peer %d: version=%d, agent=%s, height=%d",
 		peer_id, ver.version, ver.user_agent, ver.start_height)
 
+	// BIP339: Send wtxidrelay before verack (must be between version and verack).
+	peer_send_wtxidrelay(peer)
+	peer.wtxid_relay_us = true
+
 	// Send verack in response.
 	peer_send_verack(peer)
 
@@ -422,6 +430,12 @@ _conn_manager_handle_verack :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 
 		// Send sendcmpct (BIP152): announce=true, version=2 (wtxid-based).
 		peer_send_sendcmpct(peer, true, COMPACT_BLOCK_VERSION)
+
+		// BIP133: Send our feefilter with min relay fee rate.
+		if cm.mp != nil {
+			our_fee := max(cm.mp.min_fee, cm.mp.config.min_relay_tx_fee)
+			peer_send_feefilter(peer, our_fee)
+		}
 
 		// Register peer for sync tracking.
 		sync_add_peer(&cm.sync_mgr, peer_id)
@@ -500,8 +514,17 @@ _conn_manager_handle_inv :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: [
 			}
 		case .Tx, .Witness_Tx:
 			// Only process tx inv when in sync (no point during IBD).
-			if cm.sync_mgr.state == .In_Sync && cm.mp != nil && !mempool.mempool_has(cm.mp, iv.hash) {
-				append(&wanted, wire.Inv_Vector{type = .Witness_Tx, hash = iv.hash})
+			if cm.sync_mgr.state == .In_Sync && cm.mp != nil {
+				// BIP339: wtxid_relay peers send Witness_Tx inv with wtxid hash.
+				already_have := false
+				if iv.type == .Witness_Tx && peer.wtxid_relay {
+					already_have = mempool.mempool_has_wtxid(cm.mp, iv.hash)
+				} else {
+					already_have = mempool.mempool_has(cm.mp, iv.hash)
+				}
+				if !already_have {
+					append(&wanted, wire.Inv_Vector{type = .Witness_Tx, hash = iv.hash})
+				}
 			}
 		}
 	}
@@ -580,7 +603,12 @@ _conn_manager_handle_tx :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []
 	}
 
 	log.debugf("Accepted tx %s from peer %d", _hash_to_hex_short(txid), peer_id)
-	_conn_manager_relay_tx(cm, txid, peer_id)
+
+	// Look up entry to get wtxid + fee rate for BIP133/339 relay.
+	entry, _ := mempool.mempool_get(cm.mp, txid)
+	wtxid := entry.wtxid if entry != nil else txid
+	fee_rate_kvb := mempool.fee_rate_per_kvb(entry.fee_rate) if entry != nil else i64(0)
+	_conn_manager_relay_tx(cm, txid, wtxid, fee_rate_kvb, peer_id)
 }
 
 // Handle inbound getdata: serve txs from mempool.
@@ -602,7 +630,11 @@ _conn_manager_handle_getdata :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 			if cm.mp == nil {
 				continue
 			}
+			// Try txid lookup first, then wtxid fallback (BIP339).
 			entry, mp_found := mempool.mempool_get(cm.mp, iv.hash)
+			if !mp_found && iv.type == .Witness_Tx {
+				entry, mp_found = mempool.mempool_get_by_wtxid(cm.mp, iv.hash)
+			}
 			if !mp_found {
 				continue
 			}
@@ -615,28 +647,38 @@ _conn_manager_handle_getdata :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 }
 
 // Relay a tx inv to all active peers except the sender.
-_conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid: Hash256, from_peer: Peer_Id) {
+// BIP133: skip peers whose feefilter exceeds the tx's fee rate.
+// BIP339: use wtxid for peers that negotiated wtxid relay.
+_conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid, wtxid: Hash256, fee_rate_kvb: i64, from_peer: Peer_Id) {
 	if cm.blocks_only {
 		return
 	}
-	inv := [1]wire.Inv_Vector{{type = .Witness_Tx, hash = txid}}
-	w := wire.writer_init(context.temp_allocator)
-	inv_msg := wire.Inv_Message{inventory = inv[:]}
-	wire.serialize_inv(&w, &inv_msg)
-	payload := wire.writer_bytes(&w)
 
 	for id, peer in cm.peers {
 		if id == from_peer || peer.state != .Active {
 			continue
 		}
-		peer_send_message(peer, wire.CMD_INV, payload)
+
+		// BIP133: skip peers whose feefilter exceeds the tx's fee rate.
+		if peer.fee_filter > 0 && fee_rate_kvb > 0 && peer.fee_filter > fee_rate_kvb {
+			continue
+		}
+
+		// BIP339: use wtxid if both sides negotiated wtxid relay.
+		hash := wtxid if (peer.wtxid_relay && peer.wtxid_relay_us) else txid
+
+		inv := [1]wire.Inv_Vector{{type = .Witness_Tx, hash = hash}}
+		w := wire.writer_init(context.temp_allocator)
+		inv_msg := wire.Inv_Message{inventory = inv[:]}
+		wire.serialize_inv(&w, &inv_msg)
+		peer_send_message(peer, wire.CMD_INV, wire.writer_bytes(&w))
 	}
 }
 
-// Exported relay for RPC thread. Queues txid for the P2P event loop thread to relay.
-conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid: Hash256) {
+// Exported relay for RPC thread. Queues tx for the P2P event loop thread to relay.
+conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid, wtxid: Hash256, fee_rate_kvb: i64) {
 	sync.mutex_lock(&cm.relay_mutex)
-	append(&cm.relay_queue, txid)
+	append(&cm.relay_queue, Relay_Item{txid = txid, wtxid = wtxid, fee_rate_kvb = fee_rate_kvb})
 	sync.mutex_unlock(&cm.relay_mutex)
 	if cm.event_loop != nil {
 		nbio.wake_up(cm.event_loop)
@@ -690,6 +732,40 @@ _conn_manager_handle_blocktxn :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, paylo
 	}
 
 	sync_handle_block_txn(&cm.sync_mgr, peer_id, &msg, &cm.peers)
+}
+
+// Handle inbound feefilter (BIP133): store peer's minimum fee rate.
+_conn_manager_handle_feefilter :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []byte) {
+	peer, found := cm.peers[peer_id]
+	if !found {
+		return
+	}
+
+	r := wire.reader_init(payload)
+	msg, err := wire.deserialize_feefilter(&r)
+	if err != .None {
+		return
+	}
+
+	peer.fee_filter = msg.feerate
+	log.debugf("Peer %d feefilter: %d sat/kvB", peer_id, msg.feerate)
+}
+
+// Handle inbound wtxidrelay (BIP339): mark peer as supporting wtxid relay.
+// Must arrive before verack per BIP 339 — ignore if peer is already Active.
+_conn_manager_handle_wtxidrelay :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
+	peer, found := cm.peers[peer_id]
+	if !found {
+		return
+	}
+
+	// BIP339: wtxidrelay must be sent between version and verack.
+	if peer.state == .Active {
+		return
+	}
+
+	peer.wtxid_relay = true
+	log.debugf("Peer %d supports wtxid relay", peer_id)
 }
 
 // Try to connect a replacement peer when a slot opens.

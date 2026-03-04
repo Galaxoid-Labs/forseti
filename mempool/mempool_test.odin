@@ -1215,3 +1215,52 @@ test_mempool_dust_relay_fee :: proc(t: ^testing.T) {
 	dust_low := get_dust_threshold(p2pkh_spk, 1000)
 	testing.expect_value(t, dust_low, i64(546))
 }
+
+// --- BIP339 wtxid index tests ---
+
+@(test)
+test_mempool_wtxid_index :: proc(t: ^testing.T) {
+	// Verify that mempool_add populates the wtxid index and that
+	// mempool_has_wtxid / mempool_get_by_wtxid work correctly.
+	mp, cs, params, dir := _make_test_mempool(t, "wtxid_idx", 101)
+	defer {
+		mempool_destroy(mp)
+		free(mp)
+		chain.chain_state_destroy(cs)
+		free(cs)
+		free(params)
+		_remove_test_dir(dir)
+	}
+
+	cb_txid := _get_coinbase_txid(0)
+	outpoint := wire.Outpoint{hash = cb_txid, index = 0}
+	subsidy := consensus.get_block_subsidy(0, &consensus.REGTEST_PARAMS)
+	tx := _make_spend_tx(outpoint, subsidy, subsidy - 1000)
+
+	err := mempool_add(mp, &tx)
+	testing.expect_value(t, err, Mempool_Error.None)
+
+	txid := wire.tx_id(&tx)
+	wtxid := wire.tx_witness_id(&tx)
+
+	// wtxid index should find the tx
+	testing.expect(t, mempool_has_wtxid(mp, wtxid), "wtxid should be in index")
+
+	entry, found := mempool_get_by_wtxid(mp, wtxid)
+	testing.expect(t, found, "should find entry by wtxid")
+	if found {
+		testing.expect(t, entry.txid == txid, "txid should match")
+		testing.expect(t, entry.wtxid == wtxid, "entry wtxid should match")
+	}
+
+	// Random hash should not be found
+	fake_hash: Hash256
+	fake_hash[0] = 0xff
+	testing.expect(t, !mempool_has_wtxid(mp, fake_hash), "random hash should not match")
+
+	// After removal, wtxid index should be cleaned up
+	mempool_remove(mp, txid)
+	testing.expect(t, !mempool_has_wtxid(mp, wtxid), "wtxid should be gone after remove")
+	_, found2 := mempool_get_by_wtxid(mp, wtxid)
+	testing.expect(t, !found2, "get_by_wtxid should return false after remove")
+}

@@ -75,6 +75,7 @@ Mempool_Error :: enum {
 Mempool_Entry :: struct {
 	tx:       wire.Tx,
 	txid:     Hash256,
+	wtxid:    Hash256,
 	fee:      i64,
 	vsize:    int,
 	fee_rate: Fee_Rate,
@@ -84,6 +85,7 @@ Mempool_Entry :: struct {
 Mempool :: struct {
 	entries:         map[Hash256]^Mempool_Entry,
 	spent_outpoints: map[wire.Outpoint]Hash256,
+	wtxid_index:     map[Hash256]Hash256, // BIP339: wtxid → txid
 	chain:           ^chain.Chain_State,
 	params:          ^consensus.Chain_Params,
 	config:          Mempool_Config,
@@ -96,6 +98,7 @@ Mempool :: struct {
 mempool_init :: proc(mp: ^Mempool, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, config: Mempool_Config = {}) {
 	mp.entries = make(map[Hash256]^Mempool_Entry, 256)
 	mp.spent_outpoints = make(map[wire.Outpoint]Hash256, 1024)
+	mp.wtxid_index = make(map[Hash256]Hash256, 256)
 	mp.chain = cs
 	mp.params = params
 	// Use provided config, or default if zero-value
@@ -128,6 +131,7 @@ mempool_destroy :: proc(mp: ^Mempool) {
 	}
 	delete(mp.entries)
 	delete(mp.spent_outpoints)
+	delete(mp.wtxid_index)
 }
 
 // Dry-run validation of a transaction against mempool rules (steps 1-8).
@@ -323,17 +327,20 @@ mempool_add :: proc(mp: ^Mempool, tx: ^wire.Tx) -> Mempool_Error {
 
 	// 9. Clone tx, create entry, add to maps
 	txid := wire.tx_id(tx)
+	wtxid := wire.tx_witness_id(tx)
 	fr := fee_rate(tx_fee, vsize)
 	cloned := _clone_tx(tx)
 	entry := new(Mempool_Entry)
 	entry.tx = cloned
 	entry.txid = txid
+	entry.wtxid = wtxid
 	entry.fee = tx_fee
 	entry.vsize = vsize
 	entry.fee_rate = fr
 	entry.time = time.to_unix_seconds(time.now())
 
 	mp.entries[txid] = entry
+	mp.wtxid_index[wtxid] = txid
 	mp.usage += vsize
 
 	// Record spent outpoints
@@ -358,6 +365,9 @@ mempool_remove :: proc(mp: ^Mempool, txid: Hash256) {
 	for in_idx in 0 ..< len(entry.tx.inputs) {
 		delete_key(&mp.spent_outpoints, entry.tx.inputs[in_idx].previous_output)
 	}
+
+	// Remove wtxid index entry
+	delete_key(&mp.wtxid_index, entry.wtxid)
 
 	mp.usage -= entry.vsize
 	_free_tx(&entry.tx)
@@ -440,6 +450,20 @@ mempool_count :: proc(mp: ^Mempool) -> int {
 // Check if a transaction is in the mempool.
 mempool_has :: proc(mp: ^Mempool, txid: Hash256) -> bool {
 	return txid in mp.entries
+}
+
+// Check if a transaction is in the mempool by wtxid (BIP339).
+mempool_has_wtxid :: proc(mp: ^Mempool, wtxid: Hash256) -> bool {
+	return wtxid in mp.wtxid_index
+}
+
+// Look up a mempool entry by wtxid (BIP339).
+mempool_get_by_wtxid :: proc(mp: ^Mempool, wtxid: Hash256) -> (^Mempool_Entry, bool) {
+	txid, found := mp.wtxid_index[wtxid]
+	if !found {
+		return nil, false
+	}
+	return mempool_get(mp, txid)
 }
 
 // Get all in-mempool ancestors of a transaction (BFS upward through inputs).

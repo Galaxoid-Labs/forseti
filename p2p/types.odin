@@ -28,6 +28,13 @@ Peer_State :: enum {
 
 Peer_Id :: distinct u64
 
+// BIP133/339: relay queue item with wtxid + fee rate for filtering.
+Relay_Item :: struct {
+	txid:         Hash256,
+	wtxid:        Hash256,
+	fee_rate_kvb: i64,
+}
+
 // DNS seed hostnames per network.
 MAINNET_SEEDS :: [4]string {
 	"seed.bitcoin.sipa.be",

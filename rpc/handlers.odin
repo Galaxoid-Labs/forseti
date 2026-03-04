@@ -355,9 +355,12 @@ _handle_sendrawtransaction :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_
 
 	txid := wire.tx_id(&tx)
 
-	// Relay to peers.
+	// Relay to peers with wtxid + fee rate for BIP133/339.
 	if srv.cm != nil {
-		p2p.conn_manager_relay_tx(srv.cm, txid)
+		entry, _ := mempool.mempool_get(srv.mp, txid)
+		wtxid := entry.wtxid if entry != nil else txid
+		fee_rate_kvb := mempool.fee_rate_per_kvb(entry.fee_rate) if entry != nil else i64(0)
+		p2p.conn_manager_relay_tx(srv.cm, txid, wtxid, fee_rate_kvb)
 	}
 
 	return _make_result(json.Value(json.String(_hash_to_hex(txid))), srv._current_id)
