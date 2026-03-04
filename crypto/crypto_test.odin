@@ -217,3 +217,125 @@ test_secp256k1_pubkey_parse :: proc(t: ^testing.T) {
 	)
 	testing.expect(t, result == 1, "should parse valid compressed public key")
 }
+
+// --- ECDSA sign + verify roundtrip ---
+
+@(test)
+test_sign_ecdsa_roundtrip :: proc(t: ^testing.T) {
+	init_secp256k1()
+	defer destroy_secp256k1()
+
+	// Private key = 1 (simplest valid key)
+	seckey := hex_decode("0000000000000000000000000000000000000000000000000000000000000001")
+
+	msg_hash := sha256d(transmute([]u8)string("test message for signing"))
+
+	// Sign
+	sig_der, sig_len, sign_ok := sign_ecdsa(seckey, msg_hash)
+	testing.expect(t, sign_ok, "signing should succeed")
+	testing.expect(t, sig_len > 0 && sig_len <= 72, "DER signature should be 1-72 bytes")
+
+	// Derive public key
+	pubkey, pk_ok := pubkey_from_seckey(seckey)
+	testing.expect(t, pk_ok, "pubkey derivation should succeed")
+	testing.expect_value(t, pubkey[0], u8(0x02)) // compressed, even y
+
+	// Verify
+	verified := verify_ecdsa(pubkey[:], sig_der[:sig_len], msg_hash)
+	testing.expect(t, verified, "valid signature should verify")
+
+	// Verify with wrong message should fail
+	bad_hash := sha256d(transmute([]u8)string("wrong message"))
+	bad_verify := verify_ecdsa(pubkey[:], sig_der[:sig_len], bad_hash)
+	testing.expect(t, !bad_verify, "wrong message should fail verification")
+}
+
+// --- pubkey_from_seckey ---
+
+@(test)
+test_pubkey_from_seckey :: proc(t: ^testing.T) {
+	init_secp256k1()
+	defer destroy_secp256k1()
+
+	// Private key = 1 → public key is the generator point G
+	seckey := hex_decode("0000000000000000000000000000000000000000000000000000000000000001")
+	pubkey, ok := pubkey_from_seckey(seckey)
+	testing.expect(t, ok, "should derive pubkey from valid seckey")
+	// Compressed generator point (02 prefix, even y)
+	expected := hex_decode("0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798")
+	for i in 0 ..< 33 {
+		testing.expectf(t, pubkey[i] == expected[i], "pubkey byte %d: got 0x%02x want 0x%02x", i, pubkey[i], expected[i])
+	}
+
+	// Invalid seckey (all zeros) should fail
+	bad_seckey := hex_decode("0000000000000000000000000000000000000000000000000000000000000000")
+	_, bad_ok := pubkey_from_seckey(bad_seckey)
+	testing.expect(t, !bad_ok, "zero seckey should fail")
+}
+
+// --- verify_seckey ---
+
+@(test)
+test_verify_seckey :: proc(t: ^testing.T) {
+	init_secp256k1()
+	defer destroy_secp256k1()
+
+	// Valid secret key = 1
+	valid := hex_decode("0000000000000000000000000000000000000000000000000000000000000001")
+	testing.expect(t, verify_seckey(valid), "secret key 1 should be valid")
+
+	// Zero is invalid
+	zero := hex_decode("0000000000000000000000000000000000000000000000000000000000000000")
+	testing.expect(t, !verify_seckey(zero), "zero should be invalid")
+
+	// Group order n is invalid (must be < n)
+	order := hex_decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141")
+	testing.expect(t, !verify_seckey(order), "group order should be invalid")
+}
+
+// --- Schnorr verification (BIP340) ---
+
+@(test)
+test_verify_schnorr :: proc(t: ^testing.T) {
+	init_secp256k1()
+	defer destroy_secp256k1()
+
+	// BIP340 test vector 0
+	// Public key (x-only): F9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9
+	pubkey := hex_decode("F9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9")
+	msg := hex_decode("0000000000000000000000000000000000000000000000000000000000000000")
+	sig := hex_decode("E907831F80848D1069A5371B402410364BDF1C5F8307B0084C55F1CE2DCA821525F66A4A85EA8B71E482A74F382D2CE5EBEEE8FDB2172F477DF4900D310536C0")
+
+	result := verify_schnorr(pubkey, sig, msg)
+	testing.expect(t, result, "BIP340 test vector 0 should verify")
+
+	// Wrong message should fail
+	bad_msg := hex_decode("0000000000000000000000000000000000000000000000000000000000000001")
+	bad_result := verify_schnorr(pubkey, sig, bad_msg)
+	testing.expect(t, !bad_result, "wrong message should fail Schnorr verification")
+
+	// Wrong length inputs should fail
+	testing.expect(t, !verify_schnorr(pubkey[:16], sig, msg), "short pubkey should fail")
+	testing.expect(t, !verify_schnorr(pubkey, sig[:32], msg), "short sig should fail")
+}
+
+// --- WIF decode ---
+
+@(test)
+test_wif_decode :: proc(t: ^testing.T) {
+	// Known WIF for private key = 1, mainnet compressed
+	// seckey 0x01 → WIF compressed mainnet: KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn
+	wif := "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn"
+	seckey, compressed, ok := wif_decode(wif)
+	testing.expect(t, ok, "valid WIF should decode")
+	testing.expect(t, compressed, "should be compressed")
+	// Secret key should be 1
+	for i in 0 ..< 31 {
+		testing.expectf(t, seckey[i] == 0, "seckey byte %d should be 0", i)
+	}
+	testing.expect_value(t, seckey[31], u8(1))
+
+	// Invalid WIF should fail
+	_, _, bad_ok := wif_decode("1InvalidWIFString1234567890123456789012345678901")
+	testing.expect(t, !bad_ok, "invalid WIF should fail")
+}

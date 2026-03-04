@@ -186,6 +186,108 @@ test_peer_message_framing :: proc(t: ^testing.T) {
 	testing.expect_value(t, ver2.nonce, u64(0xDEADBEEFCAFEBABE))
 }
 
+// --- Bandwidth scoring tests ---
+
+@(test)
+test_peer_block_limit_trial :: proc(t: ^testing.T) {
+	// During trial period (< PEER_TRIAL_SECS), should get PEER_TRIAL_BLOCKS
+	ps := Peer_Sync_State{
+		tracking_since   = 100,
+		blocks_delivered = 0,
+	}
+	now := i64(100 + PEER_TRIAL_SECS - 1) // still in trial
+	limit := _peer_block_limit(ps, now, 10.0, 3)
+	testing.expect_value(t, limit, PEER_TRIAL_BLOCKS)
+}
+
+@(test)
+test_peer_block_limit_scored :: proc(t: ^testing.T) {
+	// After trial, scoring kicks in based on throughput share
+	ps := Peer_Sync_State{
+		tracking_since   = 0,
+		blocks_delivered = 100,
+	}
+	now := i64(100) // 100 seconds elapsed → 1 block/sec
+
+	// If total rate = 4 blocks/sec across 4 peers, this peer has 25% share
+	// budget = MAX_BLOCKS_PER_PEER * 4 = 64, share = 0.25 → limit = 16
+	limit := _peer_block_limit(ps, now, 4.0, 4)
+	testing.expect(t, limit >= MIN_BLOCKS_PER_PEER, "should be at least min")
+	testing.expect(t, limit <= MAX_BLOCKS_PER_PEER, "should be at most max")
+}
+
+@(test)
+test_peer_block_limit_fast_peer :: proc(t: ^testing.T) {
+	// A fast peer delivering most blocks should get MAX
+	ps := Peer_Sync_State{
+		tracking_since   = 0,
+		blocks_delivered = 1000,
+	}
+	now := i64(100) // 10 blocks/sec — very fast
+
+	// total_rate = 11 (this peer + one slow peer at 1/sec)
+	limit := _peer_block_limit(ps, now, 11.0, 2)
+	testing.expect_value(t, limit, MAX_BLOCKS_PER_PEER)
+}
+
+@(test)
+test_peer_block_limit_slow_peer :: proc(t: ^testing.T) {
+	// A slow peer should get MIN
+	ps := Peer_Sync_State{
+		tracking_since   = 0,
+		blocks_delivered = 5,
+	}
+	now := i64(100) // 0.05 blocks/sec — very slow
+
+	// total_rate = 10 (mostly from fast peers)
+	limit := _peer_block_limit(ps, now, 10.0, 4)
+	testing.expect_value(t, limit, MIN_BLOCKS_PER_PEER)
+}
+
+// --- Stall timeout decay ---
+
+@(test)
+test_sync_decay_stall_timeout :: proc(t: ^testing.T) {
+	sm: Sync_Manager
+	cs, ok := _make_test_chain_state(t, 5)
+	testing.expect(t, ok, "failed to make test chain")
+	sync_manager_init(&sm, cs, &consensus.REGTEST_PARAMS)
+	defer sync_manager_destroy(&sm)
+
+	// Set elevated stall timeout
+	sm.stall_timeout = BLOCK_STALL_TIMEOUT_MAX // 64
+
+	// Decay should reduce by 15% each call
+	sync_decay_stall_timeout(&sm)
+	testing.expect(t, sm.stall_timeout < BLOCK_STALL_TIMEOUT_MAX, "should decay")
+	testing.expect(t, sm.stall_timeout >= BLOCK_STALL_TIMEOUT_DEFAULT, "should not go below default")
+
+	// Keep decaying until we hit the floor
+	for i in 0 ..< 100 {
+		sync_decay_stall_timeout(&sm)
+	}
+	testing.expect_value(t, sm.stall_timeout, i64(BLOCK_STALL_TIMEOUT_DEFAULT))
+}
+
+// --- Sync manager init/destroy ---
+
+@(test)
+test_sync_manager_init :: proc(t: ^testing.T) {
+	sm: Sync_Manager
+	cs, ok := _make_test_chain_state(t, 10)
+	testing.expect(t, ok, "failed to make test chain")
+
+	sync_manager_init(&sm, cs, &consensus.REGTEST_PARAMS)
+	defer sync_manager_destroy(&sm)
+
+	testing.expect_value(t, sm.state, Sync_State.Idle)
+	testing.expect_value(t, sm.stall_timeout, i64(BLOCK_STALL_TIMEOUT_DEFAULT))
+	testing.expect(t, sm.chain == cs, "chain should be set")
+	testing.expect(t, sm.params == &consensus.REGTEST_PARAMS, "params should be set")
+}
+
+// --- DNS seed tests ---
+
 @(test)
 test_dns_seed_selection :: proc(t: ^testing.T) {
 	// Verify correct seeds returned for each network.

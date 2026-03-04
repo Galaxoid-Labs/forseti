@@ -6,18 +6,18 @@ This is an educational/experimental project. It implements the core components o
 
 ## Status
 
-**209 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Builds on macOS and Linux.
+**247 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Builds on macOS and Linux.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
-| 0 | Crypto + C Bindings | Complete (24 tests) |
-| 1 | Wire Protocol + Serialization | Complete (24 tests) |
+| 0 | Crypto + C Bindings | Complete (29 tests) |
+| 1 | Wire Protocol + Serialization | Complete (30 tests) |
 | 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH, Taproot) | Complete (50 tests) |
-| 3 | Consensus Rules + Block Validation | Complete (15 tests) |
-| 4 | UTXO Set + Chain State | Complete (10 tests) |
-| 5 | Persistent Storage (LevelDB) | Complete (13 tests) |
-| 6 | P2P Networking | Complete (6 tests) |
-| 7 | Mempool + Persistence + RBF | Complete (20 tests) |
+| 3 | Consensus Rules + Block Validation | Complete (21 tests) |
+| 4 | UTXO Set + Chain State | Complete (18 tests) |
+| 5 | Persistent Storage (LevelDB) | Complete (16 tests) |
+| 6 | P2P Networking | Complete (12 tests) |
+| 7 | Mempool + Persistence + RBF | Complete (24 tests) |
 | 8 | RPC Interface (37 methods) | Complete (47 tests) |
 | 9 | P2P Integration + CLI + Shutdown | Complete |
 | 10 | Signet Sync (BIP325) | Complete |
@@ -38,6 +38,7 @@ This is an educational/experimental project. It implements the core components o
 | 25 | nbio Async I/O Migration | Complete |
 | 26 | Cross-thread RPC Relay Safety | Complete |
 | 27 | Address Pool Lifetime Fix | Complete |
+| 28 | Test Coverage Expansion (+38 tests) | Complete |
 
 ## Dependencies
 

@@ -762,3 +762,115 @@ test_rbf_double_spend_rejected_without_rbf :: proc(t: ^testing.T) {
 	testing.expect(t, mempool_has(mp, tx1_id), "tx1 should still be in mempool")
 	testing.expect_value(t, mempool_count(mp), 1)
 }
+
+// --- Policy: datacarrier size limit ---
+
+@(test)
+test_mempool_policy_datacarrier :: proc(t: ^testing.T) {
+	// OP_RETURN with 80 bytes of data (within limit)
+	script_ok := make([]byte, 83, context.temp_allocator) // OP_RETURN + OP_PUSHDATA1 + len + 80 bytes = 83
+	script_ok[0] = 0x6a // OP_RETURN
+	script_ok[1] = 0x4c // OP_PUSHDATA1
+	script_ok[2] = 80   // 80 bytes
+	// rest is zeros (valid data)
+
+	inputs := make([]wire.Tx_In, 1, context.temp_allocator)
+	inputs[0] = wire.Tx_In{
+		previous_output = wire.Outpoint{hash = wire.HASH_ZERO, index = 0},
+		sequence = 0xffffffff,
+	}
+
+	// Tx with valid-size OP_RETURN
+	outputs_ok := make([]wire.Tx_Out, 1, context.temp_allocator)
+	outputs_ok[0] = wire.Tx_Out{value = 0, script_pubkey = script_ok}
+	tx_ok := wire.Tx{version = 1, inputs = inputs, outputs = outputs_ok}
+	testing.expect_value(t, check_tx_policy(&tx_ok), Mempool_Error.None)
+
+	// OP_RETURN with 81 bytes of data (exceeds 83-byte total limit)
+	script_big := make([]byte, 84, context.temp_allocator) // 84 > MAX_OP_RETURN_SIZE(83)
+	script_big[0] = 0x6a // OP_RETURN
+	script_big[1] = 0x4c // OP_PUSHDATA1
+	script_big[2] = 81   // 81 bytes
+
+	outputs_big := make([]wire.Tx_Out, 1, context.temp_allocator)
+	outputs_big[0] = wire.Tx_Out{value = 0, script_pubkey = script_big}
+	tx_big := wire.Tx{version = 1, inputs = inputs, outputs = outputs_big}
+	testing.expect_value(t, check_tx_policy(&tx_big), Mempool_Error.Non_Standard)
+}
+
+// --- Policy: tx version ---
+
+@(test)
+test_mempool_policy_version :: proc(t: ^testing.T) {
+	inputs := make([]wire.Tx_In, 1, context.temp_allocator)
+	inputs[0] = wire.Tx_In{
+		previous_output = wire.Outpoint{hash = wire.HASH_ZERO, index = 0},
+		sequence = 0xffffffff,
+	}
+	// P2PKH output (standard, above dust)
+	script_pubkey := make([]byte, 25, context.temp_allocator)
+	script_pubkey[0] = 0x76 // OP_DUP
+	script_pubkey[1] = 0xa9 // OP_HASH160
+	script_pubkey[2] = 0x14 // push 20 bytes
+	script_pubkey[23] = 0x88 // OP_EQUALVERIFY
+	script_pubkey[24] = 0xac // OP_CHECKSIG
+	outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
+	outputs[0] = wire.Tx_Out{value = 100_000, script_pubkey = script_pubkey}
+
+	// Version 0 is non-standard
+	tx_v0 := wire.Tx{version = 0, inputs = inputs, outputs = outputs}
+	testing.expect_value(t, check_tx_policy(&tx_v0), Mempool_Error.Non_Standard)
+
+	// Version 1 is standard
+	tx_v1 := wire.Tx{version = 1, inputs = inputs, outputs = outputs}
+	testing.expect_value(t, check_tx_policy(&tx_v1), Mempool_Error.None)
+
+	// Version 2 is standard
+	tx_v2 := wire.Tx{version = 2, inputs = inputs, outputs = outputs}
+	testing.expect_value(t, check_tx_policy(&tx_v2), Mempool_Error.None)
+
+	// Version 3 is non-standard
+	tx_v3 := wire.Tx{version = 3, inputs = inputs, outputs = outputs}
+	testing.expect_value(t, check_tx_policy(&tx_v3), Mempool_Error.Non_Standard)
+}
+
+// --- Fee rate tests ---
+
+@(test)
+test_fee_rate_creation :: proc(t: ^testing.T) {
+	// 1000 sats for 250 vbytes = 4 sat/vB = 4000 sat/kvB
+	fr := fee_rate(1000, 250)
+	testing.expect_value(t, fee_rate_per_kvb(fr), i64(4000))
+
+	// Zero vbytes is clamped to 1 by max(vsize,1)
+	fr_min := fee_rate(1000, 0)
+	testing.expect_value(t, fee_rate_per_kvb(fr_min), i64(1000000))
+
+	// Comparison
+	fr_low := fee_rate(100, 250)
+	fr_high := fee_rate(500, 250)
+	testing.expect(t, fee_rate_less(fr_low, fr_high), "lower fee rate should be less")
+	testing.expect(t, !fee_rate_less(fr_high, fr_low), "higher fee rate should not be less")
+	testing.expect(t, !fee_rate_less(fr_low, fr_low), "equal fee rates should not be less")
+}
+
+// --- Dust threshold ---
+
+@(test)
+test_dust_threshold :: proc(t: ^testing.T) {
+	// P2PKH: output_size=8+1+25=34, input_size=148, total=182
+	// dust = 3 * 182 * 3000 / 1000 = 1638
+	p2pkh_spk := make([]byte, 25, context.temp_allocator)
+	p2pkh_spk[0] = 0x76; p2pkh_spk[1] = 0xa9; p2pkh_spk[2] = 0x14
+	p2pkh_spk[23] = 0x88; p2pkh_spk[24] = 0xac
+	dust := get_dust_threshold(p2pkh_spk)
+	testing.expect(t, dust > 0, fmt.tprintf("P2PKH dust threshold should be >0, got %d", dust))
+	testing.expect_value(t, dust, i64(1638))
+
+	// P2WPKH: smaller spend cost → lower dust
+	p2wpkh_spk := make([]byte, 22, context.temp_allocator)
+	p2wpkh_spk[0] = 0x00; p2wpkh_spk[1] = 0x14
+	dust_wpkh := get_dust_threshold(p2wpkh_spk)
+	testing.expect(t, dust_wpkh > 0, "P2WPKH dust should be >0")
+	testing.expect(t, dust_wpkh < dust, "P2WPKH dust should be less than P2PKH")
+}

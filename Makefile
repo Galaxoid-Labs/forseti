@@ -16,7 +16,7 @@ build: deps
 	odin build . -out:btcnode -extra-linker-flags:"$(CXX_LINK)"
 
 test: deps
-	odin test crypto
+	odin test crypto -define:ODIN_TEST_THREADS=1
 	odin test wire
 	odin test script -define:ODIN_TEST_THREADS=1
 	odin test consensus

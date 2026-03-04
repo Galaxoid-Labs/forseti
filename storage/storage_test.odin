@@ -545,3 +545,104 @@ test_utxo_db_bulk :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// --- LevelDB batch tests ---
+
+@(test)
+test_ldb_batch_operations :: proc(t: ^testing.T) {
+	dir := make_test_dir("ldb_batch")
+	defer remove_test_dir(dir)
+
+	store, err := ldb_open(dir)
+	testing.expect_value(t, err, Storage_Error.None)
+	defer ldb_close(&store)
+
+	// Create batch with multiple operations
+	batch := ldb_batch_create()
+	defer ldb_batch_destroy(batch)
+
+	ldb_batch_put(batch, []byte{0x01}, []byte{0xAA})
+	ldb_batch_put(batch, []byte{0x02}, []byte{0xBB})
+	ldb_batch_put(batch, []byte{0x03}, []byte{0xCC})
+
+	// Not yet visible
+	_, found_before := ldb_get(store.chainstate_db, store.read_opts, []byte{0x01}, context.temp_allocator)
+	testing.expect(t, !found_before, "batch data should not be visible before write")
+
+	// Write batch atomically
+	werr := ldb_batch_write(store.chainstate_db, store.write_opts, batch)
+	testing.expect_value(t, werr, Storage_Error.None)
+
+	// Now all should be visible
+	val1, f1 := ldb_get(store.chainstate_db, store.read_opts, []byte{0x01}, context.temp_allocator)
+	testing.expect(t, f1, "key 0x01 should exist")
+	testing.expect(t, len(val1) == 1 && val1[0] == 0xAA, "value 0x01")
+
+	val2, f2 := ldb_get(store.chainstate_db, store.read_opts, []byte{0x02}, context.temp_allocator)
+	testing.expect(t, f2, "key 0x02 should exist")
+	testing.expect(t, len(val2) == 1 && val2[0] == 0xBB, "value 0x02")
+
+	val3, f3 := ldb_get(store.chainstate_db, store.read_opts, []byte{0x03}, context.temp_allocator)
+	testing.expect(t, f3, "key 0x03 should exist")
+	testing.expect(t, len(val3) == 1 && val3[0] == 0xCC, "value 0x03")
+}
+
+@(test)
+test_ldb_batch_with_delete :: proc(t: ^testing.T) {
+	dir := make_test_dir("ldb_batch_del")
+	defer remove_test_dir(dir)
+
+	store, err := ldb_open(dir)
+	testing.expect_value(t, err, Storage_Error.None)
+	defer ldb_close(&store)
+
+	// Pre-insert a key
+	ldb_put(store.chainstate_db, store.write_opts, []byte{0x10}, []byte{0xFF})
+
+	// Batch: add new key + delete existing key
+	batch := ldb_batch_create()
+	defer ldb_batch_destroy(batch)
+
+	ldb_batch_put(batch, []byte{0x20}, []byte{0xEE})
+	ldb_batch_delete(batch, []byte{0x10})
+
+	werr := ldb_batch_write(store.chainstate_db, store.write_opts, batch)
+	testing.expect_value(t, werr, Storage_Error.None)
+
+	// New key should exist
+	_, f1 := ldb_get(store.chainstate_db, store.read_opts, []byte{0x20}, context.temp_allocator)
+	testing.expect(t, f1, "new key should exist after batch")
+
+	// Old key should be deleted
+	_, f2 := ldb_get(store.chainstate_db, store.read_opts, []byte{0x10}, context.temp_allocator)
+	testing.expect(t, !f2, "deleted key should be gone after batch")
+}
+
+// --- Block DB raw storage test ---
+
+@(test)
+test_block_db_store_raw :: proc(t: ^testing.T) {
+	dir := make_test_dir("blockdb_raw")
+	defer remove_test_dir(dir)
+
+	db, err := block_db_open(dir, wire.REGTEST_MAGIC)
+	testing.expect_value(t, err, Storage_Error.None)
+	defer block_db_close(&db)
+
+	// Serialize a block to raw bytes, then store and read back
+	block := make_test_block(1)
+	expected_hash := wire.block_header_hash(&block.header)
+
+	w := wire.writer_init(context.temp_allocator)
+	wire.serialize_block(&w, &block)
+	raw_bytes := wire.writer_bytes(&w)
+
+	loc, serr := block_db_store_raw(&db, raw_bytes)
+	testing.expect_value(t, serr, Storage_Error.None)
+
+	// Read it back as a block
+	read_block, rerr := block_db_read(&db, loc, context.temp_allocator)
+	testing.expect_value(t, rerr, Storage_Error.None)
+	read_hash := wire.block_header_hash(&read_block.header)
+	testing.expect(t, read_hash == expected_hash, "raw-stored block hash should match")
+}

@@ -550,3 +550,106 @@ test_check_tx_sanity :: proc(t: ^testing.T) {
 	big_tx := wire.Tx{version = 1, inputs = cb.inputs, outputs = big_outputs}
 	testing.expect_value(t, check_tx_sanity(&big_tx), Consensus_Error.Bad_Tx_Too_Large_Value)
 }
+
+// --- get_difficulty tests ---
+
+@(test)
+test_get_difficulty :: proc(t: ^testing.T) {
+	// Genesis block bits (easiest difficulty) → difficulty = 1.0
+	diff := get_difficulty(0x1d00ffff)
+	testing.expect(t, diff >= 0.999 && diff <= 1.001, fmt.tprintf("genesis difficulty should be ~1.0, got %f", diff))
+
+	// Higher difficulty (smaller target) → larger number
+	diff2 := get_difficulty(0x1b0404cb) // Example mainnet block
+	testing.expect(t, diff2 > 1.0, fmt.tprintf("higher difficulty block should be >1.0, got %f", diff2))
+
+	// Zero mantissa → 0
+	diff3 := get_difficulty(0x1d000000)
+	testing.expect_value(t, diff3, f64(0.0))
+
+	// Negative flag set → 0
+	diff4 := get_difficulty(0x1d800000)
+	testing.expect_value(t, diff4, f64(0.0))
+}
+
+// --- u256_compare tests ---
+
+@(test)
+test_u256_compare :: proc(t: ^testing.T) {
+	a, b: [32]byte
+
+	// Equal
+	testing.expect_value(t, u256_compare(a, b), 0)
+
+	// a < b
+	b[31] = 1
+	testing.expect_value(t, u256_compare(a, b), -1)
+
+	// a > b
+	a[0] = 1
+	testing.expect_value(t, u256_compare(a, b), 1)
+}
+
+// --- u256_is_zero tests ---
+
+@(test)
+test_u256_is_zero :: proc(t: ^testing.T) {
+	zero: [32]byte
+	testing.expect(t, u256_is_zero(zero), "zero should be zero")
+
+	nonzero: [32]byte
+	nonzero[15] = 1
+	testing.expect(t, !u256_is_zero(nonzero), "non-zero should not be zero")
+}
+
+// --- hash_meets_target tests ---
+
+@(test)
+test_hash_meets_target :: proc(t: ^testing.T) {
+	target := bits_to_target(0x1d00ffff) // Genesis difficulty
+
+	// Zero hash should always meet any target
+	zero_hash: Hash256
+	testing.expect(t, hash_meets_target(zero_hash, target), "zero hash should meet target")
+
+	// Max hash (all 0xFF) should NOT meet any reasonable target
+	max_hash: Hash256
+	for i in 0 ..< 32 { max_hash[i] = 0xFF }
+	testing.expect(t, !hash_meets_target(max_hash, target), "max hash should not meet target")
+}
+
+// --- get_tx_weight / get_tx_vsize tests ---
+
+@(test)
+test_get_tx_weight_vsize :: proc(t: ^testing.T) {
+	// Build a simple non-witness tx
+	cb := make_coinbase(0)
+	weight := get_tx_weight(&cb)
+	vsize := get_tx_vsize(&cb)
+
+	// Non-witness tx: weight = size * 4 (since base == total)
+	w := wire.writer_init(context.temp_allocator)
+	wire.serialize_tx(&w, &cb)
+	raw_size := wire.writer_len(&w)
+
+	testing.expect_value(t, weight, raw_size * 4)
+	testing.expect_value(t, vsize, raw_size) // vsize = weight/4 for non-witness
+}
+
+// --- check_block_header tests ---
+
+@(test)
+test_check_block_header :: proc(t: ^testing.T) {
+	params := REGTEST_PARAMS
+
+	// Use regtest genesis header (known valid PoW)
+	header := params.genesis_header
+	err := check_block_header(&header, &params)
+	testing.expect_value(t, err, Consensus_Error.None)
+
+	// Invalid PoW: change nonce to break the hash
+	bad_header := header
+	bad_header.nonce = 99999999
+	err2 := check_block_header(&bad_header, &params)
+	testing.expect_value(t, err2, Consensus_Error.Bad_Pow)
+}

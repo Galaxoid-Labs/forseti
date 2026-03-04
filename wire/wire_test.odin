@@ -516,3 +516,172 @@ test_headers_message_roundtrip :: proc(t: ^testing.T) {
 	testing.expect_value(t, msg2.headers[1].version, i32(2))
 	testing.expect_value(t, msg2.headers[1].nonce, u32(99))
 }
+
+// --- Pong message test ---
+
+@(test)
+test_pong_roundtrip :: proc(t: ^testing.T) {
+	pong := Pong_Message{nonce = 0xFEDCBA9876543210}
+
+	w := writer_init(context.temp_allocator)
+	serialize_pong(&w, &pong)
+	testing.expect_value(t, writer_len(&w), 8)
+
+	r := reader_init(writer_bytes(&w))
+	pong2, err := deserialize_pong(&r)
+	testing.expect(t, err == nil, "deserialize should succeed")
+	testing.expect_value(t, pong2.nonce, pong.nonce)
+}
+
+// --- GetData message test ---
+
+@(test)
+test_getdata_roundtrip :: proc(t: ^testing.T) {
+	h1, h2: Hash256
+	h1[0] = 0xCC
+	h2[0] = 0xDD
+
+	msg := Get_Data_Message {
+		inventory = []Inv_Vector{
+			{type = .Witness_Block, hash = h1},
+			{type = .Witness_Tx, hash = h2},
+		},
+	}
+
+	w := writer_init(context.temp_allocator)
+	serialize_getdata(&w, &msg)
+
+	r := reader_init(writer_bytes(&w))
+	msg2, err := deserialize_getdata(&r, context.temp_allocator)
+	testing.expect(t, err == nil, "deserialize should succeed")
+	testing.expect_value(t, len(msg2.inventory), 2)
+	testing.expect_value(t, msg2.inventory[0].type, Inv_Type.Witness_Block)
+	testing.expect_value(t, msg2.inventory[0].hash[0], u8(0xCC))
+	testing.expect_value(t, msg2.inventory[1].type, Inv_Type.Witness_Tx)
+	testing.expect_value(t, msg2.inventory[1].hash[0], u8(0xDD))
+}
+
+// --- GetHeaders message test ---
+
+@(test)
+test_getheaders_roundtrip :: proc(t: ^testing.T) {
+	h1, h2, stop: Hash256
+	h1[0] = 0x11
+	h2[0] = 0x22
+	stop[0] = 0xFF
+
+	msg := Get_Headers_Message {
+		version      = u32(PROTOCOL_VERSION),
+		block_hashes = []Hash256{h1, h2},
+		hash_stop    = stop,
+	}
+
+	w := writer_init(context.temp_allocator)
+	serialize_getheaders(&w, &msg)
+
+	r := reader_init(writer_bytes(&w))
+	msg2, err := deserialize_getheaders(&r, context.temp_allocator)
+	testing.expect(t, err == nil, "deserialize should succeed")
+	testing.expect_value(t, msg2.version, u32(PROTOCOL_VERSION))
+	testing.expect_value(t, len(msg2.block_hashes), 2)
+	testing.expect_value(t, msg2.block_hashes[0][0], u8(0x11))
+	testing.expect_value(t, msg2.block_hashes[1][0], u8(0x22))
+	testing.expect_value(t, msg2.hash_stop[0], u8(0xFF))
+}
+
+// --- Transaction ID computation test ---
+
+@(test)
+test_tx_id_computation :: proc(t: ^testing.T) {
+	// Genesis coinbase tx — known txid
+	tx_hex :=
+		"01000000" +
+		"01" +
+		"0000000000000000000000000000000000000000000000000000000000000000" +
+		"ffffffff" +
+		"4d" +
+		"04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73" +
+		"ffffffff" +
+		"01" +
+		"00f2052a01000000" +
+		"43" +
+		"4104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac" +
+		"00000000"
+
+	original := hex_decode(tx_hex)
+	r := reader_init(original)
+	tx, err := deserialize_tx(&r, context.temp_allocator)
+	testing.expect(t, err == nil, "deserialize should succeed")
+
+	txid := tx_id(&tx)
+	// Genesis coinbase txid (internal byte order)
+	display := crypto.hash_to_display(txid)
+	got := hash_to_hex(display)
+	testing.expect_value(t, got, "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+}
+
+// --- Block serialize/deserialize roundtrip ---
+
+@(test)
+test_block_serialize_roundtrip :: proc(t: ^testing.T) {
+	// Build a minimal block with one coinbase tx
+	cb_inputs := make([]Tx_In, 1, context.temp_allocator)
+	cb_inputs[0] = Tx_In {
+		previous_output = Outpoint{hash = HASH_ZERO, index = 0xffffffff},
+		script_sig = hex_decode("04ffff001d0101"),
+		sequence = 0xffffffff,
+	}
+	cb_outputs := make([]Tx_Out, 1, context.temp_allocator)
+	cb_outputs[0] = Tx_Out {
+		value = 50_0000_0000,
+		script_pubkey = hex_decode("76a914000000000000000000000000000000000000000088ac"),
+	}
+
+	txs := make([]Tx, 1, context.temp_allocator)
+	txs[0] = Tx{version = 1, inputs = cb_inputs, outputs = cb_outputs, locktime = 0}
+
+	block := Block {
+		header = Block_Header{
+			version = 1,
+			timestamp = 1231006505,
+			bits = 0x1d00ffff,
+			nonce = 2083236893,
+		},
+		txs = txs,
+	}
+
+	w := writer_init(context.temp_allocator)
+	serialize_block(&w, &block)
+	data := writer_bytes(&w)
+	testing.expect(t, len(data) > 80, "block should be larger than just the header")
+
+	r := reader_init(data)
+	block2, err := deserialize_block(&r, context.temp_allocator)
+	testing.expect(t, err == nil, "deserialize should succeed")
+	testing.expect_value(t, block2.header.version, i32(1))
+	testing.expect_value(t, block2.header.nonce, u32(2083236893))
+	testing.expect_value(t, len(block2.txs), 1)
+	testing.expect_value(t, block2.txs[0].outputs[0].value, i64(50_0000_0000))
+}
+
+// --- Build message test ---
+
+@(test)
+test_build_message :: proc(t: ^testing.T) {
+	payload := transmute([]byte)string("test")
+	msg := build_message(MAINNET_MAGIC, CMD_PING, payload)
+	defer delete(msg)
+
+	testing.expect(t, len(msg) == MESSAGE_HEADER_SIZE + len(payload), "message size should be header + payload")
+
+	// Parse back the header
+	r := reader_init(msg)
+	hdr, err := deserialize_message_header(&r)
+	testing.expect(t, err == nil, "header should parse")
+	testing.expect_value(t, hdr.magic, MAINNET_MAGIC)
+	testing.expect_value(t, hdr.payload_size, u32(len(payload)))
+	testing.expect(t, validate_checksum(&hdr, msg[MESSAGE_HEADER_SIZE:]), "checksum should match")
+
+	cmd := command_from_bytes(hdr.command)
+	testing.expect_value(t, cmd, CMD_PING)
+}
