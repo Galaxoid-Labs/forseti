@@ -64,7 +64,9 @@ DEFAULT_PORT_TESTNET4 :: 48333
 DEFAULT_PORT_REGTEST  :: 18444
 DEFAULT_PORT_SIGNET   :: 38333
 
-MAX_OUTBOUND_PEERS          :: 8
+MAX_OUTBOUND_FULL_RELAY     :: 8
+DEFAULT_MAX_CONNECTIONS     :: 125
+INBOUND_HANDSHAKE_TIMEOUT   :: 60  // seconds before disconnecting inbound peers stuck in handshake
 MAX_HEADERS_PER_MSG         :: 2000
 MAX_BLOCKS_PER_PEER         :: 16   // Bitcoin Core: 16 per peer max
 MIN_BLOCKS_PER_PEER         :: 4
@@ -87,6 +89,7 @@ NODE_NETWORK         :: u64(1)
 NODE_WITNESS         :: u64(1 << 3)
 NODE_COMPACT_FILTERS :: u64(1 << 6)
 NODE_NETWORK_LIMITED :: u64(1 << 10)
+NODE_P2P_V2          :: u64(1 << 11)
 
-// Our advertised services (base — compact filters added at runtime if enabled).
-LOCAL_SERVICES :: NODE_NETWORK | NODE_WITNESS
+// Our advertised services (base — compact filters and P2P_V2 added at runtime if enabled).
+LOCAL_SERVICES :: NODE_NETWORK | NODE_NETWORK_LIMITED | NODE_WITNESS

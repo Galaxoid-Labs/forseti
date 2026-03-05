@@ -65,6 +65,7 @@ CLI_Flag :: enum {
 	Max_Connections,
 	V2_Transport,
 	Block_Filter_Index,
+	Listen,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
 
@@ -96,9 +97,10 @@ CLI_Config :: struct {
 	rpc_user:               string,
 	rpc_password:           string,
 	server:                 bool,   // default true
-	max_connections:        int,    // max outbound peers (default: 8)
+	max_connections:        int,    // total peer connections (default: 125)
 	v2_transport:           bool,   // BIP324 v2 encrypted transport
 	block_filter_index:     bool,   // BIP158 compact block filter index
+	listen:                 bool,   // accept inbound connections (default: true)
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -126,9 +128,10 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 	cfg.blocks_only = false
 	cfg.persist_mempool = true
 	cfg.server = true
-	cfg.max_connections = 8
+	cfg.max_connections = 125
 	cfg.v2_transport = true
 	cfg.block_filter_index = false
+	cfg.listen = true
 
 	for arg in os.args[1:] {
 		if arg == "--help" || arg == "-h" {
@@ -306,7 +309,7 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 				fmt.eprintln("Error: invalid --maxconnections value")
 				return cfg, flags_set, false
 			}
-			cfg.max_connections = max(val, 1)
+			cfg.max_connections = max(val, 0)
 			flags_set += {.Max_Connections}
 		} else if arg == "--v2transport" || arg == "--v2transport=1" {
 			cfg.v2_transport = true
@@ -320,6 +323,12 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 		} else if arg == "--blockfilterindex=0" {
 			cfg.block_filter_index = false
 			flags_set += {.Block_Filter_Index}
+		} else if arg == "--listen" || arg == "--listen=1" {
+			cfg.listen = true
+			flags_set += {.Listen}
+		} else if arg == "--listen=0" {
+			cfg.listen = false
+			flags_set += {.Listen}
 		} else {
 			fmt.eprintln("Error: unknown flag:", arg)
 			_print_usage()
@@ -343,7 +352,8 @@ _print_usage :: proc() {
 	fmt.println("  --connect=<ip:port>   Connect to specific peer instead of DNS discovery")
 	fmt.println("  --p2p-port=<port>     P2P listen port (default: network-appropriate)")
 	fmt.println("  --no-p2p              Disable P2P networking (RPC-only mode)")
-	fmt.println("  --maxconnections=<N>  Maximum outbound peer connections (default: 8)")
+	fmt.println("  --listen=<0|1>        Accept inbound P2P connections (default: 1)")
+	fmt.println("  --maxconnections=<N>  Total peer connections (default: 125)")
 	fmt.println("  --v2transport=<0|1>   Enable BIP 324 v2 encrypted P2P transport (default: 1)")
 	fmt.println("  --blockfilterindex=<0|1|basic> Enable BIP 158 compact block filter index (default: 0)")
 	fmt.println("  --dbcache=<MB>        Database cache size in MiB (default: 450, min: 4)")
@@ -598,7 +608,7 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 	if .Max_Connections not_in flags_set {
 		if val, found := _ini_get(&m, cfg.network, "maxconnections"); found {
 			if n, parse_ok := strconv.parse_int(val); parse_ok {
-				cfg.max_connections = max(n, 1)
+				cfg.max_connections = max(n, 0)
 			}
 		}
 	}
@@ -612,6 +622,12 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 	if .Block_Filter_Index not_in flags_set {
 		if val, found := _ini_get(&m, cfg.network, "blockfilterindex"); found {
 			cfg.block_filter_index = val == "1" || val == "basic" || val == "true"
+		}
+	}
+
+	if .Listen not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "listen"); found {
+			cfg.listen = val == "1" || val == "true" || val == "yes"
 		}
 	}
 }
@@ -897,11 +913,29 @@ main :: proc() {
 			// Continue without P2P — RPC still works.
 		} else {
 			cm.blocks_only = cfg.blocks_only
-			cm.max_outbound = cfg.max_connections
+			cm.max_outbound = p2p.MAX_OUTBOUND_FULL_RELAY
 			cm.v2_transport_enabled = cfg.v2_transport
 			cm.local_services = p2p.LOCAL_SERVICES
 			if cfg.block_filter_index {
 				cm.local_services |= p2p.NODE_COMPACT_FILTERS
+			}
+			if cfg.v2_transport {
+				cm.local_services |= p2p.NODE_P2P_V2
+			}
+
+			// Compute inbound connection budget.
+			// When --listen=0, --connect is used, or --maxconnections=0: no inbound.
+			p2p_port := cfg.p2p_port if cfg.p2p_port != 0 else cm.default_port
+			if cfg.listen && len(cfg.connect) == 0 && cfg.max_connections > 0 {
+				cm.max_inbound = max(cfg.max_connections - cm.max_outbound - 1, 0)
+				cm.listen_port = p2p_port
+			} else {
+				cm.max_inbound = 0
+			}
+
+			if cm.max_inbound > 0 {
+				log.infof("Connection budget: %d outbound, %d inbound (max %d total)",
+					cm.max_outbound, cm.max_inbound, cfg.max_connections)
 			}
 
 			// If --connect was specified, store address for event loop to connect.

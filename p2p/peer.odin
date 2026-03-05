@@ -15,6 +15,7 @@ Peer :: struct {
 	socket:         tcp.TCP_Socket,
 	address:        string,
 	port:           int,
+	inbound:        bool,
 	state:          Peer_State,
 	version:        i32,
 	services:       u64,
@@ -128,8 +129,8 @@ _on_recv :: proc(op: ^nbio.Operation, peer: ^Peer) {
 
 	// Check for error/EOF.
 	if op.recv.err != nil || op.recv.received == 0 {
-		// If in v2 handshake, fall back to v1 instead of just disconnecting.
-		if peer.v2 != nil && peer.state == .V2_Handshake {
+		// If in v2 handshake, fall back to v1 instead of just disconnecting (outbound only).
+		if peer.v2 != nil && peer.state == .V2_Handshake && !peer.inbound {
 			log.infof("Peer %d: EOF during v2 handshake, falling back to v1", peer.id)
 			_conn_manager_v2_fallback(peer.cm, peer)
 			return
@@ -244,9 +245,28 @@ _peer_process_messages_v2 :: proc(peer: ^Peer) {
 		}
 		if has_first {
 			if first_byte == byte(peer.network_magic) {
-				log.infof("Peer %d sent v1 magic byte (0x%02x), not v2 — reconnecting with v1", peer.id, first_byte)
-				_conn_manager_v2_fallback(cm, peer)
-				return
+				if peer.inbound {
+					// Inbound V1 fallback: destroy V2, feed buffered data back, process as V1.
+					log.infof("Inbound peer %d sent v1 magic byte (0x%02x), switching to v1", peer.id, first_byte)
+					// Collect all buffered data (v2 recv_buf + peer recv_buf).
+					v1_data := make([dynamic]byte, 0, len(t.recv_buf) + len(peer.recv_buf), context.temp_allocator)
+					append(&v1_data, ..t.recv_buf[:])
+					append(&v1_data, ..peer.recv_buf[:])
+					// Destroy V2 transport.
+					v2_transport_destroy(t)
+					free(peer.v2)
+					peer.v2 = nil
+					// Feed buffered data back into recv_buf.
+					resize(&peer.recv_buf, len(v1_data))
+					copy(peer.recv_buf[:], v1_data[:])
+					peer.state = .Connecting
+					_peer_process_messages_v1(peer)
+					return
+				} else {
+					log.infof("Peer %d sent v1 magic byte (0x%02x), not v2 — reconnecting with v1", peer.id, first_byte)
+					_conn_manager_v2_fallback(cm, peer)
+					return
+				}
 			}
 		}
 	}
@@ -268,19 +288,31 @@ _peer_process_messages_v2 :: proc(peer: ^Peer) {
 	switch v2_err {
 	case .None, .Need_More_Data:
 		if t.state == .Active && peer.state == .V2_Handshake {
-			// V2 handshake complete — now send v1 version message (encrypted via v2).
 			log.infof("V2 handshake complete with peer %d", peer.id)
-			_, chain_height := chain.chain_tip(cm.chain)
-			peer_send_version(peer, cm.params, chain_height, cm.local_services)
-			peer.state = .Version_Sent
+			if peer.inbound {
+				// Inbound: V2 handshake done, wait for their version message.
+				peer.state = .Connecting
+			} else {
+				// Outbound: V2 handshake done, send our version message (encrypted via v2).
+				_, chain_height := chain.chain_tip(cm.chain)
+				peer_send_version(peer, cm.params, chain_height, cm.local_services)
+				peer.state = .Version_Sent
+			}
 		}
 	case .Bad_Garbage_Auth, .Decryption_Failed, .Invalid_Message:
 		if peer.state == .V2_Handshake {
-			// V2 handshake failed — reconnect with v1.
-			log.debugf("V2 error for peer %d: %v (transport state: %v, recv_buf: %d bytes)",
-				peer.id, v2_err, t.state, len(t.recv_buf))
-			_conn_manager_v2_fallback(cm, peer)
-			return
+			if peer.inbound {
+				// Inbound V2 handshake failed — disconnect (can't reconnect to them).
+				log.debugf("Inbound peer %d: V2 error %v, disconnecting", peer.id, v2_err)
+				_peer_handle_disconnect(peer)
+				return
+			} else {
+				// Outbound V2 handshake failed — reconnect with v1.
+				log.debugf("V2 error for peer %d: %v (transport state: %v, recv_buf: %d bytes)",
+					peer.id, v2_err, t.state, len(t.recv_buf))
+				_conn_manager_v2_fallback(cm, peer)
+				return
+			}
 		}
 		// Post-handshake decryption error — genuine connection problem.
 		log.warnf("V2 decryption error for peer %d: %v", peer.id, v2_err)

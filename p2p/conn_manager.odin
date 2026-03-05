@@ -42,8 +42,14 @@ Conn_Manager :: struct {
 	relay_queue:        [dynamic]Relay_Item,
 	// Blocks-only mode: reject inbound txs, skip tx relay.
 	blocks_only:        bool,
-	// Maximum outbound peer connections (default: MAX_OUTBOUND_PEERS).
+	// Maximum outbound peer connections (default: MAX_OUTBOUND_FULL_RELAY).
 	max_outbound:       int,
+	// Maximum inbound peer connections (default: max_connections - max_outbound - 1).
+	max_inbound:        int,
+	// TCP listener port (0 = not listening).
+	listen_port:        int,
+	// Whether the listener is active.
+	listening:          bool,
 	// BIP324: v2 encrypted transport enabled (--v2transport flag).
 	v2_transport_enabled: bool,
 	// BIP324: addresses where v2 handshake failed (skip v2 on reconnect).
@@ -59,7 +65,7 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 	cm.network_magic = params.network_magic
 	cm.next_peer_id = 1
 	cm.shutdown = false
-	cm.max_outbound = MAX_OUTBOUND_PEERS
+	cm.max_outbound = MAX_OUTBOUND_FULL_RELAY
 
 	// Set default port based on network.
 	switch params.network_magic {
@@ -71,7 +77,7 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 	case:                     cm.default_port = DEFAULT_PORT_MAINNET
 	}
 
-	cm.peers = make(map[Peer_Id]^Peer, cm.max_outbound * 2)
+	cm.peers = make(map[Peer_Id]^Peer, 256)
 	cm.zombie_peers = make([dynamic]^Peer, 0, 8)
 	cm.v2_failed_addrs = make(map[string]bool, 32)
 	cm.relay_queue = make([dynamic]Relay_Item, 0, 16)
@@ -107,9 +113,31 @@ conn_manager_destroy :: proc(cm: ^Conn_Manager) {
 	sync_manager_destroy(&cm.sync_mgr)
 }
 
+// Count outbound (non-inbound) peers.
+_count_outbound_peers :: proc(cm: ^Conn_Manager) -> int {
+	count := 0
+	for _, peer in cm.peers {
+		if !peer.inbound {
+			count += 1
+		}
+	}
+	return count
+}
+
+// Count inbound peers.
+_count_inbound_peers :: proc(cm: ^Conn_Manager) -> int {
+	count := 0
+	for _, peer in cm.peers {
+		if peer.inbound {
+			count += 1
+		}
+	}
+	return count
+}
+
 // Start an async connect to a peer. Returns immediately.
 conn_manager_add_peer :: proc(cm: ^Conn_Manager, address: string, port: int) -> Net_Error {
-	if len(cm.peers) >= cm.max_outbound {
+	if _count_outbound_peers(cm) >= cm.max_outbound {
 		return .Too_Many_Peers
 	}
 
@@ -222,8 +250,29 @@ _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 		for id in v2_timeout_peers {
 			peer, found := cm.peers[id]
 			if found {
-				_conn_manager_v2_fallback(cm, peer)
+				if peer.inbound {
+					// Can't reconnect to inbound peers — just disconnect.
+					log.infof("Inbound peer %d: v2 handshake timeout, disconnecting", id)
+					sync_handle_disconnect(&cm.sync_mgr, id, &cm.peers)
+					conn_manager_remove_peer(cm, id)
+				} else {
+					_conn_manager_v2_fallback(cm, peer)
+				}
 			}
+		}
+	}
+
+	// Check for inbound handshake timeouts (peers stuck in Connecting for too long).
+	{
+		timeout_peers := make([dynamic]Peer_Id, 0, 4, context.temp_allocator)
+		for id, peer in cm.peers {
+			if peer.inbound && peer.state == .Connecting && now - peer.connected_at > INBOUND_HANDSHAKE_TIMEOUT {
+				append(&timeout_peers, id)
+			}
+		}
+		for id in timeout_peers {
+			log.infof("Inbound peer %d: handshake timeout, disconnecting", id)
+			conn_manager_remove_peer(cm, id)
 		}
 	}
 
@@ -281,6 +330,103 @@ _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 	}
 }
 
+// Start TCP listener for inbound connections.
+_conn_manager_start_listener :: proc(cm: ^Conn_Manager) {
+	if cm.max_inbound <= 0 || cm.listen_port <= 0 {
+		return
+	}
+
+	endpoint := tcp.Endpoint{address = tcp.IP4_Any, port = cm.listen_port}
+	socket, err := nbio.listen_tcp(endpoint)
+	if err != nil {
+		log.errorf("Failed to listen on port %d: %v", cm.listen_port, err)
+		return
+	}
+
+	cm.listening = true
+	log.infof("P2P listening on 0.0.0.0:%d", cm.listen_port)
+
+	// Arm first accept.
+	nbio.accept_poly(socket, cm, _on_accept)
+}
+
+// Callback when an inbound connection is accepted.
+_on_accept :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
+	if cm.shutdown {
+		return
+	}
+
+	// Re-arm accept immediately for the next connection.
+	nbio.accept_poly(op.accept.socket, cm, _on_accept)
+
+	if op.accept.err != nil {
+		log.debugf("Accept error: %v", op.accept.err)
+		return
+	}
+
+	// Check inbound limit.
+	if _count_inbound_peers(cm) >= cm.max_inbound {
+		tcp.close(op.accept.client)
+		return
+	}
+
+	// Associate the accepted socket with the event loop.
+	assoc_err := nbio.associate_socket(op.accept.client)
+	if assoc_err != .None {
+		log.debugf("Failed to associate inbound socket: %v", assoc_err)
+		tcp.close(op.accept.client)
+		return
+	}
+
+	// Create inbound peer.
+	peer := new(Peer)
+	peer.id = cm.next_peer_id
+	cm.next_peer_id += 1
+	peer.socket = op.accept.client
+	peer.inbound = true
+	peer.state = .Connecting
+	peer.network_magic = cm.network_magic
+	peer.cm = cm
+	peer.recv_buf = make([dynamic]byte, 0, 8192)
+	peer.send_queue = make([dynamic][]byte, 0, 16)
+	peer.connected_at = time.to_unix_seconds(time.now())
+
+	// Extract remote address.
+	ep := op.accept.client_endpoint
+	addr4, is_ip4 := ep.address.(tcp.IP4_Address)
+	if is_ip4 {
+		peer.address = fmt.aprintf("%d.%d.%d.%d", addr4[0], addr4[1], addr4[2], addr4[3])
+	} else {
+		peer.address = strings.clone("unknown")
+	}
+	peer.port = ep.port
+
+	cm.peers[peer.id] = peer
+
+	log.infof("Inbound connection from %s:%d (peer %d)", peer.address, peer.port, peer.id)
+
+	// V2 responder or V1 — handled in Phase 3; for now, wait for their version message.
+	if cm.v2_transport_enabled {
+		// BIP324: initiate v2 responder handshake.
+		peer.v2 = new(V2_Transport)
+		if !v2_transport_init(peer.v2, false, cm.network_magic) {
+			log.warnf("V2 transport init failed for inbound peer %d, falling back to v1", peer.id)
+			free(peer.v2)
+			peer.v2 = nil
+		} else {
+			// Send our ell64.
+			ell := v2_transport_get_ell64(peer.v2)
+			_peer_send_raw(peer, ell[:])
+			peer.state = .V2_Handshake
+			_peer_start_recv(peer)
+			return
+		}
+	}
+
+	// V1 path: just start receiving, wait for their version message.
+	_peer_start_recv(peer)
+}
+
 // Main event loop. Discovers peers, connects, processes messages via nbio callbacks.
 conn_manager_run :: proc(cm: ^Conn_Manager) {
 	context.logger = log.create_console_logger(.Debug, {.Level, .Time, .Terminal_Color})
@@ -294,6 +440,9 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 		return
 	}
 	cm.event_loop = nbio.current_thread_event_loop()
+
+	// Start TCP listener for inbound connections.
+	_conn_manager_start_listener(cm)
 
 	// If --connect was specified, add peer now (event loop is ready).
 	if len(cm.connect_address) > 0 {
@@ -323,7 +472,7 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 			delete(addr_str)
 		}
 
-		if connected == 0 {
+		if connected == 0 && !cm.listening {
 			log.warn("No peers available. Exiting.")
 			nbio.release_thread_event_loop()
 			return
@@ -454,19 +603,38 @@ _conn_manager_handle_version :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 	log.debugf("Peer %d: version=%d, agent=%s, height=%d",
 		peer_id, ver.version, ver.user_agent, ver.start_height)
 
-	// BIP339: Send wtxidrelay before verack (must be between version and verack).
-	peer_send_wtxidrelay(peer)
-	peer.wtxid_relay_us = true
+	if peer.inbound && peer.state == .Connecting {
+		// Inbound: they sent their version first. Send ours, then wtxidrelay, sendaddrv2, verack.
+		_, chain_height := chain.chain_tip(cm.chain)
+		peer_send_version(peer, cm.params, chain_height, cm.local_services)
 
-	// BIP155: Send sendaddrv2 before verack.
-	peer_send_sendaddrv2(peer)
+		// BIP339: Send wtxidrelay before verack.
+		peer_send_wtxidrelay(peer)
+		peer.wtxid_relay_us = true
 
-	// Send verack in response.
-	peer_send_verack(peer)
+		// BIP155: Send sendaddrv2 before verack.
+		peer_send_sendaddrv2(peer)
 
-	// If we already sent our version and got theirs, handshake is progressing.
-	if peer.state == .Version_Sent {
+		// Send verack.
+		peer_send_verack(peer)
+
 		peer.state = .Handshake_Complete
+	} else {
+		// Outbound: we sent version first, they're responding.
+		// BIP339: Send wtxidrelay before verack (must be between version and verack).
+		peer_send_wtxidrelay(peer)
+		peer.wtxid_relay_us = true
+
+		// BIP155: Send sendaddrv2 before verack.
+		peer_send_sendaddrv2(peer)
+
+		// Send verack in response.
+		peer_send_verack(peer)
+
+		// If we already sent our version and got theirs, handshake is progressing.
+		if peer.state == .Version_Sent {
+			peer.state = .Handshake_Complete
+		}
 	}
 }
 
@@ -906,7 +1074,7 @@ _conn_manager_v2_fallback :: proc(cm: ^Conn_Manager, peer: ^Peer) {
 
 // Try to connect a replacement peer when a slot opens.
 _conn_manager_replace_peer :: proc(cm: ^Conn_Manager) {
-	if len(cm.peers) >= cm.max_outbound {
+	if _count_outbound_peers(cm) >= cm.max_outbound {
 		return
 	}
 

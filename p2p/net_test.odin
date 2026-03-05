@@ -982,3 +982,67 @@ test_bip324_packet_encoding_vector :: proc(t: ^testing.T) {
 			string(hex.encode(wire[:], context.temp_allocator)),
 			string(hex.encode(expected[:], context.temp_allocator))))
 }
+
+// --- Inbound Connection Tests ---
+
+@(test)
+test_connection_budget :: proc(t: ^testing.T) {
+	// Verify max_inbound = max(max_connections - max_outbound - 1, 0)
+
+	// Default: 125 total → 125 - 8 - 1 = 116 inbound
+	testing.expect_value(t, max(125 - MAX_OUTBOUND_FULL_RELAY - 1, 0), 116)
+
+	// Small: 10 total → 10 - 8 - 1 = 1 inbound
+	testing.expect_value(t, max(10 - MAX_OUTBOUND_FULL_RELAY - 1, 0), 1)
+
+	// Tight: 9 total → 9 - 8 - 1 = 0 inbound
+	testing.expect_value(t, max(9 - MAX_OUTBOUND_FULL_RELAY - 1, 0), 0)
+
+	// At outbound: 8 total → 8 - 8 - 1 = -1 → clamped to 0
+	testing.expect_value(t, max(8 - MAX_OUTBOUND_FULL_RELAY - 1, 0), 0)
+
+	// Zero: 0 total → 0 - 8 - 1 = -9 → clamped to 0
+	testing.expect_value(t, max(0 - MAX_OUTBOUND_FULL_RELAY - 1, 0), 0)
+}
+
+@(test)
+test_node_p2p_v2_service_bit :: proc(t: ^testing.T) {
+	// Verify NODE_P2P_V2 == 2048 (1 << 11).
+	testing.expect_value(t, NODE_P2P_V2, u64(2048))
+
+	// Verify LOCAL_SERVICES includes NODE_NETWORK, NODE_NETWORK_LIMITED, NODE_WITNESS.
+	testing.expect(t, LOCAL_SERVICES & NODE_NETWORK != 0, "LOCAL_SERVICES should include NODE_NETWORK")
+	testing.expect(t, LOCAL_SERVICES & NODE_NETWORK_LIMITED != 0, "LOCAL_SERVICES should include NODE_NETWORK_LIMITED")
+	testing.expect(t, LOCAL_SERVICES & NODE_WITNESS != 0, "LOCAL_SERVICES should include NODE_WITNESS")
+
+	// DEFAULT_MAX_CONNECTIONS should be 125.
+	testing.expect_value(t, DEFAULT_MAX_CONNECTIONS, 125)
+	// MAX_OUTBOUND_FULL_RELAY should be 8.
+	testing.expect_value(t, MAX_OUTBOUND_FULL_RELAY, 8)
+}
+
+@(test)
+test_v2_responder_init :: proc(t: ^testing.T) {
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	// Verify v2_transport_init succeeds in responder mode (initiating=false).
+	transport: V2_Transport
+	ok := v2_transport_init(&transport, false, wire.SIGNET_MAGIC)
+	testing.expect(t, ok, "v2_transport_init should succeed for responder")
+	defer v2_transport_destroy(&transport)
+
+	// Should produce a valid ell64 (64 bytes, not all zeros).
+	ell := v2_transport_get_ell64(&transport)
+	all_zero := true
+	for b in ell {
+		if b != 0 {
+			all_zero = false
+			break
+		}
+	}
+	testing.expect(t, !all_zero, "responder ell64 should not be all zeros")
+
+	// State should be Awaiting_EllSwift (waiting for initiator's ell64).
+	testing.expect_value(t, transport.state, V2_State.Awaiting_EllSwift)
+}

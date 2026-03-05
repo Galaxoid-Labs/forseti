@@ -4,7 +4,7 @@
 
 ```bash
 make              # Build deps + binary
-make test         # Run all 289 tests (9 packages)
+make test         # Run all 306 tests (9 packages)
 make debug        # Build with debug symbols
 odin build . -out:btcnode   # Build binary only
 odin test <pkg>   # Test single package (crypto, wire, script, consensus, storage, chain, p2p, mempool, rpc)
@@ -30,7 +30,7 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 - `consensus/` — Chain params, PoW, difficulty, block/tx validation, BIP325 signet
 - `storage/` — LevelDB bindings + wrapper, flat files, block DB, index DB, UTXO DB (8 files)
 - `chain/` — UTXO cache, block index with skip list, undo data, chain state, parallel verification (7 files)
-- `p2p/` — Peer connections, sync manager, connection manager, address manager, BIP324 v2 transport (8 files)
+- `p2p/` — Peer connections (outbound + inbound), sync manager, connection manager, address manager, BIP324 v2 transport, TCP listener (8 files)
 - `mempool/` — Fee rates, relay policy, validation pipeline, RBF (BIP125), persistence, configurable limits (6 files)
 - `rpc/` — JSON-RPC server, 42 methods, HTTP server (4 files)
 - `deps/` — libsecp256k1 (submodule), ripemd160 (vendored C), leveldb (vendored C++), static libs in deps/lib/
@@ -45,6 +45,7 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 - **Parallel script verification**: Two-phase `connect_block` — Phase 1 processes UTXOs sequentially, Phase 2 dispatches script checks to a persistent thread pool (`--par=N`, auto-detect by default). Serial fallback for small blocks (<16 inputs). Workers get 8MB pre-allocated arena buffers from a mutex-protected pool.
 - **Assumevalid**: Skip script verification below hardcoded heights (mainnet=880k, testnet3=2.1M, testnet4=200k, signet=267k). `--assumevalid=<height>` CLI flag (0=disable).
 - **Txid optimization**: `deserialize_block_with_txids` computes txids from raw bytes during deserialization — non-witness: `sha256d(raw)`, witness: `sha256d_multi(version, body, locktime)`. Pre-computed txids passed through `connect_block` → `check_block`.
+- **Inbound connections**: TCP listener via `nbio.listen_tcp` + `nbio.accept_poly`. `--maxconnections=125` (default), `--listen=0|1`. Budget: 8 outbound + max(N-9,0) inbound. V2 responder mode with V1 fallback. 60s handshake timeout.
 - **Thread model**: Main (setup+wait), RPC thread, P2P thread (`core:nbio` event loop — no per-peer threads), N script verification worker threads (`--par`).
 - **RBF (BIP125)**: Full replace-by-fee with fullrbf=true default. `--mempoolfullrbf=0|1` CLI flag. Bandwidth fee uses configurable `--incrementalrelayfee`.
 - **Mempool config**: `Mempool_Config` struct with 16 settings (Bitcoin Core parity). Memory-based size limiting (usage tracking, fee-based eviction, dynamic min_fee). Tx expiry (`--mempoolexpiry`). Ancestor/descendant chain limits (`--limitancestorcount/size`, `--limitdescendantcount/size`). Blocks-only mode (`--blocksonly`). Configurable relay/dust/incremental fees. 15 CLI flags + config file support.

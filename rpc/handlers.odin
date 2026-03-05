@@ -1092,11 +1092,11 @@ _handle_getpeerinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respons
 		obj["conntime"] = json.Value(json.Integer(peer.connected_at))
 		obj["version"] = json.Value(json.Integer(i64(peer.version)))
 		obj["subver"] = json.Value(json.String(peer.user_agent))
-		obj["inbound"] = json.Value(json.Boolean(false))
+		obj["inbound"] = json.Value(json.Boolean(peer.inbound))
 		obj["startingheight"] = json.Value(json.Integer(i64(peer.start_height)))
 		obj["synced_headers"] = json.Value(json.Integer(srv.cm.sync_mgr.best_header_height))
 		obj["synced_blocks"] = json.Value(json.Integer(chain.chain_height(srv.chain)))
-		obj["connection_type"] = json.Value(json.String("outbound-full-relay"))
+		obj["connection_type"] = json.Value(json.String("inbound" if peer.inbound else "outbound-full-relay"))
 
 		// Peer sync state
 		ps, ps_found := srv.cm.sync_mgr.peer_sync[id]
@@ -1127,7 +1127,9 @@ _services_to_names :: proc(services: u64) -> json.Array {
 	count := 0
 	if services & 1 != 0 { count += 1 }       // NODE_NETWORK
 	if services & 8 != 0 { count += 1 }       // NODE_WITNESS
+	if services & 64 != 0 { count += 1 }      // NODE_COMPACT_FILTERS
 	if services & 1024 != 0 { count += 1 }    // NODE_NETWORK_LIMITED
+	if services & 2048 != 0 { count += 1 }    // NODE_P2P_V2
 
 	names := make(json.Array, count, context.temp_allocator)
 	idx := 0
@@ -1139,8 +1141,16 @@ _services_to_names :: proc(services: u64) -> json.Array {
 		names[idx] = json.Value(json.String("WITNESS"))
 		idx += 1
 	}
+	if services & 64 != 0 {
+		names[idx] = json.Value(json.String("COMPACT_FILTERS"))
+		idx += 1
+	}
 	if services & 1024 != 0 {
 		names[idx] = json.Value(json.String("NETWORK_LIMITED"))
+		idx += 1
+	}
+	if services & 2048 != 0 {
+		names[idx] = json.Value(json.String("P2P_V2"))
 		idx += 1
 	}
 	return names
@@ -1149,19 +1159,34 @@ _services_to_names :: proc(services: u64) -> json.Array {
 // --- getnetworkinfo ---
 
 _handle_getnetworkinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
-	obj := make(json.Object, 8, context.temp_allocator)
+	obj := make(json.Object, 12, context.temp_allocator)
 	obj["version"] = json.Value(json.Integer(1))
 	obj["subversion"] = json.Value(json.String(wire.NODE_USER_AGENT))
 	obj["protocolversion"] = json.Value(json.Integer(i64(wire.PROTOCOL_VERSION)))
-	obj["localservices"] = json.Value(json.Integer(i64(p2p.LOCAL_SERVICES)))
+
+	local_services := u64(p2p.LOCAL_SERVICES)
+	if srv.cm != nil {
+		local_services = srv.cm.local_services
+	}
+	obj["localservices"] = json.Value(json.String(fmt.tprintf("%016x", local_services)))
+	obj["localservicesnames"] = json.Value(_services_to_names(local_services))
 
 	conn_count := 0
+	conn_in := 0
+	conn_out := 0
 	if srv.cm != nil {
-		conn_count = len(srv.cm.peers)
+		for _, peer in srv.cm.peers {
+			conn_count += 1
+			if peer.inbound {
+				conn_in += 1
+			} else {
+				conn_out += 1
+			}
+		}
 	}
 	obj["connections"] = json.Value(json.Integer(conn_count))
-	obj["connections_in"] = json.Value(json.Integer(0))
-	obj["connections_out"] = json.Value(json.Integer(conn_count))
+	obj["connections_in"] = json.Value(json.Integer(conn_in))
+	obj["connections_out"] = json.Value(json.Integer(conn_out))
 	obj["networkactive"] = json.Value(json.Boolean(true))
 	obj["relayfee"] = json.Value(json.Float(0.00001000))
 

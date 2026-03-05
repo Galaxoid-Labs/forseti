@@ -2,23 +2,23 @@
 
 A Bitcoin full node implementation written in [Odin](https://odin-lang.org/). Built from scratch with no Bitcoin library dependencies — only libsecp256k1 for elliptic curve cryptography, vendored RIPEMD-160, and LevelDB for storage.
 
-This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, v2 encrypted transport (BIP324), compact block relay (BIP152), feefilter (BIP133), wtxid relay (BIP339), addr relay with addrv2 (BIP155), mempool with RBF, and a JSON-RPC interface with 42 methods.
+This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, inbound + outbound connections (Bitcoin Core 28 defaults), v2 encrypted transport (BIP324), compact block relay (BIP152), compact block filters (BIP157/158), feefilter (BIP133), wtxid relay (BIP339), addr relay with addrv2 (BIP155), mempool with RBF, and a JSON-RPC interface with 43 methods.
 
 ## Status
 
-**289 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Builds on macOS and Linux.
+**306 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Accepts both inbound and outbound P2P connections with v2 encrypted transport enabled by default. Builds on macOS and Linux.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
-| 0 | Crypto + C Bindings | Complete (33 tests) |
-| 1 | Wire Protocol + Serialization | Complete (38 tests) |
+| 0 | Crypto + C Bindings | Complete (37 tests) |
+| 1 | Wire Protocol + Serialization | Complete (44 tests) |
 | 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH, Taproot) | Complete (50 tests) |
 | 3 | Consensus Rules + Block Validation | Complete (22 tests) |
-| 4 | UTXO Set + Chain State | Complete (20 tests) |
-| 5 | Persistent Storage (LevelDB) | Complete (16 tests) |
-| 6 | P2P Networking | Complete (26 tests) |
+| 4 | UTXO Set + Chain State | Complete (22 tests) |
+| 5 | Persistent Storage (LevelDB) | Complete (18 tests) |
+| 6 | P2P Networking | Complete (29 tests) |
 | 7 | Mempool + Persistence + RBF + Config | Complete (32 tests) |
-| 8 | RPC Interface (42 methods) | Complete (52 tests) |
+| 8 | RPC Interface (43 methods) | Complete (52 tests) |
 | 9 | P2P Integration + CLI + Shutdown | Complete |
 | 10 | Signet Sync (BIP325) | Complete |
 | 11 | LevelDB Storage Migration | Complete |
@@ -47,6 +47,8 @@ This is an educational/experimental project. It implements the core components o
 | 34 | BIP 133 feefilter + BIP 339 wtxid relay | Complete |
 | 35 | BIP 155 addr relay + addrv2 | Complete |
 | 36 | BIP 324 v2 Encrypted Transport | Complete |
+| 37 | BIP 157/158 Compact Block Filters | Complete |
+| 38 | Inbound P2P Connections + Core 28 Parity | Complete |
 
 ## Dependencies
 
@@ -190,11 +192,13 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | `--connect=<ip:port>` | Connect to a specific peer | DNS discovery |
 | `--p2p-port=<port>` | P2P listen port | Network default |
 | `--no-p2p` | Disable P2P (RPC-only mode) | `false` |
-| `--maxconnections=<N>` | Maximum outbound peer connections | `8` |
+| `--maxconnections=<N>` | Total peer connections (8 outbound + N-9 inbound) | `125` |
+| `--listen=<0\|1>` | Accept inbound P2P connections | `1` |
 | `--dbcache=<MB>` | Database cache size in MiB | `450` |
 | `--par=<N>` | Script verification threads (0=auto, 1=serial, 2+=parallel) | `0` |
 | `--assumevalid=<height>` | Skip script verification below height (0=disable) | Network default |
 | `--v2transport=<0\|1>` | BIP 324 v2 encrypted P2P transport | `1` |
+| `--blockfilterindex=<0\|1>` | Build and serve BIP 157 compact block filters | `0` |
 
 **Mempool (matching Bitcoin Core):**
 
@@ -235,7 +239,9 @@ no-p2p=1
 dbcache=450
 par=0
 assumevalid=880000
-maxconnections=8
+maxconnections=125
+listen=1
+blockfilterindex=0
 
 # Mempool settings (Bitcoin Core compatible)
 maxmempool=300
@@ -265,7 +271,7 @@ Values in a network-specific section (e.g. `[regtest]`) take priority over globa
 |---------|----------|----------|
 | mainnet | 8332 | 8333 |
 | testnet3 | 18332 | 18333 |
-| testnet4 | 48332 | — |
+| testnet4 | 48332 | 48333 |
 | signet | 38332 | 38333 |
 | regtest | 18443 | 18444 |
 
@@ -288,11 +294,11 @@ curl -s -u myuser:mypassword \
 bitcoin-cli -rpcport=18443 getblockchaininfo
 ```
 
-### Bitcoin Core RPC Coverage (42 / 78 non-wallet RPCs)
+### Bitcoin Core RPC Coverage (43 / 78 non-wallet RPCs)
 
 The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are intentionally excluded.
 
-**Blockchain (20/25):**
+**Blockchain (21/25):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
@@ -300,7 +306,7 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `getblock` | Yes | Verbosity 0, 1, 2 |
 | `getblockchaininfo` | Yes | |
 | `getblockcount` | Yes | |
-| `getblockfilter` | — | BIP157 compact block filters |
+| `getblockfilter` | Yes | BIP 157 compact block filter (basic) |
 | `getblockhash` | Yes | |
 | `getblockheader` | Yes | |
 | `getblockstats` | Yes | |
@@ -408,17 +414,17 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 ## Testing
 
 ```bash
-# Run all 289 tests
+# Run all 306 tests
 make test
 
 # Test individual packages
-odin test crypto          # 33 tests
-odin test wire            # 38 tests
+odin test crypto          # 37 tests
+odin test wire            # 44 tests
 odin test script          # 50 tests (use -define:ODIN_TEST_THREADS=1 if flaky)
 odin test consensus       # 22 tests
-odin test storage         # 16 tests
-odin test chain           # 20 tests
-odin test p2p             # 26 tests
+odin test storage         # 18 tests
+odin test chain           # 22 tests
+odin test p2p             # 29 tests
 odin test mempool         # 32 tests
 odin test rpc             # 52 tests
 ```
@@ -429,15 +435,15 @@ odin test rpc             # 52 tests
 bitcoin-node-odin/
 ├── main.odin              # Entry point, CLI parsing, config file, thread orchestration
 ├── Makefile               # Build system
-├── crypto/                # SHA-256d, RIPEMD-160, HASH160, secp256k1 (verify+sign+ElligatorSwift), Merkle root, address encoding, WIF, SipHash-2-4
-├── wire/                  # Protocol types, CompactSize, tx/block serialization, message framing, compact blocks (BIP152), addrv2 (BIP155)
+├── crypto/                # SHA-256d, RIPEMD-160, HASH160, secp256k1 (verify+sign+ElligatorSwift), Merkle root, address encoding, WIF, SipHash-2-4, GCS (BIP158)
+├── wire/                  # Protocol types, CompactSize, tx/block serialization, message framing, compact blocks (BIP152), addrv2 (BIP155), filter messages (BIP157)
 ├── script/                # Script interpreter, opcodes, standard types, Taproot (BIP341/342)
 ├── consensus/             # Chain params, PoW, difficulty, block/tx validation, BIP325 signet
-├── storage/               # LevelDB bindings + wrapper, flat files, block DB, index DB, UTXO DB
-├── chain/                 # UTXO cache, block index (skip list), undo data, chain state
-├── p2p/                   # Peer connections, sync manager, connection manager, address manager, BIP324 v2 transport
+├── storage/               # LevelDB bindings + wrapper, flat files, block DB, index DB, UTXO DB, filter DB
+├── chain/                 # UTXO cache, block index (skip list), undo data, chain state, block filter building
+├── p2p/                   # Peer connections, sync manager, connection manager, address manager, BIP324 v2 transport, inbound listener
 ├── mempool/               # Fee rates, relay policy, validation pipeline, RBF, persistence, configurable limits
-├── rpc/                   # JSON-RPC server (42 methods), handlers, types
+├── rpc/                   # JSON-RPC server (43 methods), handlers, types
 └── deps/                  # C/C++ dependencies
     ├── libsecp256k1/      # Git submodule (bitcoin-core/secp256k1 v0.7.1)
     ├── leveldb/           # Git submodule (google/leveldb 1.23)
@@ -485,9 +491,11 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Multi-peer block download**: Fastest-first block assignment across all active peers (up to 8) — peers are sorted by throughput and the fastest peer gets tip-adjacent blocks so slow peers can't block chain progress. Bandwidth-based scoring: fast peers get more slots (up to 16), slow peers fewer (minimum 4), new peers get a trial allocation of 8 blocks
 - **Compact block relay (BIP152)**: Full send + receive implementation — negotiates compact block v2 (wtxid-based short IDs) with peers. **Receive**: reconstructs blocks from mempool using SipHash-2-4 short ID matching, requests missing transactions via `getblocktxn`/`blocktxn`, falls back to full block download after 10s timeout. **Send**: announces newly connected blocks to compact-capable peers via `cmpctblock`, `sendheaders` peers via `headers`, and legacy peers via `inv`. Serves `getblocktxn` requests by reading blocks from flat files. Serves full blocks via `getdata`. Reduces block relay bandwidth by ~90% when mempool is populated
 - **V2 encrypted transport (BIP324)**: Optional encrypted P2P via `--v2transport`. ElligatorSwift ECDH key exchange (libsecp256k1), FSChaCha20 length encryption + FSChaCha20Poly1305 AEAD packet encryption with 2^24 rekey interval, HKDF-SHA256 key derivation. V2 transport state machine handles handshake (ell64 exchange → garbage terminator → version packet with garbage AAD → active). 28 short command IDs for bandwidth efficiency. Automatic v1 fallback: 5-second handshake timeout, v1 magic byte detection on first wire byte, per-address tracking to skip v2 on reconnect
+- **Compact block filters (BIP157/158)**: Optional `--blockfilterindex` builds GCS (Golomb-coded set) basic filters during block connection. Filters are stored in a dedicated LevelDB instance (`<datadir>/filters/`). P2P serves `getcfilters`, `getcfheaders`, and `getcfcheckpt` requests. `getblockfilter` RPC returns the filter for a given block hash. `NODE_COMPACT_FILTERS` service bit advertised when enabled
 - **Steady-state sync**: BIP130 `sendheaders` for header announcements, periodic `getheaders` polling (120s), and `inv`-triggered header requests keep the node up-to-date after IBD
 - **Adaptive stall detection**: Bitcoin Core-style stall handling — default 10s timeout, doubles on disconnect (max 64s), decays by 0.85x on successful block connects. Slow peers (throughput <10% of fastest) are evicted after a trial period. Disconnected peers are replaced via DNS discovery
-- **Peer discovery + addr relay (BIP155)**: DNS seeds populate an address manager at startup. After handshake, `sendaddrv2` is negotiated and `getaddr` requests peers' address lists. Inbound `addr`/`addrv2` messages add to the address manager (FNV-1a dedup, 5000 entry cap). Small announcements (≤10 entries) are forwarded to 1-2 random peers with automatic v1↔v2 format conversion. Replacement peers are drawn from the address manager. Configurable via `--maxconnections=N` (default 8)
+- **Inbound connections**: TCP listener accepts inbound P2P connections (Bitcoin Core 28 defaults: 125 total = 8 outbound + 116 inbound + 1 reserved). V2 encrypted transport works in both initiator (outbound) and responder (inbound) modes. Inbound V1 fallback is in-place (feeds buffered bytes back to V1 parser, no reconnect). `--listen=0` disables inbound. `--maxconnections=N` controls total budget. `NODE_P2P_V2` (bit 11) advertised in service flags when v2 transport is enabled
+- **Peer discovery + addr relay (BIP155)**: DNS seeds populate an address manager at startup. After handshake, `sendaddrv2` is negotiated and `getaddr` requests peers' address lists. Inbound `addr`/`addrv2` messages add to the address manager (FNV-1a dedup, 5000 entry cap). Small announcements (≤10 entries) are forwarded to 1-2 random peers with automatic v1↔v2 format conversion. Replacement peers are drawn from the address manager
 - **Write-back UTXO cache**: In-memory cache with dirty/fresh flags, flushed atomically to LevelDB when memory usage exceeds the configurable budget (`--dbcache`, default 450 MiB). Rollback support for failed block validation
 - **Block index**: In-memory tree with skip list pointers for O(log n) ancestor lookup, persisted to LevelDB. `by_prev` index provides O(1) next-block lookup for chain traversal
 - **Sighash caching**: BIP143 (SegWit v0) and BIP341 (Taproot) intermediate hashes are cached per-transaction, avoiding O(n^2) re-computation for transactions with many inputs
@@ -505,6 +513,41 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Zero-allocation txid computation**: Transaction IDs are computed from raw stream bytes during block deserialization — non-witness txs hash raw bytes directly, witness txs use incremental `sha256d_multi` (no memory allocation). Pre-computed txids are passed through `connect_block` → `check_block` (Merkle root), eliminating redundant re-serialization. Reduced `connect_block` time by ~23% at mainnet height 360k
 - **Block profiling**: Timing instrumentation logs per-phase breakdown every 1000 blocks (read, validation, UTXO, scripts, undo, index) for bottleneck identification
 - **No external Odin dependencies**: Only `core:` and `base:` standard library packages
+
+## Supported BIPs
+
+| BIP | Title | Implementation |
+|-----|-------|---------------|
+| 11 | M-of-N Standard Transactions | Script interpreter (OP_CHECKMULTISIG) |
+| 13 | Address Format for P2SH | Address encoding/decoding |
+| 16 | Pay to Script Hash | Script interpreter (P2SH evaluation) |
+| 22 | getblocktemplate | — (not yet) |
+| 30 | Duplicate Transactions | Consensus validation (reject duplicate coinbase txids) |
+| 34 | Block v2 (Height in Coinbase) | Consensus validation |
+| 65 | OP_CHECKMULTISIGVERIFY | Script interpreter |
+| 66 | Strict DER Signatures | Script interpreter (DERSIG flag) |
+| 68 | Relative Lock-time (Sequence Numbers) | Consensus validation (sequence locks in connect_block) |
+| 94 | Testnet4 | Chain params, difficulty retarget fix |
+| 112 | CHECKSEQUENCEVERIFY | Script interpreter |
+| 113 | Median Time Past for Lock-time | Consensus validation (MTP calculation) |
+| 125 | Replace-by-Fee | Mempool (opt-in + fullrbf, fee checks, eviction limits) |
+| 130 | sendheaders | P2P (header-based block announcements) |
+| 133 | feefilter | P2P (per-peer minimum fee rate for tx relay) |
+| 141 | Segregated Witness (Consensus) | Script interpreter, consensus validation |
+| 143 | Segwit Sighash (v0) | Sighash computation + caching |
+| 144 | Segregated Witness (Peer Services) | P2P (NODE_WITNESS service bit) |
+| 152 | Compact Block Relay | P2P (send + receive, SipHash short IDs, reconstruction) |
+| 155 | addrv2 | P2P (addr relay, address manager, v1↔v2 conversion) |
+| 157 | Client Side Block Filtering | P2P (serve getcfilters/getcfheaders/getcfcheckpt) |
+| 158 | Compact Block Filters (Basic) | GCS construction, filter building, filter DB |
+| 173 | Bech32 Addresses (v0) | Address encoding/decoding (P2WPKH, P2WSH) |
+| 324 | Version 2 P2P Encrypted Transport | P2P (ElligatorSwift ECDH, FSChaCha20Poly1305, v1 fallback) |
+| 325 | Signet | Chain params, signet challenge validation |
+| 339 | wtxid-based Transaction Relay | P2P (wtxid inv, wtxid→txid index, relay) |
+| 340 | Schnorr Signatures | Crypto (secp256k1 schnorrsig verification) |
+| 341 | Taproot (SegWit v1) | Script interpreter, sighash computation + caching |
+| 342 | Tapscript | Script interpreter (OP_CHECKSIGADD, leaf versioning) |
+| 350 | Bech32m Addresses (v1+) | Address encoding/decoding (P2TR) |
 
 ## License
 
