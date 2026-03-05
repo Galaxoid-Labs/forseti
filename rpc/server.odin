@@ -323,6 +323,8 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_gettxoutproof(srv, req.params)
 	case "verifytxoutproof":
 		return _handle_verifytxoutproof(srv, req.params)
+	case "getblockfilter":
+		return _handle_getblockfilter(srv, req.params)
 	}
 
 	return _make_error(.Method_Not_Found, fmt.tprintf("Method not found: %s", req.method), srv._current_id)

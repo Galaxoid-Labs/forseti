@@ -85,7 +85,8 @@ V2_HANDSHAKE_TIMEOUT_SECS   :: 5      // seconds before v2 → v1 fallback
 // Services flags.
 NODE_NETWORK         :: u64(1)
 NODE_WITNESS         :: u64(1 << 3)
+NODE_COMPACT_FILTERS :: u64(1 << 6)
 NODE_NETWORK_LIMITED :: u64(1 << 10)
 
-// Our advertised services.
+// Our advertised services (base — compact filters added at runtime if enabled).
 LOCAL_SERVICES :: NODE_NETWORK | NODE_WITNESS

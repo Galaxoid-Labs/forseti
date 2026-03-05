@@ -35,6 +35,12 @@ CMD_REJECT      :: "reject"
 CMD_WTXIDRELAY  :: "wtxidrelay"
 CMD_ADDRV2      :: "addrv2"
 CMD_SENDADDRV2  :: "sendaddrv2"
+CMD_GETCFILTERS :: "getcfilters"
+CMD_CFILTER     :: "cfilter"
+CMD_GETCFHEADERS :: "getcfheaders"
+CMD_CFHEADERS   :: "cfheaders"
+CMD_GETCFCHECKPT :: "getcfcheckpt"
+CMD_CFCHECKPT   :: "cfcheckpt"
 CMD_UNKNOWN     :: "unknown"
 
 // Computes the 4-byte checksum (first 4 bytes of SHA256d of payload).
@@ -93,6 +99,12 @@ command_from_bytes :: proc(cmd: [COMMAND_SIZE]byte) -> string {
 	case CMD_WTXIDRELAY:  return CMD_WTXIDRELAY
 	case CMD_ADDRV2:      return CMD_ADDRV2
 	case CMD_SENDADDRV2:  return CMD_SENDADDRV2
+	case CMD_GETCFILTERS: return CMD_GETCFILTERS
+	case CMD_CFILTER:     return CMD_CFILTER
+	case CMD_GETCFHEADERS: return CMD_GETCFHEADERS
+	case CMD_CFHEADERS:   return CMD_CFHEADERS
+	case CMD_GETCFCHECKPT: return CMD_GETCFCHECKPT
+	case CMD_CFCHECKPT:   return CMD_CFCHECKPT
 	}
 
 	// Unknown command — return static string (must not use temp_allocator;

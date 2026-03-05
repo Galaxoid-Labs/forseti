@@ -271,7 +271,7 @@ _peer_process_messages_v2 :: proc(peer: ^Peer) {
 			// V2 handshake complete — now send v1 version message (encrypted via v2).
 			log.infof("V2 handshake complete with peer %d", peer.id)
 			_, chain_height := chain.chain_tip(cm.chain)
-			peer_send_version(peer, cm.params, chain_height)
+			peer_send_version(peer, cm.params, chain_height, cm.local_services)
 			peer.state = .Version_Sent
 		}
 	case .Bad_Garbage_Auth, .Decryption_Failed, .Invalid_Message:
@@ -437,16 +437,16 @@ _peer_free :: proc(peer: ^Peer) {
 }
 
 // Build and send a version message.
-peer_send_version :: proc(peer: ^Peer, params: ^consensus.Chain_Params, chain_height: int) -> Net_Error {
+peer_send_version :: proc(peer: ^Peer, params: ^consensus.Chain_Params, chain_height: int, local_services: u64 = LOCAL_SERVICES) -> Net_Error {
 	now := time.now()
 	timestamp := time.to_unix_seconds(now)
 
 	ver := wire.Version_Message {
 		version      = i32(wire.PROTOCOL_VERSION),
-		services     = LOCAL_SERVICES,
+		services     = local_services,
 		timestamp    = timestamp,
 		addr_recv    = wire.Net_Address{services = 0},
-		addr_from    = wire.Net_Address{services = LOCAL_SERVICES},
+		addr_from    = wire.Net_Address{services = local_services},
 		nonce        = u64(timestamp) ~ u64(peer.id), // simple nonce
 		user_agent   = wire.NODE_USER_AGENT,
 		start_height = i32(chain_height),
@@ -615,4 +615,28 @@ peer_send_addrv2 :: proc(peer: ^Peer, addresses: []wire.Addr_V2_Address) -> Net_
 	defer wire.writer_destroy(&w)
 	wire.serialize_addr_v2(&w, &msg)
 	return peer_send_message(peer, wire.CMD_ADDRV2, wire.writer_bytes(&w))
+}
+
+// Send cfilter (BIP157) response.
+peer_send_cfilter :: proc(peer: ^Peer, msg: ^wire.CFilter_Message) -> Net_Error {
+	w := wire.writer_init()
+	defer wire.writer_destroy(&w)
+	wire.serialize_cfilter(&w, msg)
+	return peer_send_message(peer, wire.CMD_CFILTER, wire.writer_bytes(&w))
+}
+
+// Send cfheaders (BIP157) response.
+peer_send_cfheaders :: proc(peer: ^Peer, msg: ^wire.CFHeaders_Message) -> Net_Error {
+	w := wire.writer_init()
+	defer wire.writer_destroy(&w)
+	wire.serialize_cfheaders(&w, msg)
+	return peer_send_message(peer, wire.CMD_CFHEADERS, wire.writer_bytes(&w))
+}
+
+// Send cfcheckpt (BIP157) response.
+peer_send_cfcheckpt :: proc(peer: ^Peer, msg: ^wire.CFCheckpt_Message) -> Net_Error {
+	w := wire.writer_init()
+	defer wire.writer_destroy(&w)
+	wire.serialize_cfcheckpt(&w, msg)
+	return peer_send_message(peer, wire.CMD_CFCHECKPT, wire.writer_bytes(&w))
 }

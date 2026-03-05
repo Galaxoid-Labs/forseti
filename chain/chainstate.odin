@@ -34,6 +34,8 @@ Chain_State :: struct {
 	arena_pool_bufs:  [][]byte,    // pre-allocated 8MB buffers, one per worker thread
 	arena_pool_stack: [dynamic]int, // indices of available buffers (protected by mutex)
 	arena_pool_mu:    sync.Mutex,
+	// BIP 158 compact block filter index (nil when disabled)
+	filter_db: ^storage.Filter_DB,
 	// Performance profiling counters (cumulative, logged every 1000 blocks)
 	prof: Block_Profile,
 }
@@ -169,6 +171,11 @@ chain_state_destroy :: proc(cs: ^Chain_State) {
 	tip_hash, tip_height := chain_tip(cs)
 	coins_cache_flush(&cs.coins, tip_hash, tip_height)
 	coins_cache_destroy(&cs.coins)
+	if cs.filter_db != nil {
+		storage.filter_db_close(cs.filter_db)
+		free(cs.filter_db)
+		cs.filter_db = nil
+	}
 	storage.utxo_db_close(&cs.utxo_db)
 	storage.block_db_close(&cs.block_db)
 	storage.index_db_close(&cs.index_db)
@@ -292,6 +299,12 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 	undo_coins := make([dynamic]Undo_Coin, 0, 64, context.temp_allocator)
 	applied_tx_indices := make([dynamic]int, 0, len(block.txs), context.temp_allocator)
 
+	// Collect spent scriptPubKeys for BIP158 filter building.
+	all_spent_scripts: [dynamic][]byte
+	if cs.filter_db != nil {
+		all_spent_scripts = make([dynamic][]byte, 0, 64, context.temp_allocator)
+	}
+
 	// Script check batch: pre-allocate capacity to avoid reallocation (keeps pointers stable).
 	batch: Script_Check_Batch
 	if !skip_scripts {
@@ -339,6 +352,11 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 				script_pubkey = script_clone,
 			}
 			input_sum += coin.amount
+
+			// Collect for BIP158 filter.
+			if cs.filter_db != nil {
+				append(&all_spent_scripts, script_clone)
+			}
 		}
 
 		// 4a2. BIP 68: Check relative lock-time (sequence locks)
@@ -479,6 +497,11 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 
 	append(&cs.active_chain, entry.hash)
 
+	// 9. Build and store BIP158 compact block filter (if enabled).
+	if cs.filter_db != nil {
+		_connect_block_filter(cs, block, entry, all_spent_scripts[:])
+	}
+
 	t_end := time.tick_now()
 
 	// Accumulate profiling data.
@@ -517,7 +540,10 @@ disconnect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Ind
 		coins_cache_restore(&cs.coins, uc.outpoint, uc.coin)
 	}
 
-	// 4. Update entry status and pop active chain
+	// 4. Delete BIP158 filter on disconnect.
+	_disconnect_block_filter(cs, entry.hash)
+
+	// 5. Update entry status and pop active chain
 	entry.status -= {.Valid_Chain}
 
 	pop(&cs.active_chain)

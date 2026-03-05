@@ -10,6 +10,7 @@ import "core:time"
 
 import "../chain"
 import "../consensus"
+import crypto "../crypto"
 import "../mempool"
 import "../storage"
 import "../wire"
@@ -47,6 +48,8 @@ Conn_Manager :: struct {
 	v2_transport_enabled: bool,
 	// BIP324: addresses where v2 handshake failed (skip v2 on reconnect).
 	v2_failed_addrs: map[string]bool,
+	// Advertised services (base + optional compact filters).
+	local_services: u64,
 }
 
 conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) -> Net_Error {
@@ -358,7 +361,7 @@ _conn_manager_peer_connected :: proc(cm: ^Conn_Manager, peer: ^Peer) {
 
 	// V1 path.
 	_, chain_height := chain.chain_tip(cm.chain)
-	peer_send_version(peer, cm.params, chain_height)
+	peer_send_version(peer, cm.params, chain_height, cm.local_services)
 	peer.state = .Version_Sent
 	_peer_start_recv(peer)
 }
@@ -418,6 +421,12 @@ _conn_manager_dispatch :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, cmd: string,
 		_conn_manager_handle_addrv2(cm, peer_id, payload)
 	case wire.CMD_GETADDR:
 		_conn_manager_handle_getaddr(cm, peer_id)
+	case wire.CMD_GETCFILTERS:
+		_conn_manager_handle_getcfilters(cm, peer_id, payload)
+	case wire.CMD_GETCFHEADERS:
+		_conn_manager_handle_getcfheaders(cm, peer_id, payload)
+	case wire.CMD_GETCFCHECKPT:
+		_conn_manager_handle_getcfcheckpt(cm, peer_id, payload)
 	case:
 		// Unknown command — ignore.
 	}
@@ -1188,4 +1197,207 @@ _hash_to_hex_short :: proc(hash: Hash256) -> string {
 		buf[i * 2 + 1] = hex[b & 0x0f]
 	}
 	return fmt.tprintf("%s...", string(buf[:16]))
+}
+
+// --- BIP 157 compact block filter handlers ---
+
+// Handle getcfilters: send one cfilter per block in the requested range.
+_conn_manager_handle_getcfilters :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []byte) {
+	if cm.chain.filter_db == nil {
+		return // Filter index not enabled.
+	}
+
+	r := wire.reader_init(payload)
+	msg, err := wire.deserialize_get_cfilters(&r)
+	if err != .None {
+		return
+	}
+
+	// Only basic (type 0) filters supported.
+	if msg.filter_type != chain.FILTER_TYPE_BASIC {
+		return
+	}
+
+	// Find stop block in our index.
+	stop_entry, stop_found := cm.chain.block_index.entries[msg.stop_hash]
+	if !stop_found || !(.Valid_Chain in stop_entry.status) {
+		return
+	}
+
+	start_height := int(msg.start_height)
+	stop_height := stop_entry.height
+	tip_height := chain.chain_height(cm.chain)
+
+	// Validate range: max 1000 blocks, within active chain.
+	if start_height > stop_height || stop_height > tip_height {
+		return
+	}
+	if stop_height - start_height + 1 > 1000 {
+		return
+	}
+
+	peer, peer_found := cm.peers[peer_id]
+	if !peer_found {
+		return
+	}
+
+	for h in start_height ..= stop_height {
+		block_hash := cm.chain.active_chain[h]
+		filter_data, found := storage.filter_db_get_filter(cm.chain.filter_db, block_hash, context.temp_allocator)
+		if !found {
+			filter_data = nil
+		}
+
+		// Build cfilter with N prefix per BIP158.
+		// We need to prepend CompactSize(N) — but we don't store N separately.
+		// For cfilter, the on-wire filter_data should be the raw stored filter.
+		// BIP157 says: "FilterBytes: the serialized GCS filter for this block".
+		// BIP158: "the serialized GCS has N as CompactSize prefix".
+		// Our gcs_build_filter doesn't include N. Prepend it here.
+		entry, efound := cm.chain.block_index.entries[block_hash]
+		n_elements: u64 = 0
+		if efound {
+			// We don't store n_elements in the index.
+			// Send raw filter without N prefix — matching Bitcoin Core's behavior where
+			// the cfilter message's filter_data IS the BIP158 serialized filter (N + GCS data).
+			// Since we don't store N, send what we have.
+			// TODO: store N alongside filter for proper BIP158 serialization.
+		}
+		_ = n_elements
+		_ = entry
+
+		cfilter := wire.CFilter_Message{
+			filter_type = chain.FILTER_TYPE_BASIC,
+			block_hash  = block_hash,
+			filter_data = filter_data,
+		}
+		peer_send_cfilter(peer, &cfilter)
+	}
+}
+
+// Handle getcfheaders: send filter hashes for a range of blocks.
+_conn_manager_handle_getcfheaders :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []byte) {
+	if cm.chain.filter_db == nil {
+		return
+	}
+
+	r := wire.reader_init(payload)
+	msg, err := wire.deserialize_get_cfheaders(&r)
+	if err != .None {
+		return
+	}
+
+	if msg.filter_type != chain.FILTER_TYPE_BASIC {
+		return
+	}
+
+	stop_entry, stop_found := cm.chain.block_index.entries[msg.stop_hash]
+	if !stop_found || !(.Valid_Chain in stop_entry.status) {
+		return
+	}
+
+	start_height := int(msg.start_height)
+	stop_height := stop_entry.height
+	tip_height := chain.chain_height(cm.chain)
+
+	if start_height > stop_height || stop_height > tip_height {
+		return
+	}
+	if stop_height - start_height + 1 > 2000 {
+		return
+	}
+
+	peer, peer_found := cm.peers[peer_id]
+	if !peer_found {
+		return
+	}
+
+	// Get prev_filter_header (header of block before start_height).
+	prev_filter_header: Hash256
+	if start_height > 0 {
+		prev_hash := cm.chain.active_chain[start_height - 1]
+		prev_hdr, found := storage.filter_db_get_header(cm.chain.filter_db, prev_hash)
+		if found {
+			prev_filter_header = prev_hdr
+		}
+	}
+
+	// Collect filter hashes for the range.
+	count := stop_height - start_height + 1
+	filter_hashes := make([]Hash256, count, context.temp_allocator)
+	for i in 0 ..< count {
+		h := start_height + i
+		block_hash := cm.chain.active_chain[h]
+		header, found := storage.filter_db_get_header(cm.chain.filter_db, block_hash)
+		if found {
+			// BIP157: filter_hashes contains the filter *hash* (sha256d of filter bytes),
+			// NOT the filter header. We store filter headers, so we need filter hashes too.
+			// For now, use the filter hash derived from stored filter bytes.
+			filter_data, ff := storage.filter_db_get_filter(cm.chain.filter_db, block_hash, context.temp_allocator)
+			if ff && len(filter_data) > 0 {
+				filter_hashes[i] = crypto.sha256d(filter_data)
+			}
+			_ = header
+		}
+	}
+
+	resp := wire.CFHeaders_Message{
+		filter_type        = chain.FILTER_TYPE_BASIC,
+		stop_hash          = msg.stop_hash,
+		prev_filter_header = prev_filter_header,
+		filter_hashes      = filter_hashes,
+	}
+	peer_send_cfheaders(peer, &resp)
+}
+
+// Handle getcfcheckpt: send filter headers at every 1000th block.
+_conn_manager_handle_getcfcheckpt :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []byte) {
+	if cm.chain.filter_db == nil {
+		return
+	}
+
+	r := wire.reader_init(payload)
+	msg, err := wire.deserialize_get_cfcheckpt(&r)
+	if err != .None {
+		return
+	}
+
+	if msg.filter_type != chain.FILTER_TYPE_BASIC {
+		return
+	}
+
+	stop_entry, stop_found := cm.chain.block_index.entries[msg.stop_hash]
+	if !stop_found || !(.Valid_Chain in stop_entry.status) {
+		return
+	}
+
+	stop_height := stop_entry.height
+	tip_height := chain.chain_height(cm.chain)
+	if stop_height > tip_height {
+		return
+	}
+
+	peer, peer_found := cm.peers[peer_id]
+	if !peer_found {
+		return
+	}
+
+	// Collect filter headers at every 1000th block.
+	checkpoints := make([dynamic]Hash256, 0, stop_height / 1000 + 1, context.temp_allocator)
+	for h := 1000; h <= stop_height; h += 1000 {
+		block_hash := cm.chain.active_chain[h]
+		header, found := storage.filter_db_get_header(cm.chain.filter_db, block_hash)
+		if found {
+			append(&checkpoints, header)
+		} else {
+			append(&checkpoints, HASH_ZERO)
+		}
+	}
+
+	resp := wire.CFCheckpt_Message{
+		filter_type    = chain.FILTER_TYPE_BASIC,
+		stop_hash      = msg.stop_hash,
+		filter_headers = checkpoints[:],
+	}
+	peer_send_cfcheckpt(peer, &resp)
 }

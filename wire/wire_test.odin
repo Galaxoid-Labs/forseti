@@ -976,6 +976,165 @@ test_addrv2_roundtrip :: proc(t: ^testing.T) {
 	testing.expect_value(t, msg2.addresses[2].port, u16(9050))
 }
 
+// --- BIP157 compact block filter message tests ---
+
+@(test)
+test_get_cfilters_roundtrip :: proc(t: ^testing.T) {
+	stop_hash: Hash256
+	stop_hash[0] = 0xAA
+	stop_hash[31] = 0xBB
+
+	msg := Get_CFilters_Message{
+		filter_type = 0,
+		start_height = 100000,
+		stop_hash = stop_hash,
+	}
+
+	w := writer_init(context.temp_allocator)
+	serialize_get_cfilters(&w, &msg)
+
+	r := reader_init(writer_bytes(&w))
+	msg2, err := deserialize_get_cfilters(&r)
+	testing.expect(t, err == nil, "deserialize should succeed")
+	testing.expect_value(t, msg2.filter_type, u8(0))
+	testing.expect_value(t, msg2.start_height, u32(100000))
+	testing.expect_value(t, msg2.stop_hash[0], u8(0xAA))
+	testing.expect_value(t, msg2.stop_hash[31], u8(0xBB))
+}
+
+@(test)
+test_cfilter_roundtrip :: proc(t: ^testing.T) {
+	block_hash: Hash256
+	block_hash[0] = 0x11
+	block_hash[31] = 0x22
+
+	filter_data := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0xAA, 0xBB, 0xCC}
+
+	msg := CFilter_Message{
+		filter_type = 0,
+		block_hash = block_hash,
+		filter_data = filter_data,
+	}
+
+	w := writer_init(context.temp_allocator)
+	serialize_cfilter(&w, &msg)
+
+	r := reader_init(writer_bytes(&w))
+	msg2, err := deserialize_cfilter(&r, context.temp_allocator)
+	testing.expect(t, err == nil, "deserialize should succeed")
+	testing.expect_value(t, msg2.filter_type, u8(0))
+	testing.expect_value(t, msg2.block_hash[0], u8(0x11))
+	testing.expect_value(t, msg2.block_hash[31], u8(0x22))
+	testing.expect_value(t, len(msg2.filter_data), 8)
+	testing.expect_value(t, msg2.filter_data[0], u8(0x01))
+	testing.expect_value(t, msg2.filter_data[7], u8(0xCC))
+}
+
+@(test)
+test_get_cfheaders_roundtrip :: proc(t: ^testing.T) {
+	stop_hash: Hash256
+	stop_hash[0] = 0xCC
+
+	msg := Get_CFHeaders_Message{
+		filter_type = 0,
+		start_height = 200000,
+		stop_hash = stop_hash,
+	}
+
+	w := writer_init(context.temp_allocator)
+	serialize_get_cfheaders(&w, &msg)
+
+	r := reader_init(writer_bytes(&w))
+	msg2, err := deserialize_get_cfheaders(&r)
+	testing.expect(t, err == nil, "deserialize should succeed")
+	testing.expect_value(t, msg2.filter_type, u8(0))
+	testing.expect_value(t, msg2.start_height, u32(200000))
+	testing.expect_value(t, msg2.stop_hash[0], u8(0xCC))
+}
+
+@(test)
+test_cfheaders_roundtrip :: proc(t: ^testing.T) {
+	stop_hash: Hash256
+	stop_hash[0] = 0xDD
+
+	prev_header: Hash256
+	prev_header[0] = 0xEE
+
+	h1, h2: Hash256
+	h1[0] = 0x11
+	h2[0] = 0x22
+
+	msg := CFHeaders_Message{
+		filter_type = 0,
+		stop_hash = stop_hash,
+		prev_filter_header = prev_header,
+		filter_hashes = []Hash256{h1, h2},
+	}
+
+	w := writer_init(context.temp_allocator)
+	serialize_cfheaders(&w, &msg)
+
+	r := reader_init(writer_bytes(&w))
+	msg2, err := deserialize_cfheaders(&r, context.temp_allocator)
+	testing.expect(t, err == nil, "deserialize should succeed")
+	testing.expect_value(t, msg2.filter_type, u8(0))
+	testing.expect_value(t, msg2.stop_hash[0], u8(0xDD))
+	testing.expect_value(t, msg2.prev_filter_header[0], u8(0xEE))
+	testing.expect_value(t, len(msg2.filter_hashes), 2)
+	testing.expect_value(t, msg2.filter_hashes[0][0], u8(0x11))
+	testing.expect_value(t, msg2.filter_hashes[1][0], u8(0x22))
+}
+
+@(test)
+test_get_cfcheckpt_roundtrip :: proc(t: ^testing.T) {
+	stop_hash: Hash256
+	stop_hash[0] = 0xFF
+
+	msg := Get_CFCheckpt_Message{
+		filter_type = 0,
+		stop_hash = stop_hash,
+	}
+
+	w := writer_init(context.temp_allocator)
+	serialize_get_cfcheckpt(&w, &msg)
+
+	r := reader_init(writer_bytes(&w))
+	msg2, err := deserialize_get_cfcheckpt(&r)
+	testing.expect(t, err == nil, "deserialize should succeed")
+	testing.expect_value(t, msg2.filter_type, u8(0))
+	testing.expect_value(t, msg2.stop_hash[0], u8(0xFF))
+}
+
+@(test)
+test_cfcheckpt_roundtrip :: proc(t: ^testing.T) {
+	stop_hash: Hash256
+	stop_hash[0] = 0xAB
+
+	h1, h2, h3: Hash256
+	h1[0] = 0x01
+	h2[0] = 0x02
+	h3[0] = 0x03
+
+	msg := CFCheckpt_Message{
+		filter_type = 0,
+		stop_hash = stop_hash,
+		filter_headers = []Hash256{h1, h2, h3},
+	}
+
+	w := writer_init(context.temp_allocator)
+	serialize_cfcheckpt(&w, &msg)
+
+	r := reader_init(writer_bytes(&w))
+	msg2, err := deserialize_cfcheckpt(&r, context.temp_allocator)
+	testing.expect(t, err == nil, "deserialize should succeed")
+	testing.expect_value(t, msg2.filter_type, u8(0))
+	testing.expect_value(t, msg2.stop_hash[0], u8(0xAB))
+	testing.expect_value(t, len(msg2.filter_headers), 3)
+	testing.expect_value(t, msg2.filter_headers[0][0], u8(0x01))
+	testing.expect_value(t, msg2.filter_headers[1][0], u8(0x02))
+	testing.expect_value(t, msg2.filter_headers[2][0], u8(0x03))
+}
+
 @(test)
 test_sendaddrv2_command :: proc(t: ^testing.T) {
 	// Verify CMD_SENDADDRV2 roundtrips through command_to_bytes/command_from_bytes.

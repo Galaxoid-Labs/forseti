@@ -1711,6 +1711,7 @@ RPC_METHODS := [?]string{
 	"uptime",
 	"validateaddress",
 	"verifytxoutproof",
+	"getblockfilter",
 }
 
 _handle_help :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
@@ -1786,6 +1787,7 @@ _get_method_help :: proc(method: string) -> string {
 	case "combinerawtransaction":       return "combinerawtransaction [\"hex\",...]\nCombine multiple partially signed transactions into one transaction."
 	case "signrawtransactionwithkey":   return "signrawtransactionwithkey \"hex\" [\"privatekey\",...] ( [{\"txid\":\"hex\",\"vout\":n,\"scriptPubKey\":\"hex\",\"amount\":n},...] \"sighashtype\" )\nSign inputs for raw transaction with provided private keys."
 	case "verifytxoutproof":           return "verifytxoutproof \"proof\"\nVerifies that a proof points to a transaction in a block, returning the txids."
+	case "getblockfilter":             return "getblockfilter \"blockhash\" ( \"filtertype\" )\nRetrieve a BIP 158 content filter for a particular block."
 	}
 	return fmt.tprintf("%s\nNo detailed help available.", method)
 }
@@ -2542,4 +2544,62 @@ _bytes_equal :: proc(a: []byte, b: []byte) -> bool {
 		if a[i] != b[i] { return false }
 	}
 	return true
+}
+
+// getblockfilter — BIP 157/158
+// Params: blockhash (string, required), filtertype (string, optional, default "basic")
+// Returns: {"filter": "<hex>", "header": "<hex>"}
+_handle_getblockfilter :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	// Check filter index is enabled.
+	if srv.chain.filter_db == nil {
+		return _make_error(.Misc_Error, "Index is not enabled for filtertype basic", srv._current_id)
+	}
+
+	hash_hex, ok := _get_string_param(params, 0)
+	if !ok {
+		return _make_error(.Invalid_Params, "Missing blockhash parameter", srv._current_id)
+	}
+
+	hash, hash_ok := _hex_to_hash(hash_hex)
+	if !hash_ok {
+		return _make_error(.Invalid_Params, "Invalid block hash", srv._current_id)
+	}
+
+	// Optional filter type parameter (only "basic" supported).
+	filter_type_str, has_type := _get_string_param(params, 1)
+	if has_type && filter_type_str != "basic" {
+		return _make_error(.Invalid_Params, fmt.tprintf("Unknown filtertype %s", filter_type_str), srv._current_id)
+	}
+
+	// Look up block in index.
+	entry, found := srv.chain.block_index.entries[hash]
+	if !found {
+		return _make_error(.Block_Not_Found, "Block not found", srv._current_id)
+	}
+
+	// Must be in the active chain.
+	tip_height := chain.chain_height(srv.chain)
+	if entry.height < 0 || entry.height > tip_height {
+		return _make_error(.Block_Not_Found, "Block is not in the main chain", srv._current_id)
+	}
+	if srv.chain.active_chain[entry.height] != hash {
+		return _make_error(.Block_Not_Found, "Block is not in the main chain", srv._current_id)
+	}
+
+	// Retrieve filter and header from filter DB.
+	filter_data, filter_found := storage.filter_db_get_filter(srv.chain.filter_db, hash, context.temp_allocator)
+	if !filter_found {
+		filter_data = nil
+	}
+
+	filter_header, header_found := storage.filter_db_get_header(srv.chain.filter_db, hash)
+	if !header_found {
+		filter_header = {}
+	}
+
+	obj := make(json.Object, 2, context.temp_allocator)
+	obj["filter"] = json.Value(json.String(_bytes_to_hex(filter_data)))
+	obj["header"] = json.Value(json.String(_bytes_to_hex(filter_header[:])))
+
+	return _make_result(json.Value(obj), srv._current_id)
 }

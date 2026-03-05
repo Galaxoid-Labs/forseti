@@ -15,7 +15,7 @@ siphash_2_4 :: proc(k0, k1: u64, data: []byte) -> u64 {
 
 	// Process 8-byte blocks.
 	for i in 0 ..< blocks {
-		m := _siphash_u64le(data[i * 8:])
+		m := siphash_u64le(data[i * 8:])
 		v3 ~= m
 		// 2 rounds
 		v0, v1, v2, v3 = _siphash_round(v0, v1, v2, v3)
@@ -66,8 +66,8 @@ compact_block_sipkeys :: proc(block_hash: Hash256, nonce: u64) -> (k0, k1: u64) 
 	buf[38] = u8(nonce >> 48)
 	buf[39] = u8(nonce >> 56)
 	h := sha256_hash(buf[:])
-	k0 = _siphash_u64le(h[:8])
-	k1 = _siphash_u64le(h[8:16])
+	k0 = siphash_u64le(h[:8])
+	k1 = siphash_u64le(h[8:16])
 	return k0, k1
 }
 
@@ -104,8 +104,7 @@ _siphash_round :: proc(v0, v1, v2, v3: u64) -> (u64, u64, u64, u64) {
 }
 
 // Read u64 little-endian from a byte slice.
-@(private)
-_siphash_u64le :: proc(data: []byte) -> u64 {
+siphash_u64le :: proc(data: []byte) -> u64 {
 	return u64(data[0]) |
 		u64(data[1]) << 8 |
 		u64(data[2]) << 16 |

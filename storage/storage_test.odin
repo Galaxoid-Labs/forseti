@@ -646,3 +646,71 @@ test_block_db_store_raw :: proc(t: ^testing.T) {
 	read_hash := wire.block_header_hash(&read_block.header)
 	testing.expect(t, read_hash == expected_hash, "raw-stored block hash should match")
 }
+
+// --- Filter DB tests ---
+
+@(test)
+test_filter_db_put_get :: proc(t: ^testing.T) {
+	dir := make_test_dir("filterdb_pg")
+	defer remove_test_dir(dir)
+
+	fdb, err := filter_db_open(dir)
+	testing.expect_value(t, err, Storage_Error.None)
+	defer filter_db_close(&fdb)
+
+	block_hash: Hash256
+	block_hash[0] = 0x42
+	block_hash[31] = 0xFF
+
+	filter := []byte{0x01, 0x02, 0x03, 0x04, 0x05}
+	header: Hash256
+	header[0] = 0xAA
+	header[31] = 0xBB
+
+	// Put
+	perr := filter_db_put(&fdb, block_hash, filter, header)
+	testing.expect_value(t, perr, Storage_Error.None)
+
+	// Get filter
+	got_filter, found_filter := filter_db_get_filter(&fdb, block_hash, context.temp_allocator)
+	testing.expect(t, found_filter, "filter should be found")
+	testing.expect_value(t, len(got_filter), 5)
+	testing.expect_value(t, got_filter[0], u8(0x01))
+	testing.expect_value(t, got_filter[4], u8(0x05))
+
+	// Get header
+	got_header, found_header := filter_db_get_header(&fdb, block_hash)
+	testing.expect(t, found_header, "header should be found")
+	testing.expect_value(t, got_header[0], u8(0xAA))
+	testing.expect_value(t, got_header[31], u8(0xBB))
+}
+
+@(test)
+test_filter_db_delete :: proc(t: ^testing.T) {
+	dir := make_test_dir("filterdb_del")
+	defer remove_test_dir(dir)
+
+	fdb, err := filter_db_open(dir)
+	testing.expect_value(t, err, Storage_Error.None)
+	defer filter_db_close(&fdb)
+
+	block_hash: Hash256
+	block_hash[0] = 0x11
+
+	filter := []byte{0xDE, 0xAD}
+	header: Hash256
+	header[0] = 0xBE
+
+	// Put then delete
+	filter_db_put(&fdb, block_hash, filter, header)
+
+	derr := filter_db_delete(&fdb, block_hash)
+	testing.expect_value(t, derr, Storage_Error.None)
+
+	// Both should be gone
+	_, found_filter := filter_db_get_filter(&fdb, block_hash, context.temp_allocator)
+	testing.expect(t, !found_filter, "deleted filter should not be found")
+
+	_, found_header := filter_db_get_header(&fdb, block_hash)
+	testing.expect(t, !found_header, "deleted header should not be found")
+}

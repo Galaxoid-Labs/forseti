@@ -916,3 +916,80 @@ test_block_subsidy :: proc(t: ^testing.T) {
 	// Eventually goes to zero
 	testing.expect_value(t, consensus.get_block_subsidy(150 * 64, &params), i64(0))
 }
+
+// --- BIP 158 block filter tests ---
+
+@(test)
+test_build_basic_filter :: proc(t: ^testing.T) {
+	// Build a block with a coinbase tx that has a P2PKH output.
+	cb_script := []byte{0x76, 0xa9, 0x14, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x88, 0xac}
+	cb_inputs := make([]wire.Tx_In, 1, context.temp_allocator)
+	cb_inputs[0] = wire.Tx_In{
+		previous_output = wire.Outpoint{hash = HASH_ZERO, index = 0xffffffff},
+		script_sig = []byte{0x04, 0xff, 0xff},
+		sequence = 0xffffffff,
+	}
+	cb_outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
+	cb_outputs[0] = wire.Tx_Out{value = 50_0000_0000, script_pubkey = cb_script}
+
+	txs := make([]wire.Tx, 1, context.temp_allocator)
+	txs[0] = wire.Tx{version = 1, inputs = cb_inputs, outputs = cb_outputs, locktime = 0}
+
+	block := wire.Block{
+		header = wire.Block_Header{version = 1, timestamp = 1000, bits = 0x207fffff, nonce = 1},
+		txs = txs,
+	}
+	block_hash := wire.block_header_hash(&block.header)
+
+	// No spent scripts for coinbase-only block.
+	filter, filter_hash, n := build_basic_filter(&block, block_hash, nil, context.temp_allocator)
+	testing.expect(t, len(filter) > 0, "filter should not be empty for block with P2PKH output")
+	testing.expect(t, filter_hash != HASH_ZERO, "filter hash should not be zero")
+	testing.expect_value(t, n, u64(1))
+
+	// Verify the script matches the filter.
+	matched := crypto.gcs_match_any_n(block_hash, filter, n, [][]byte{cb_script})
+	testing.expect(t, matched, "coinbase scriptPubKey should match filter")
+
+	// OP_RETURN should be excluded.
+	op_return_script := []byte{0x6a, 0x04, 0xde, 0xad}
+	txs2 := make([]wire.Tx, 2, context.temp_allocator)
+	txs2[0] = txs[0]
+	cb2_outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
+	cb2_outputs[0] = wire.Tx_Out{value = 0, script_pubkey = op_return_script}
+	txs2[1] = wire.Tx{version = 1, inputs = cb_inputs, outputs = cb2_outputs, locktime = 0}
+	block2 := wire.Block{
+		header = wire.Block_Header{version = 1, timestamp = 1001, bits = 0x207fffff, nonce = 2},
+		txs = txs2,
+	}
+	block_hash2 := wire.block_header_hash(&block2.header)
+	filter2, _, n2 := build_basic_filter(&block2, block_hash2, nil, context.temp_allocator)
+	// OP_RETURN excluded, only coinbase P2PKH output
+	testing.expect_value(t, n2, u64(1))
+
+	// OP_RETURN shouldn't match
+	not_matched := crypto.gcs_match_any_n(block_hash2, filter2, n2, [][]byte{op_return_script})
+	testing.expect(t, !not_matched, "OP_RETURN script should not match filter")
+}
+
+@(test)
+test_compute_filter_header_chain :: proc(t: ^testing.T) {
+	// Chain 3 filter headers: genesis → block1 → block2.
+	// Genesis filter header uses zero prev.
+	h0 := crypto.sha256d([]byte{0x01, 0x02}) // fake filter hash for genesis
+	header0 := compute_filter_header(h0, HASH_ZERO)
+	testing.expect(t, header0 != HASH_ZERO, "genesis filter header should not be zero")
+
+	h1 := crypto.sha256d([]byte{0x03, 0x04})
+	header1 := compute_filter_header(h1, header0)
+	testing.expect(t, header1 != HASH_ZERO, "block1 filter header should not be zero")
+	testing.expect(t, header1 != header0, "different blocks should have different headers")
+
+	h2 := crypto.sha256d([]byte{0x05, 0x06})
+	header2 := compute_filter_header(h2, header1)
+	testing.expect(t, header2 != header1, "block2 filter header should differ from block1")
+
+	// Same filter hash but different prev should give different header.
+	header1_alt := compute_filter_header(h1, HASH_ZERO)
+	testing.expect(t, header1_alt != header1, "same filter hash with different prev should differ")
+}

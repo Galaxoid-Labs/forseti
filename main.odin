@@ -15,6 +15,7 @@ import "crypto"
 import "mempool"
 import "p2p"
 import "rpc"
+import "storage"
 import "wire"
 
 DEFAULT_DATA_DIR :: "/tmp/btcnode-data"
@@ -63,6 +64,7 @@ CLI_Flag :: enum {
 	Server,
 	Max_Connections,
 	V2_Transport,
+	Block_Filter_Index,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
 
@@ -96,6 +98,7 @@ CLI_Config :: struct {
 	server:                 bool,   // default true
 	max_connections:        int,    // max outbound peers (default: 8)
 	v2_transport:           bool,   // BIP324 v2 encrypted transport
+	block_filter_index:     bool,   // BIP158 compact block filter index
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -125,6 +128,7 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 	cfg.server = true
 	cfg.max_connections = 8
 	cfg.v2_transport = true
+	cfg.block_filter_index = false
 
 	for arg in os.args[1:] {
 		if arg == "--help" || arg == "-h" {
@@ -310,6 +314,12 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 		} else if arg == "--v2transport=0" {
 			cfg.v2_transport = false
 			flags_set += {.V2_Transport}
+		} else if arg == "--blockfilterindex" || arg == "--blockfilterindex=1" || arg == "--blockfilterindex=basic" {
+			cfg.block_filter_index = true
+			flags_set += {.Block_Filter_Index}
+		} else if arg == "--blockfilterindex=0" {
+			cfg.block_filter_index = false
+			flags_set += {.Block_Filter_Index}
 		} else {
 			fmt.eprintln("Error: unknown flag:", arg)
 			_print_usage()
@@ -335,6 +345,7 @@ _print_usage :: proc() {
 	fmt.println("  --no-p2p              Disable P2P networking (RPC-only mode)")
 	fmt.println("  --maxconnections=<N>  Maximum outbound peer connections (default: 8)")
 	fmt.println("  --v2transport=<0|1>   Enable BIP 324 v2 encrypted P2P transport (default: 1)")
+	fmt.println("  --blockfilterindex=<0|1|basic> Enable BIP 158 compact block filter index (default: 0)")
 	fmt.println("  --dbcache=<MB>        Database cache size in MiB (default: 450, min: 4)")
 	fmt.println("  --par=<N>             Script verification threads (0=auto, 1=serial, 2+=parallel; default: 0)")
 	fmt.println("  --assumevalid=<height> Skip script verification below height (0=disable; default: network-specific)")
@@ -597,6 +608,12 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 			cfg.v2_transport = val == "1" || val == "true" || val == "yes"
 		}
 	}
+
+	if .Block_Filter_Index not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "blockfilterindex"); found {
+			cfg.block_filter_index = val == "1" || val == "basic" || val == "true"
+		}
+	}
 }
 
 // Resolve par_threads: 0 = auto-detect, 1 = serial, >= 2 = parallel.
@@ -783,6 +800,20 @@ main :: proc() {
 	}
 	defer chain.chain_state_destroy(cs)
 
+	// Open BIP 158 filter index if enabled.
+	if cfg.block_filter_index {
+		fdb := new(storage.Filter_DB)
+		fdb_result, fdb_err := storage.filter_db_open(cfg.data_dir)
+		if fdb_err != .None {
+			log.errorf("Failed to open filter index: %v", fdb_err)
+			free(fdb)
+		} else {
+			fdb^ = fdb_result
+			cs.filter_db = fdb
+			log.infof("BIP 158 compact block filter index enabled")
+		}
+	}
+
 	tip_hash, tip_height := chain.chain_tip(cs)
 	log.infof("Chain loaded: height=%d tip=%s", tip_height, rpc._hash_to_hex(tip_hash))
 
@@ -868,6 +899,10 @@ main :: proc() {
 			cm.blocks_only = cfg.blocks_only
 			cm.max_outbound = cfg.max_connections
 			cm.v2_transport_enabled = cfg.v2_transport
+			cm.local_services = p2p.LOCAL_SERVICES
+			if cfg.block_filter_index {
+				cm.local_services |= p2p.NODE_COMPACT_FILTERS
+			}
 
 			// If --connect was specified, store address for event loop to connect.
 			if len(cfg.connect) > 0 {
