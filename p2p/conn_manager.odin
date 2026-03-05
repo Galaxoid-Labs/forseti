@@ -321,6 +321,14 @@ _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 		}
 	}
 
+	// Periodic outbound peer replacement — fill empty slots.
+	outbound_count := _count_outbound_peers(cm)
+	if outbound_count < cm.max_outbound {
+		for _ in 0 ..< cm.max_outbound - outbound_count {
+			_conn_manager_replace_peer(cm)
+		}
+	}
+
 	// Free temp allocations.
 	free_all(context.temp_allocator)
 

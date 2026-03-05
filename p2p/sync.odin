@@ -1044,6 +1044,18 @@ sync_handle_block_txn :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, msg: ^wire.Bl
 	copy(new_owned, old_owned)
 	owned_cursor := len(old_owned)
 
+	// Fix up prefilled tx pointers: they currently point into old_owned,
+	// which we're about to free. Redirect them to the same index in new_owned.
+	for i in 0 ..< len(old_owned) {
+		old_ptr := &old_owned[i]
+		for j in 0 ..< len(cs.txs) {
+			if cs.txs[j] == old_ptr {
+				cs.txs[j] = &new_owned[i]
+				break
+			}
+		}
+	}
+
 	// Fill missing slots.
 	for i in 0 ..< cs.missing_count {
 		idx := cs.missing_indices[i]
@@ -1052,7 +1064,7 @@ sync_handle_block_txn :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, msg: ^wire.Bl
 		owned_cursor += 1
 	}
 
-	// Free old owned array (new one supersedes it).
+	// Free old owned array (new one supersedes it — all pointers redirected above).
 	delete(old_owned)
 	cs.txs_owned = new_owned
 

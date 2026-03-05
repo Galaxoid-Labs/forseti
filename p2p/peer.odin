@@ -48,6 +48,7 @@ Peer :: struct {
 	v2:             ^V2_Transport,
 	// nbio fields
 	read_buf:       [65536]byte,  // fixed buffer for async recv
+	recv_op:        ^nbio.Operation, // pending recv operation (for cancel on destroy)
 	send_queue:     [dynamic][]byte, // queued outbound messages (owned bytes)
 	sending:        bool,  // whether an async send is in-flight
 	sending_msg:    []byte, // the message currently being sent (for freeing in callback)
@@ -118,11 +119,12 @@ _peer_start_recv :: proc(peer: ^Peer) {
 		return
 	}
 	bufs := [1][]byte{peer.read_buf[:]}
-	nbio.recv_poly(peer.socket, bufs[:], peer, _on_recv, timeout = 120 * time.Second)
+	peer.recv_op = nbio.recv_poly(peer.socket, bufs[:], peer, _on_recv, timeout = 120 * time.Second)
 }
 
 // Callback when async recv completes.
 _on_recv :: proc(op: ^nbio.Operation, peer: ^Peer) {
+	peer.recv_op = nil // Operation is completing, no longer pending.
 	if peer.state == .Disconnected {
 		return
 	}
@@ -434,6 +436,16 @@ peer_destroy :: proc(peer: ^Peer) {
 		return
 	}
 	peer.state = .Disconnected
+
+	// Cancel pending recv operation BEFORE closing socket.
+	// nbio timeouts are separate kqueue Timer events — closing the socket does NOT
+	// cancel them. Without this, the 120s recv timeout would fire after the peer
+	// is freed from the zombie list, causing a use-after-free.
+	if peer.recv_op != nil {
+		nbio.remove(peer.recv_op)
+		peer.recv_op = nil
+	}
+
 	tcp.close(peer.socket)
 
 	// Free any unsent messages in the queue.

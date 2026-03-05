@@ -233,6 +233,7 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 	block_val := block^
 	cerr := consensus.check_block(&block_val, height, cs.params, txids)
 	if cerr != .None {
+		log.errorf("check_block failed at height %d: %v", height, cerr)
 		return .Consensus_Error
 	}
 	t_txid := time.tick_now()
