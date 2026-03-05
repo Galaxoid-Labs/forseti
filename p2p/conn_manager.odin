@@ -1094,7 +1094,7 @@ _conn_manager_replace_peer :: proc(cm: ^Conn_Manager) {
 		}
 		err := conn_manager_add_peer(cm, addr_str, port)
 		if err == .None {
-			log.infof("Replacement peer connecting: %s:%d", addr_str, port)
+			log.debugf("Replacement peer connecting: %s:%d", addr_str, port)
 			delete(addr_str)
 			return
 		}
