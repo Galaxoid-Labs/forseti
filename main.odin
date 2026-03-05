@@ -24,6 +24,11 @@ DEFAULT_DATA_DIR :: "/tmp/btcnode-data"
 _g_rpc_server: ^rpc.RPC_Server
 _g_conn_manager: ^p2p.Conn_Manager
 
+_Rpc_Thread_Data :: struct {
+	srv:       ^rpc.RPC_Server,
+	log_level: log.Level,
+}
+
 _signal_handler :: proc "c" (sig: posix.Signal) {
 	context = runtime.default_context()
 	if _g_rpc_server != nil {
@@ -101,6 +106,7 @@ CLI_Config :: struct {
 	v2_transport:           bool,   // BIP324 v2 encrypted transport
 	block_filter_index:     bool,   // BIP158 compact block filter index
 	listen:                 bool,   // accept inbound connections (default: true)
+	debug:                  bool,   // enable debug logging (default: false)
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -329,6 +335,8 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 		} else if arg == "--listen=0" {
 			cfg.listen = false
 			flags_set += {.Listen}
+		} else if arg == "--debug" {
+			cfg.debug = true
 		} else {
 			fmt.eprintln("Error: unknown flag:", arg)
 			_print_usage()
@@ -377,6 +385,7 @@ _print_usage :: proc() {
 	fmt.println("  --blocksonly          Disable tx relay, only sync blocks (default: off)")
 	fmt.println("  --persistmempool=<0|1> Save/load mempool on shutdown/startup (default: 1)")
 	fmt.println()
+	fmt.println("  --debug               Enable debug logging (default: off)")
 	fmt.println("  --help, -h            Show this help message")
 }
 
@@ -703,13 +712,18 @@ _parse_connect :: proc(connect: string) -> (address: string, port: int, ok: bool
 }
 
 main :: proc() {
-	context.logger = log.create_console_logger(.Debug, {.Level, .Time, .Terminal_Color})
+	// Start with Info level; --debug flag will switch to Debug after parsing.
+	context.logger = log.create_console_logger(.Info, {.Level, .Time, .Terminal_Color})
 
 	// Parse CLI flags.
 	cfg, flags_set, cli_ok := _parse_cli()
 	if !cli_ok {
 		return
 	}
+
+	// Apply debug log level if requested.
+	log_level: log.Level = cfg.debug ? .Debug : .Info
+	context.logger = log.create_console_logger(log_level, {.Level, .Time, .Terminal_Color})
 
 	// Load config file (CLI flags take precedence).
 	_load_config_file(fmt.tprintf("%s/btcnode.conf", cfg.data_dir), &cfg, flags_set)
@@ -884,12 +898,16 @@ main :: proc() {
 		_g_rpc_server = srv
 
 		// Run RPC server on a background thread.
+		rpc_data := new(_Rpc_Thread_Data)
+		rpc_data.srv = srv
+		rpc_data.log_level = log_level
 		rpc_thread = thread.create_and_start_with_data(
-			rawptr(srv),
+			rawptr(rpc_data),
 			proc(data: rawptr) {
-				context.logger = log.create_console_logger(.Debug, {.Level, .Time, .Terminal_Color})
-				s := cast(^rpc.RPC_Server)data
-				rpc.rpc_server_run(s)
+				td := cast(^_Rpc_Thread_Data)data
+				context.logger = log.create_console_logger(td.log_level, {.Level, .Time, .Terminal_Color})
+				rpc.rpc_server_run(td.srv)
+				free(td)
 			},
 		)
 	} else {
@@ -912,6 +930,7 @@ main :: proc() {
 			log.errorf("Failed to initialize connection manager: %v", cm_err)
 			// Continue without P2P — RPC still works.
 		} else {
+			cm.log_level = log_level
 			cm.blocks_only = cfg.blocks_only
 			cm.max_outbound = p2p.MAX_OUTBOUND_FULL_RELAY
 			cm.v2_transport_enabled = cfg.v2_transport

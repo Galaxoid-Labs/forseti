@@ -56,6 +56,8 @@ Conn_Manager :: struct {
 	v2_failed_addrs: map[string]bool,
 	// Advertised services (base + optional compact filters).
 	local_services: u64,
+	// Log level for the P2P thread (inherited from CLI --debug flag).
+	log_level: log.Level,
 }
 
 conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) -> Net_Error {
@@ -91,15 +93,18 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 }
 
 conn_manager_destroy :: proc(cm: ^Conn_Manager) {
-	// Free zombie peers.
+	// Free zombie peers (already destroyed, just need freeing).
 	for peer in cm.zombie_peers {
 		_peer_free(peer)
 	}
 	delete(cm.zombie_peers)
 
-	// Disconnect and free all active peers.
+	// Free all peers. If conn_manager_run was called, peers were already
+	// peer_destroy'd on the P2P thread; otherwise destroy them now.
 	for _, peer in cm.peers {
-		peer_destroy(peer)
+		if peer.state != .Disconnected {
+			peer_destroy(peer)
+		}
 		_peer_free(peer)
 	}
 	delete(cm.peers)
@@ -252,7 +257,7 @@ _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 			if found {
 				if peer.inbound {
 					// Can't reconnect to inbound peers — just disconnect.
-					log.infof("Inbound peer %d: v2 handshake timeout, disconnecting", id)
+					log.debugf("Inbound peer %d: v2 handshake timeout, disconnecting", id)
 					sync_handle_disconnect(&cm.sync_mgr, id, &cm.peers)
 					conn_manager_remove_peer(cm, id)
 				} else {
@@ -271,7 +276,7 @@ _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 			}
 		}
 		for id in timeout_peers {
-			log.infof("Inbound peer %d: handshake timeout, disconnecting", id)
+			log.debugf("Inbound peer %d: handshake timeout, disconnecting", id)
 			conn_manager_remove_peer(cm, id)
 		}
 	}
@@ -321,10 +326,17 @@ _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 		}
 	}
 
+	// Start inbound listener once we're in sync (deferred from startup to avoid IBD overhead).
+	if !cm.listening && cm.sync_mgr.state == .In_Sync {
+		_conn_manager_start_listener(cm)
+	}
+
 	// Periodic outbound peer replacement — fill empty slots.
+	// During IBD, only try one replacement per tick to reduce connection churn.
 	outbound_count := _count_outbound_peers(cm)
 	if outbound_count < cm.max_outbound {
-		for _ in 0 ..< cm.max_outbound - outbound_count {
+		max_attempts := 1 if cm.sync_mgr.state != .In_Sync else cm.max_outbound - outbound_count
+		for _ in 0 ..< max_attempts {
 			_conn_manager_replace_peer(cm)
 		}
 	}
@@ -411,7 +423,7 @@ _on_accept :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 
 	cm.peers[peer.id] = peer
 
-	log.infof("Inbound connection from %s:%d (peer %d)", peer.address, peer.port, peer.id)
+	log.debugf("Inbound connection from %s:%d (peer %d)", peer.address, peer.port, peer.id)
 
 	// V2 responder or V1 — handled in Phase 3; for now, wait for their version message.
 	if cm.v2_transport_enabled {
@@ -437,7 +449,7 @@ _on_accept :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 
 // Main event loop. Discovers peers, connects, processes messages via nbio callbacks.
 conn_manager_run :: proc(cm: ^Conn_Manager) {
-	context.logger = log.create_console_logger(.Debug, {.Level, .Time, .Terminal_Color})
+	context.logger = log.create_console_logger(cm.log_level, {.Level, .Time, .Terminal_Color})
 
 	log.infof("Starting connection manager (network: %s)", cm.params.name)
 
@@ -449,8 +461,8 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 	}
 	cm.event_loop = nbio.current_thread_event_loop()
 
-	// Start TCP listener for inbound connections.
-	_conn_manager_start_listener(cm)
+	// Defer TCP listener until In_Sync — inbound peers during IBD waste event loop cycles.
+	// Listener is started in _on_periodic_timer when sync state transitions to In_Sync.
 
 	// If --connect was specified, add peer now (event loop is ready).
 	if len(cm.connect_address) > 0 {
@@ -475,7 +487,7 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 			err := conn_manager_add_peer(cm, addr_str, port)
 			if err == .None {
 				connected += 1
-				log.infof("Connecting to %s:%d", addr_str, port)
+				log.debugf("Connecting to %s:%d", addr_str, port)
 			}
 			delete(addr_str)
 		}
@@ -492,6 +504,18 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 
 	// Run the event loop until shutdown.
 	nbio.run_until(&cm.shutdown)
+
+	// Destroy all peers while the event loop is still active on this thread.
+	// peer_destroy calls nbio.remove to cancel pending recv timeouts — this must
+	// happen before release_thread_event_loop, otherwise it segfaults.
+	for _, peer in cm.peers {
+		peer_destroy(peer)
+	}
+	// Also free zombies that were waiting for the next tick.
+	for peer in cm.zombie_peers {
+		_peer_free(peer)
+	}
+	clear(&cm.zombie_peers)
 
 	nbio.release_thread_event_loop()
 	log.info("Connection manager shutting down.")
@@ -527,7 +551,7 @@ _conn_manager_peer_connected :: proc(cm: ^Conn_Manager, peer: ^Peer) {
 _conn_manager_dispatch :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, cmd: string, payload: []byte) {
 	// Empty command = disconnect signal.
 	if cmd == "" {
-		log.infof("Peer %d disconnected", peer_id)
+		log.debugf("Peer %d disconnected", peer_id)
 		sync_handle_disconnect(&cm.sync_mgr, peer_id, &cm.peers)
 		conn_manager_remove_peer(cm, peer_id)
 		return
@@ -1066,7 +1090,7 @@ _conn_manager_handle_wtxidrelay :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 _conn_manager_v2_fallback :: proc(cm: ^Conn_Manager, peer: ^Peer) {
 	addr := strings.clone(peer.address)
 	port := peer.port
-	log.infof("V2 handshake failed for peer %d (%s), reconnecting with v1", peer.id, addr)
+	log.debugf("V2 handshake failed for peer %d (%s), reconnecting with v1", peer.id, addr)
 
 	// Mark address as v2-failed so reconnect uses v1.
 	cm.v2_failed_addrs[strings.clone(peer.address)] = true

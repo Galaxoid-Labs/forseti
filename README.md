@@ -199,6 +199,7 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | `--assumevalid=<height>` | Skip script verification below height (0=disable) | Network default |
 | `--v2transport=<0\|1>` | BIP 324 v2 encrypted P2P transport | `1` |
 | `--blockfilterindex=<0\|1>` | Build and serve BIP 157 compact block filters | `0` |
+| `--debug` | Enable debug logging | `false` |
 
 **Mempool (matching Bitcoin Core):**
 
@@ -494,7 +495,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Compact block filters (BIP157/158)**: Optional `--blockfilterindex` builds GCS (Golomb-coded set) basic filters during block connection. Filters are stored in a dedicated LevelDB instance (`<datadir>/filters/`). P2P serves `getcfilters`, `getcfheaders`, and `getcfcheckpt` requests. `getblockfilter` RPC returns the filter for a given block hash. `NODE_COMPACT_FILTERS` service bit advertised when enabled
 - **Steady-state sync**: BIP130 `sendheaders` for header announcements, periodic `getheaders` polling (120s), and `inv`-triggered header requests keep the node up-to-date after IBD
 - **Adaptive stall detection**: Bitcoin Core-style stall handling — default 10s timeout, doubles on disconnect (max 64s), decays by 0.85x on successful block connects. Slow peers (throughput <10% of fastest) are evicted after a trial period. Disconnected peers are replaced via DNS discovery
-- **Inbound connections**: TCP listener accepts inbound P2P connections (Bitcoin Core 28 defaults: 125 total = 8 outbound + 116 inbound + 1 reserved). V2 encrypted transport works in both initiator (outbound) and responder (inbound) modes. Inbound V1 fallback is in-place (feeds buffered bytes back to V1 parser, no reconnect). `--listen=0` disables inbound. `--maxconnections=N` controls total budget. `NODE_P2P_V2` (bit 11) advertised in service flags when v2 transport is enabled
+- **Inbound connections**: TCP listener accepts inbound P2P connections (Bitcoin Core 28 defaults: 125 total = 8 outbound + 116 inbound + 1 reserved). Inbound listener is deferred until sync completes to avoid wasting event loop cycles during IBD. V2 encrypted transport works in both initiator (outbound) and responder (inbound) modes. Inbound V1 fallback is in-place (feeds buffered bytes back to V1 parser, no reconnect). `--listen=0` disables inbound. `--maxconnections=N` controls total budget. `NODE_P2P_V2` (bit 11) advertised in service flags when v2 transport is enabled
 - **Peer discovery + addr relay (BIP155)**: DNS seeds populate an address manager at startup. After handshake, `sendaddrv2` is negotiated and `getaddr` requests peers' address lists. Inbound `addr`/`addrv2` messages add to the address manager (FNV-1a dedup, 5000 entry cap). Small announcements (≤10 entries) are forwarded to 1-2 random peers with automatic v1↔v2 format conversion. Replacement peers are drawn from the address manager
 - **Write-back UTXO cache**: In-memory cache with dirty/fresh flags, flushed atomically to LevelDB when memory usage exceeds the configurable budget (`--dbcache`, default 450 MiB). Rollback support for failed block validation
 - **Block index**: In-memory tree with skip list pointers for O(log n) ancestor lookup, persisted to LevelDB. `by_prev` index provides O(1) next-block lookup for chain traversal

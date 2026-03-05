@@ -558,7 +558,7 @@ sync_handle_disconnect :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, peers: ^map[
 	}
 
 	if len(to_requeue) > 0 {
-		log.infof("Peer %d disconnected, requeued %d blocks to other peers", peer_id, len(to_requeue))
+		log.debugf("Peer %d disconnected, requeued %d blocks to other peers", peer_id, len(to_requeue))
 		sync_request_blocks(sm, peers)
 	}
 

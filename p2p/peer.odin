@@ -107,7 +107,7 @@ _on_connect :: proc(op: ^nbio.Operation, peer: ^Peer) {
 		return
 	}
 
-	log.infof("Connected to %s (peer %d)", peer.address, peer.id)
+	log.debugf("Connected to %s (peer %d)", peer.address, peer.id)
 
 	// Send version message and start recv — delegated to conn_manager.
 	_conn_manager_peer_connected(peer.cm, peer)
@@ -133,7 +133,7 @@ _on_recv :: proc(op: ^nbio.Operation, peer: ^Peer) {
 	if op.recv.err != nil || op.recv.received == 0 {
 		// If in v2 handshake, fall back to v1 instead of just disconnecting (outbound only).
 		if peer.v2 != nil && peer.state == .V2_Handshake && !peer.inbound {
-			log.infof("Peer %d: EOF during v2 handshake, falling back to v1", peer.id)
+			log.debugf("Peer %d: EOF during v2 handshake, falling back to v1", peer.id)
 			_conn_manager_v2_fallback(peer.cm, peer)
 			return
 		}
@@ -249,7 +249,7 @@ _peer_process_messages_v2 :: proc(peer: ^Peer) {
 			if first_byte == byte(peer.network_magic) {
 				if peer.inbound {
 					// Inbound V1 fallback: destroy V2, feed buffered data back, process as V1.
-					log.infof("Inbound peer %d sent v1 magic byte (0x%02x), switching to v1", peer.id, first_byte)
+					log.debugf("Inbound peer %d sent v1 magic byte (0x%02x), switching to v1", peer.id, first_byte)
 					// Collect all buffered data (v2 recv_buf + peer recv_buf).
 					v1_data := make([dynamic]byte, 0, len(t.recv_buf) + len(peer.recv_buf), context.temp_allocator)
 					append(&v1_data, ..t.recv_buf[:])
@@ -265,7 +265,7 @@ _peer_process_messages_v2 :: proc(peer: ^Peer) {
 					_peer_process_messages_v1(peer)
 					return
 				} else {
-					log.infof("Peer %d sent v1 magic byte (0x%02x), not v2 — reconnecting with v1", peer.id, first_byte)
+					log.debugf("Peer %d sent v1 magic byte (0x%02x), not v2 — reconnecting with v1", peer.id, first_byte)
 					_conn_manager_v2_fallback(cm, peer)
 					return
 				}
@@ -290,7 +290,7 @@ _peer_process_messages_v2 :: proc(peer: ^Peer) {
 	switch v2_err {
 	case .None, .Need_More_Data:
 		if t.state == .Active && peer.state == .V2_Handshake {
-			log.infof("V2 handshake complete with peer %d", peer.id)
+			log.debugf("V2 handshake complete with peer %d", peer.id)
 			if peer.inbound {
 				// Inbound: V2 handshake done, wait for their version message.
 				peer.state = .Connecting
@@ -357,7 +357,7 @@ _peer_handle_disconnect :: proc(peer: ^Peer) {
 	if peer.state == .Disconnected {
 		return
 	}
-	log.infof("Peer %d disconnected", peer.id)
+	log.debugf("Peer %d disconnected", peer.id)
 	cm := peer.cm
 	sync_handle_disconnect(&cm.sync_mgr, peer.id, &cm.peers)
 	conn_manager_remove_peer(cm, peer.id)
