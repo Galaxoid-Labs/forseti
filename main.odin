@@ -124,7 +124,7 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 	cfg.persist_mempool = true
 	cfg.server = true
 	cfg.max_connections = 8
-	cfg.v2_transport = false
+	cfg.v2_transport = true
 
 	for arg in os.args[1:] {
 		if arg == "--help" || arg == "-h" {
@@ -334,7 +334,7 @@ _print_usage :: proc() {
 	fmt.println("  --p2p-port=<port>     P2P listen port (default: network-appropriate)")
 	fmt.println("  --no-p2p              Disable P2P networking (RPC-only mode)")
 	fmt.println("  --maxconnections=<N>  Maximum outbound peer connections (default: 8)")
-	fmt.println("  --v2transport         Enable BIP 324 v2 encrypted P2P transport (default: off)")
+	fmt.println("  --v2transport=<0|1>   Enable BIP 324 v2 encrypted P2P transport (default: 1)")
 	fmt.println("  --dbcache=<MB>        Database cache size in MiB (default: 450, min: 4)")
 	fmt.println("  --par=<N>             Script verification threads (0=auto, 1=serial, 2+=parallel; default: 0)")
 	fmt.println("  --assumevalid=<height> Skip script verification below height (0=disable; default: network-specific)")

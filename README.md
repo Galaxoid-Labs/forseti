@@ -194,7 +194,7 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | `--dbcache=<MB>` | Database cache size in MiB | `450` |
 | `--par=<N>` | Script verification threads (0=auto, 1=serial, 2+=parallel) | `0` |
 | `--assumevalid=<height>` | Skip script verification below height (0=disable) | Network default |
-| `--v2transport` | Enable BIP 324 v2 encrypted P2P transport | `false` |
+| `--v2transport=<0\|1>` | BIP 324 v2 encrypted P2P transport | `1` |
 
 **Mempool (matching Bitcoin Core):**
 
