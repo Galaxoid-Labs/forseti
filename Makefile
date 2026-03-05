@@ -23,7 +23,7 @@ test: deps
 	odin test consensus
 	odin test storage -extra-linker-flags:"$(CXX_LINK)"
 	odin test chain -extra-linker-flags:"$(CXX_LINK)"
-	odin test p2p -extra-linker-flags:"$(CXX_LINK)"
+	odin test p2p -extra-linker-flags:"$(CXX_LINK)" -define:ODIN_TEST_THREADS=1
 	odin test mempool -extra-linker-flags:"$(CXX_LINK)"
 	odin test rpc -extra-linker-flags:"$(CXX_LINK)"
 

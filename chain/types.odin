@@ -1,6 +1,6 @@
 package chain
 
-import "../crypto"
+import crypto "../crypto"
 import "../storage"
 import "../wire"
 

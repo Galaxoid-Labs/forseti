@@ -1,4 +1,4 @@
-package crypto
+package btccrypto
 
 // Computes the Merkle root from a list of transaction hashes.
 // Uses Bitcoin's Merkle tree construction: if odd number of leaves,

@@ -1,6 +1,6 @@
 package storage
 
-import "../crypto"
+import crypto "../crypto"
 import "../wire"
 
 Block_Location :: struct {

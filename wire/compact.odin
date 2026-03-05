@@ -1,6 +1,6 @@
 package wire
 
-import "../crypto"
+import crypto "../crypto"
 
 // BIP152 compact block relay message types.
 

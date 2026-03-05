@@ -1,6 +1,6 @@
 package wire
 
-import "../crypto"
+import crypto "../crypto"
 import "core:encoding/hex"
 import "core:testing"
 

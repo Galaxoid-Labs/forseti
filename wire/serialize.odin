@@ -1,6 +1,6 @@
 package wire
 
-import "../crypto"
+import crypto "../crypto"
 
 // --- Wire_Reader: cursor-based reader over a byte slice ---
 

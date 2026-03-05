@@ -1,6 +1,6 @@
 package script
 
-import "../crypto"
+import crypto "../crypto"
 import "../wire"
 import "core:crypto/legacy/sha1"
 

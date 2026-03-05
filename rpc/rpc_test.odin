@@ -8,7 +8,7 @@ import "core:testing"
 
 import "../chain"
 import "../consensus"
-import "../crypto"
+import crypto "../crypto"
 import "../mempool"
 import "../wire"
 

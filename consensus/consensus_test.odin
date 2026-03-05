@@ -1,6 +1,6 @@
 package consensus
 
-import "../crypto"
+import crypto "../crypto"
 import "../wire"
 import "core:encoding/hex"
 import "core:fmt"

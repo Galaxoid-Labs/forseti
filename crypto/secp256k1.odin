@@ -1,8 +1,9 @@
-package crypto
+package btccrypto
 
 import "core:c"
 
 foreign import secp256k1_lib "../deps/lib/libsecp256k1.a"
+foreign import _system_lib "system:System.framework"
 
 // Opaque context type
 Secp256k1_Context :: distinct rawptr
@@ -135,6 +136,44 @@ foreign secp256k1_lib {
 		ctx: Secp256k1_Context,
 		seckey: [^]u8,
 	) -> c.int ---
+
+	secp256k1_context_randomize :: proc(
+		ctx: Secp256k1_Context,
+		seed32: [^]u8,
+	) -> c.int ---
+
+	secp256k1_ellswift_create :: proc(
+		ctx: Secp256k1_Context,
+		ell64: [^]u8,
+		seckey32: [^]u8,
+		auxrnd32: [^]u8,
+	) -> c.int ---
+
+	secp256k1_ellswift_xdh :: proc(
+		ctx: Secp256k1_Context,
+		output: [^]u8,
+		ell_a64: [^]u8,
+		ell_b64: [^]u8,
+		seckey32: [^]u8,
+		party: c.int,
+		hashfp: rawptr,
+		data: rawptr,
+	) -> c.int ---
+
+	// BIP324 hash function for ellswift XDH.
+	secp256k1_ellswift_xdh_hash_function_bip324: rawptr
+}
+
+// System random bytes (macOS arc4random_buf).
+@(default_calling_convention = "c")
+foreign _system_lib {
+	arc4random_buf :: proc(buf: rawptr, nbytes: c.size_t) ---
+}
+
+_rand_bytes :: proc(buf: []u8) {
+	if len(buf) > 0 {
+		arc4random_buf(raw_data(buf), c.size_t(len(buf)))
+	}
 }
 
 // Global secp256k1 context — created once at startup.
@@ -142,6 +181,10 @@ _global_secp256k1_ctx: Secp256k1_Context
 
 init_secp256k1 :: proc() {
 	_global_secp256k1_ctx = secp256k1_context_create(SECP256K1_CONTEXT_NONE)
+	// Randomize context for side-channel protection.
+	seed: [32]u8
+	_rand_bytes(seed[:])
+	secp256k1_context_randomize(_global_secp256k1_ctx, &seed[0])
 }
 
 destroy_secp256k1 :: proc() {
@@ -308,6 +351,45 @@ verify_schnorr :: proc(xonly_pubkey_bytes: []u8, sig64: []u8, msg: []u8) -> bool
 
 	result := secp256k1_schnorrsig_verify(ctx, raw_data(sig64), raw_data(msg), c.size_t(len(msg)), &pubkey)
 	return result == 1
+}
+
+// Generate ElligatorSwift-encoded public key from secret key.
+ellswift_create :: proc(seckey: []u8) -> (ell64: [64]u8, ok: bool) {
+	ctx := _global_secp256k1_ctx
+	if ctx == nil || len(seckey) != 32 { return {}, false }
+
+	auxrnd: [32]u8
+	_rand_bytes(auxrnd[:])
+
+	if secp256k1_ellswift_create(ctx, &ell64[0], raw_data(seckey), &auxrnd[0]) != 1 {
+		return {}, false
+	}
+	return ell64, true
+}
+
+// Compute BIP324 ECDH shared secret from ElligatorSwift pubkeys.
+// initiating: true if we are the connection initiator (party A).
+ellswift_ecdh_bip324 :: proc(our_ell64, their_ell64: [64]u8, our_seckey: []u8, initiating: bool) -> (secret: [32]u8, ok: bool) {
+	ctx := _global_secp256k1_ctx
+	if ctx == nil || len(our_seckey) != 32 { return {}, false }
+
+	ell_a := our_ell64 if initiating else their_ell64
+	ell_b := their_ell64 if initiating else our_ell64
+	party := c.int(0) if initiating else c.int(1)
+
+	hashfp := secp256k1_ellswift_xdh_hash_function_bip324
+	if hashfp == nil {
+		return {}, false
+	}
+
+	if secp256k1_ellswift_xdh(
+		ctx, &secret[0], &ell_a[0], &ell_b[0],
+		raw_data(our_seckey), party,
+		hashfp, nil,
+	) != 1 {
+		return {}, false
+	}
+	return secret, true
 }
 
 // Verify that output_key is the result of tweaking internal_key with tweak.

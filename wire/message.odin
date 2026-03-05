@@ -1,6 +1,6 @@
 package wire
 
-import "../crypto"
+import crypto "../crypto"
 
 // P2P message header: 24 bytes
 // [magic:4][command:12][payload_size:4][checksum:4]

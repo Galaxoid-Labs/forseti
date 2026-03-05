@@ -62,6 +62,7 @@ CLI_Flag :: enum {
 	Rpc_Password,
 	Server,
 	Max_Connections,
+	V2_Transport,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
 
@@ -94,6 +95,7 @@ CLI_Config :: struct {
 	rpc_password:           string,
 	server:                 bool,   // default true
 	max_connections:        int,    // max outbound peers (default: 8)
+	v2_transport:           bool,   // BIP324 v2 encrypted transport
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -122,6 +124,7 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 	cfg.persist_mempool = true
 	cfg.server = true
 	cfg.max_connections = 8
+	cfg.v2_transport = false
 
 	for arg in os.args[1:] {
 		if arg == "--help" || arg == "-h" {
@@ -301,6 +304,12 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 			}
 			cfg.max_connections = max(val, 1)
 			flags_set += {.Max_Connections}
+		} else if arg == "--v2transport" || arg == "--v2transport=1" {
+			cfg.v2_transport = true
+			flags_set += {.V2_Transport}
+		} else if arg == "--v2transport=0" {
+			cfg.v2_transport = false
+			flags_set += {.V2_Transport}
 		} else {
 			fmt.eprintln("Error: unknown flag:", arg)
 			_print_usage()
@@ -325,6 +334,7 @@ _print_usage :: proc() {
 	fmt.println("  --p2p-port=<port>     P2P listen port (default: network-appropriate)")
 	fmt.println("  --no-p2p              Disable P2P networking (RPC-only mode)")
 	fmt.println("  --maxconnections=<N>  Maximum outbound peer connections (default: 8)")
+	fmt.println("  --v2transport         Enable BIP 324 v2 encrypted P2P transport (default: off)")
 	fmt.println("  --dbcache=<MB>        Database cache size in MiB (default: 450, min: 4)")
 	fmt.println("  --par=<N>             Script verification threads (0=auto, 1=serial, 2+=parallel; default: 0)")
 	fmt.println("  --assumevalid=<height> Skip script verification below height (0=disable; default: network-specific)")
@@ -579,6 +589,12 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 			if n, parse_ok := strconv.parse_int(val); parse_ok {
 				cfg.max_connections = max(n, 1)
 			}
+		}
+	}
+
+	if .V2_Transport not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "v2transport"); found {
+			cfg.v2_transport = val == "1" || val == "true" || val == "yes"
 		}
 	}
 }
@@ -851,6 +867,7 @@ main :: proc() {
 		} else {
 			cm.blocks_only = cfg.blocks_only
 			cm.max_outbound = cfg.max_connections
+			cm.v2_transport_enabled = cfg.v2_transport
 
 			// If --connect was specified, store address for event loop to connect.
 			if len(cfg.connect) > 0 {

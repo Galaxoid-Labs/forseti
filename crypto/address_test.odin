@@ -1,4 +1,4 @@
-package crypto
+package btccrypto
 
 import "core:testing"
 import "core:fmt"

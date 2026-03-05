@@ -43,6 +43,10 @@ Conn_Manager :: struct {
 	blocks_only:        bool,
 	// Maximum outbound peer connections (default: MAX_OUTBOUND_PEERS).
 	max_outbound:       int,
+	// BIP324: v2 encrypted transport enabled (--v2transport flag).
+	v2_transport_enabled: bool,
+	// BIP324: addresses where v2 handshake failed (skip v2 on reconnect).
+	v2_failed_addrs: map[string]bool,
 }
 
 conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) -> Net_Error {
@@ -66,6 +70,7 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 
 	cm.peers = make(map[Peer_Id]^Peer, cm.max_outbound * 2)
 	cm.zombie_peers = make([dynamic]^Peer, 0, 8)
+	cm.v2_failed_addrs = make(map[string]bool, 32)
 	cm.relay_queue = make([dynamic]Relay_Item, 0, 16)
 	cm.last_ping_check = time.to_unix_seconds(time.now())
 	cm.last_header_refresh = time.to_unix_seconds(time.now())
@@ -91,6 +96,10 @@ conn_manager_destroy :: proc(cm: ^Conn_Manager) {
 	delete(cm.peers)
 	addr_manager_destroy(&cm.addr_mgr)
 	delete(cm.relay_queue)
+	for addr in cm.v2_failed_addrs {
+		delete(addr)
+	}
+	delete(cm.v2_failed_addrs)
 
 	sync_manager_destroy(&cm.sync_mgr)
 }
@@ -198,6 +207,22 @@ _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 	sync.mutex_unlock(&cm.relay_mutex)
 
 	now := time.to_unix_seconds(time.now())
+
+	// Check for v2 handshake timeouts — fall back to v1 by reconnecting.
+	if cm.v2_transport_enabled {
+		v2_timeout_peers := make([dynamic]Peer_Id, 0, 4, context.temp_allocator)
+		for id, peer in cm.peers {
+			if peer.state == .V2_Handshake && now - peer.connected_at > V2_HANDSHAKE_TIMEOUT_SECS {
+				append(&v2_timeout_peers, id)
+			}
+		}
+		for id in v2_timeout_peers {
+			peer, found := cm.peers[id]
+			if found {
+				_conn_manager_v2_fallback(cm, peer)
+			}
+		}
+	}
 
 	// Force-check header sync completion after every tick.
 	if cm.sync_mgr.state == .Syncing_Headers {
@@ -312,8 +337,26 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 	log.info("Connection manager shutting down.")
 }
 
-// Called from _on_connect when async dial succeeds. Sends version and starts recv.
+// Called from _on_connect when async dial succeeds. Sends version (v1) or ell64 (v2) and starts recv.
 _conn_manager_peer_connected :: proc(cm: ^Conn_Manager, peer: ^Peer) {
+	if cm.v2_transport_enabled && !(peer.address in cm.v2_failed_addrs) {
+		// BIP324: initiate v2 handshake.
+		peer.v2 = new(V2_Transport)
+		if !v2_transport_init(peer.v2, true, cm.network_magic) {
+			log.warnf("V2 transport init failed for peer %d, falling back to v1", peer.id)
+			free(peer.v2)
+			peer.v2 = nil
+			// Fall through to v1.
+		} else {
+			ell := v2_transport_get_ell64(peer.v2)
+			_peer_send_raw(peer, ell[:])
+			peer.state = .V2_Handshake
+			_peer_start_recv(peer)
+			return
+		}
+	}
+
+	// V1 path.
 	_, chain_height := chain.chain_tip(cm.chain)
 	peer_send_version(peer, cm.params, chain_height)
 	peer.state = .Version_Sent
@@ -832,6 +875,24 @@ _conn_manager_handle_wtxidrelay :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 
 	peer.wtxid_relay = true
 	log.debugf("Peer %d supports wtxid relay", peer_id)
+}
+
+// V2 handshake failed — disconnect and reconnect to same address with v1.
+_conn_manager_v2_fallback :: proc(cm: ^Conn_Manager, peer: ^Peer) {
+	addr := strings.clone(peer.address)
+	port := peer.port
+	log.infof("V2 handshake failed for peer %d (%s), reconnecting with v1", peer.id, addr)
+
+	// Mark address as v2-failed so reconnect uses v1.
+	cm.v2_failed_addrs[strings.clone(peer.address)] = true
+
+	// Disconnect this peer.
+	sync_handle_disconnect(&cm.sync_mgr, peer.id, &cm.peers)
+	conn_manager_remove_peer(cm, peer.id)
+
+	// Reconnect to same address with v1.
+	conn_manager_add_peer(cm, addr, port)
+	delete(addr)
 }
 
 // Try to connect a replacement peer when a slot opens.

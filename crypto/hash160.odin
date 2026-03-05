@@ -1,4 +1,4 @@
-package crypto
+package btccrypto
 
 // Computes HASH160 = RIPEMD160(SHA256(data)).
 // This is the standard Bitcoin address hash used in P2PKH and P2SH.

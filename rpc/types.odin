@@ -3,7 +3,7 @@ package rpc
 import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
-import "../crypto"
+import crypto "../crypto"
 import "../wire"
 
 Hash256 :: crypto.Hash256

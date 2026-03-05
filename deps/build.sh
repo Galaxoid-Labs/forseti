@@ -86,6 +86,7 @@ if [ ! -f Makefile ]; then
         --enable-module-recovery \
         --enable-module-schnorrsig \
         --enable-module-extrakeys \
+        --enable-module-ellswift \
         --disable-shared \
         --enable-static \
         --with-pic

@@ -1,6 +1,6 @@
 package p2p
 
-import "../crypto"
+import crypto "../crypto"
 
 Hash256 :: crypto.Hash256
 HASH_ZERO :: crypto.HASH_ZERO
@@ -19,6 +19,7 @@ Net_Error :: enum {
 
 Peer_State :: enum {
 	Connecting,
+	V2_Handshake,     // BIP324: v2 key exchange in progress
 	Version_Sent,
 	Handshake_Complete,
 	Active,
@@ -79,6 +80,7 @@ HEADER_REQUEST_TIMEOUT_SECS :: 60
 HEADER_REFRESH_SECS         :: 120  // Periodic getheaders while In_Sync
 COMPACT_BLOCK_VERSION       :: u64(2) // v2 = wtxid-based short IDs (BIP152)
 COMPACT_BLOCK_TIMEOUT       :: 10     // seconds before fallback to full block
+V2_HANDSHAKE_TIMEOUT_SECS   :: 5      // seconds before v2 → v1 fallback
 
 // Services flags.
 NODE_NETWORK         :: u64(1)

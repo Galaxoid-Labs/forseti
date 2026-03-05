@@ -1,7 +1,7 @@
 package consensus
 
 import "core:math"
-import "../crypto"
+import crypto "../crypto"
 
 Hash256 :: crypto.Hash256
 

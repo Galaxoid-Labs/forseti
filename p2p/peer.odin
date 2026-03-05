@@ -6,6 +6,7 @@ import tcp "core:net"
 import "core:strings"
 import "core:time"
 
+import "../chain"
 import "../consensus"
 import "../wire"
 
@@ -13,6 +14,7 @@ Peer :: struct {
 	id:             Peer_Id,
 	socket:         tcp.TCP_Socket,
 	address:        string,
+	port:           int,
 	state:          Peer_State,
 	version:        i32,
 	services:       u64,
@@ -41,6 +43,8 @@ Peer :: struct {
 	compact_version:  u64,  // 0 = not negotiated, 2 = v2
 	compact_announce: bool, // peer will send us cmpctblock proactively
 	send_compact:     bool, // we've sent sendcmpct to this peer
+	// BIP324 v2 transport (nil = v1)
+	v2:             ^V2_Transport,
 	// nbio fields
 	read_buf:       [65536]byte,  // fixed buffer for async recv
 	send_queue:     [dynamic][]byte, // queued outbound messages (owned bytes)
@@ -62,6 +66,7 @@ peer_start_connect :: proc(cm: ^Conn_Manager, address: string, port: int, peer_i
 	peer := new(Peer)
 	peer.id = peer_id
 	peer.address = strings.clone(address)
+	peer.port = port
 	peer.state = .Connecting
 	peer.network_magic = cm.network_magic
 	peer.cm = cm
@@ -123,6 +128,12 @@ _on_recv :: proc(op: ^nbio.Operation, peer: ^Peer) {
 
 	// Check for error/EOF.
 	if op.recv.err != nil || op.recv.received == 0 {
+		// If in v2 handshake, fall back to v1 instead of just disconnecting.
+		if peer.v2 != nil && peer.state == .V2_Handshake {
+			log.infof("Peer %d: EOF during v2 handshake, falling back to v1", peer.id)
+			_conn_manager_v2_fallback(peer.cm, peer)
+			return
+		}
 		_peer_handle_disconnect(peer)
 		return
 	}
@@ -142,6 +153,15 @@ _on_recv :: proc(op: ^nbio.Operation, peer: ^Peer) {
 
 // Parse complete messages from recv_buf and dispatch inline.
 _peer_process_messages :: proc(peer: ^Peer) {
+	if peer.v2 != nil {
+		_peer_process_messages_v2(peer)
+	} else {
+		_peer_process_messages_v1(peer)
+	}
+}
+
+// V1 message processing (existing logic).
+_peer_process_messages_v1 :: proc(peer: ^Peer) {
 	cm := peer.cm
 
 	for {
@@ -205,6 +225,99 @@ _peer_process_messages :: proc(peer: ^Peer) {
 	}
 }
 
+// V2 encrypted message processing (BIP324).
+_peer_process_messages_v2 :: proc(peer: ^Peer) {
+	cm := peer.cm
+	t := peer.v2
+
+	// Early v1 detection: if awaiting peer's ell64 and the first received byte
+	// matches the v1 network magic, the peer is v1-only — reconnect with v1.
+	if t.state == .Awaiting_EllSwift {
+		first_byte: byte
+		has_first := false
+		if len(t.recv_buf) > 0 {
+			first_byte = t.recv_buf[0]
+			has_first = true
+		} else if len(peer.recv_buf) > 0 {
+			first_byte = peer.recv_buf[0]
+			has_first = true
+		}
+		if has_first {
+			if first_byte == byte(peer.network_magic) {
+				log.infof("Peer %d sent v1 magic byte (0x%02x), not v2 — reconnecting with v1", peer.id, first_byte)
+				_conn_manager_v2_fallback(cm, peer)
+				return
+			}
+		}
+	}
+
+	// Feed all recv_buf data into the v2 transport.
+	data := peer.recv_buf[:]
+	// Clear recv_buf (transport has its own buffer).
+	resize(&peer.recv_buf, 0)
+
+	msgs, v2_err := v2_transport_receive(t, data)
+
+	// Send handshake bytes if ready (after receiving peer's ell64).
+	if t.handshake_to_send != nil {
+		_peer_send_raw(peer, t.handshake_to_send)
+		delete(t.handshake_to_send)
+		t.handshake_to_send = nil
+	}
+
+	switch v2_err {
+	case .None, .Need_More_Data:
+		if t.state == .Active && peer.state == .V2_Handshake {
+			// V2 handshake complete — now send v1 version message (encrypted via v2).
+			log.infof("V2 handshake complete with peer %d", peer.id)
+			_, chain_height := chain.chain_tip(cm.chain)
+			peer_send_version(peer, cm.params, chain_height)
+			peer.state = .Version_Sent
+		}
+	case .Bad_Garbage_Auth, .Decryption_Failed, .Invalid_Message:
+		if peer.state == .V2_Handshake {
+			// V2 handshake failed — reconnect with v1.
+			log.debugf("V2 error for peer %d: %v (transport state: %v, recv_buf: %d bytes)",
+				peer.id, v2_err, t.state, len(t.recv_buf))
+			_conn_manager_v2_fallback(cm, peer)
+			return
+		}
+		// Post-handshake decryption error — genuine connection problem.
+		log.warnf("V2 decryption error for peer %d: %v", peer.id, v2_err)
+		_peer_handle_disconnect(peer)
+		return
+	}
+
+	// Dispatch decoded messages.
+	// NOTE: Unlike v1, we must NOT call free_all(context.temp_allocator) between
+	// dispatches. The msgs array and its entries' command/payload data are all
+	// temp-allocated by v2_transport_receive. Calling free_all after dispatching
+	// the first message would reset the arena cursor, and subsequent temp
+	// allocations (from v2_transport_encrypt inside handlers) would overwrite
+	// later msgs entries — corrupting command strings and causing false disconnects.
+	for &msg in msgs {
+		_conn_manager_dispatch(cm, peer.id, msg.command, msg.payload)
+
+		if peer.state == .Disconnected {
+			return
+		}
+	}
+	free_all(context.temp_allocator)
+}
+
+// Send raw bytes to peer (unframed, for v2 handshake ell64 + handshake data).
+_peer_send_raw :: proc(peer: ^Peer, data: []byte) {
+	if peer.state == .Disconnected || len(data) == 0 {
+		return
+	}
+	msg := make([]byte, len(data))
+	copy(msg, data)
+	append(&peer.send_queue, msg)
+	if !peer.sending {
+		_peer_flush_send_queue(peer)
+	}
+}
+
 // Handle peer disconnect — notify conn_manager inline.
 _peer_handle_disconnect :: proc(peer: ^Peer) {
 	if peer.state == .Disconnected {
@@ -217,12 +330,18 @@ _peer_handle_disconnect :: proc(peer: ^Peer) {
 }
 
 // Send a framed message to the peer. Queues for async send.
+// Uses v2 encryption if v2 transport is active, otherwise v1 wire framing.
 peer_send_message :: proc(peer: ^Peer, command: string, payload: []byte) -> Net_Error {
 	if peer.state == .Disconnected {
 		return .Send_Failed
 	}
 
-	msg := wire.build_message(peer.network_magic, command, payload)
+	msg: []byte
+	if peer.v2 != nil && peer.v2.state == .Active {
+		msg = v2_transport_encrypt(peer.v2, command, payload)
+	} else {
+		msg = wire.build_message(peer.network_magic, command, payload)
+	}
 	// msg is owned []byte — append to send queue.
 	append(&peer.send_queue, msg)
 
@@ -295,6 +414,13 @@ peer_destroy :: proc(peer: ^Peer) {
 	if peer.sending_msg != nil {
 		delete(peer.sending_msg)
 		peer.sending_msg = nil
+	}
+
+	// Clean up v2 transport.
+	if peer.v2 != nil {
+		v2_transport_destroy(peer.v2)
+		free(peer.v2)
+		peer.v2 = nil
 	}
 }
 

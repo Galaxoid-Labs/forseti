@@ -1,4 +1,4 @@
-package crypto
+package btccrypto
 
 import "core:c"
 import "core:encoding/hex"
@@ -418,3 +418,59 @@ test_compact_block_shortid :: proc(t: ^testing.T) {
 	other_shortid := compact_block_shortid(k0, k1, other_wtxid)
 	testing.expect(t, shortid != other_shortid, "different wtxids should produce different shortids")
 }
+
+// --- BIP324 tests ---
+
+@(test)
+test_ellswift_create_roundtrip :: proc(t: ^testing.T) {
+	init_secp256k1()
+	defer destroy_secp256k1()
+
+	// Generate a known seckey and create ElligatorSwift encoding.
+	seckey := hex_decode("0000000000000000000000000000000000000000000000000000000000000001")
+	ell, ok := ellswift_create(seckey)
+	testing.expect(t, ok, "ellswift_create should succeed for valid seckey")
+	testing.expect(t, len(ell) == 64, "ellswift should be 64 bytes")
+
+	// Should be non-zero.
+	all_zero := true
+	for b in ell {
+		if b != 0 {
+			all_zero = false
+			break
+		}
+	}
+	testing.expect(t, !all_zero, "ellswift output should not be all zeros")
+}
+
+@(test)
+test_ellswift_ecdh :: proc(t: ^testing.T) {
+	init_secp256k1()
+	defer destroy_secp256k1()
+
+	// Two parties generate ephemeral keys.
+	seckey_a: [32]byte
+	seckey_b: [32]byte
+	_rand_bytes(seckey_a[:])
+	_rand_bytes(seckey_b[:])
+	// Ensure valid seckeys.
+	seckey_a[0] = 0x01 // avoid zero
+	seckey_b[0] = 0x02
+
+	ell_a, ok_a := ellswift_create(seckey_a[:])
+	testing.expect(t, ok_a, "party A ellswift_create should succeed")
+
+	ell_b, ok_b := ellswift_create(seckey_b[:])
+	testing.expect(t, ok_b, "party B ellswift_create should succeed")
+
+	// Both sides compute ECDH shared secret.
+	secret_a, s_ok_a := ellswift_ecdh_bip324(ell_a, ell_b, seckey_a[:], true)
+	testing.expect(t, s_ok_a, "party A ECDH should succeed")
+
+	secret_b, s_ok_b := ellswift_ecdh_bip324(ell_b, ell_a, seckey_b[:], false)
+	testing.expect(t, s_ok_b, "party B ECDH should succeed")
+
+	// Shared secrets must match.
+	testing.expect_value(t, secret_a, secret_b)
+}
+

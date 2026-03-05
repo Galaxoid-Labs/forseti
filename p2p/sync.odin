@@ -8,7 +8,7 @@ import "core:time"
 
 import "../chain"
 import "../consensus"
-import "../crypto"
+import crypto "../crypto"
 import "../mempool"
 import "../storage"
 import "../wire"

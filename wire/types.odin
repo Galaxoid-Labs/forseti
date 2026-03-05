@@ -1,6 +1,6 @@
 package wire
 
-import "../crypto"
+import crypto "../crypto"
 
 // Hash type alias for convenience within wire package.
 Hash256 :: crypto.Hash256

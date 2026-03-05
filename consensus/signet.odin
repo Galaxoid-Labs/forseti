@@ -1,6 +1,6 @@
 package consensus
 
-import "../crypto"
+import crypto "../crypto"
 import "../script"
 import "../wire"
 

@@ -2,7 +2,7 @@ package mempool
 
 import "../chain"
 import "../consensus"
-import "../crypto"
+import crypto "../crypto"
 import "../wire"
 import "core:fmt"
 import "core:math/rand"

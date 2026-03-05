@@ -1,6 +1,6 @@
 package storage
 
-import "../crypto"
+import crypto "../crypto"
 
 Hash256 :: crypto.Hash256
 HASH_ZERO :: crypto.HASH_ZERO
