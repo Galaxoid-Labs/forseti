@@ -55,7 +55,7 @@ This is an educational/experimental project implementing 33 BIPs. It covers the 
 **Build tools:**
 - [Odin compiler](https://odin-lang.org/) (latest dev build recommended)
 - LLVM 15+ (required by `core:nbio` for atomic pointer operations — Ubuntu 24.04+ or install via [apt.llvm.org](https://apt.llvm.org))
-- C/C++ compiler (`cc` / `clang` / `g++`)
+- C/C++ compiler — Homebrew LLVM recommended on macOS (`brew install llvm`); Apple clang on macOS 26+ forces a deployment target mismatch that causes linker warnings
 - `make`
 - `autoconf`, `automake`, `libtool` (for building libsecp256k1)
 

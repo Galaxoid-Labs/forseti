@@ -52,6 +52,10 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 - **Difficulty validation**: Header nBits verified against `get_next_work_required` (Bitcoin Core's GetNextWorkRequired). Testnet 20-minute minimum difficulty rule (`allow_min_difficulty`). BIP94 testnet4 retarget fix (`enforce_bip94`): uses first block of retarget period's nBits instead of parent's.
 - **RPC**: 45 methods including getpeerinfo (18 fields), getmininginfo, getnetworkhashps, getnettotals, validateaddress, savemempool, ping, help, getmemoryinfo, getrpcinfo, logging, createrawtransaction, combinerawtransaction, signrawtransactionwithkey, getchaintxstats, gettxoutsetinfo, getmempoolancestors, getmempooldescendants, gettxoutproof, verifytxoutproof, signmessagewithprivkey, verifymessage. HTTP Basic Auth via `--rpcuser`/`--rpcpassword` or auto-generated `.cookie` file (Bitcoin Core compatible). `--server=0` disables RPC.
 
+## Build Notes
+
+- **macOS deployment target**: Odin (via Homebrew LLVM) links with `-platform_version macos 16.0`. Apple clang on macOS 26+ forcibly overrides `-mmacosx-version-min` to the SDK version, producing objects with `minos 26.0` and causing linker warnings. The `deps/build.sh` script uses Homebrew LLVM clang instead of Apple clang to compile C/C++ deps with the matching deployment target. If you see `was built for newer 'macOS' version` warnings, rebuild deps: `rm -f deps/lib/*.a && ./deps/build.sh`.
+
 ## Conventions
 
 - Package imports use relative paths: `import "../crypto"`

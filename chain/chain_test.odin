@@ -31,6 +31,12 @@ _remove_dir_contents :: proc(dir: string) {
 	defer os.close(dh)
 
 	entries, _ := os.read_dir(dh, -1)
+	defer {
+		for &entry in entries {
+			delete(entry.fullpath)
+		}
+		delete(entries)
+	}
 	for entry in entries {
 		if entry.is_dir {
 			_remove_dir_contents(entry.fullpath)

@@ -6,16 +6,36 @@ LIB_DIR="$SCRIPT_DIR/lib"
 
 mkdir -p "$LIB_DIR"
 
+# Match Odin's macOS deployment target (16.0) to suppress linker warnings.
+# Apple clang on macOS 26+ forcibly overrides -mmacosx-version-min to the SDK
+# version, so we prefer Homebrew LLVM/clang which respects the flag.
+DEPLOY_FLAGS="-mmacosx-version-min=16.0"
+if [ "$(uname -s)" = "Darwin" ]; then
+    if [ -x /opt/homebrew/opt/llvm@20/bin/clang ]; then
+        CC="${CC:-/opt/homebrew/opt/llvm@20/bin/clang}"
+        CXX="${CXX:-/opt/homebrew/opt/llvm@20/bin/clang++}"
+    elif [ -x /opt/homebrew/opt/llvm/bin/clang ]; then
+        CC="${CC:-/opt/homebrew/opt/llvm/bin/clang}"
+        CXX="${CXX:-/opt/homebrew/opt/llvm/bin/clang++}"
+    else
+        CC="${CC:-cc}"
+        CXX="${CXX:-c++}"
+    fi
+else
+    CC="${CC:-cc}"
+    CXX="${CXX:-c++}"
+    DEPLOY_FLAGS=""
+fi
+
 echo "=== Building RIPEMD-160 ==="
-cc -c -O2 -o "$SCRIPT_DIR/ripemd160/ripemd160.o" "$SCRIPT_DIR/ripemd160/ripemd160.c"
+$CC -c -O2 $DEPLOY_FLAGS -o "$SCRIPT_DIR/ripemd160/ripemd160.o" "$SCRIPT_DIR/ripemd160/ripemd160.c"
 ar rcs "$LIB_DIR/libripemd160.a" "$SCRIPT_DIR/ripemd160/ripemd160.o"
 rm "$SCRIPT_DIR/ripemd160/ripemd160.o"
 echo "Built libripemd160.a"
 
 echo "=== Building LevelDB ==="
 LEVELDB_DIR="$SCRIPT_DIR/leveldb"
-CXX="${CXX:-c++}"
-CXXFLAGS="-O2 -DNDEBUG -DLEVELDB_PLATFORM_POSIX -I$LEVELDB_DIR -I$LEVELDB_DIR/include"
+CXXFLAGS="-O2 -DNDEBUG -DLEVELDB_PLATFORM_POSIX $DEPLOY_FLAGS -I$LEVELDB_DIR -I$LEVELDB_DIR/include"
 
 # Generate port_config.h from template (submodule only ships .h.in).
 if [ ! -f "$LEVELDB_DIR/port/port_config.h" ]; then
@@ -82,7 +102,7 @@ fi
 
 if [ ! -f Makefile ]; then
     echo "Running configure..."
-    ./configure \
+    CC="$CC" CFLAGS="$DEPLOY_FLAGS" ./configure \
         --enable-module-recovery \
         --enable-module-schnorrsig \
         --enable-module-extrakeys \

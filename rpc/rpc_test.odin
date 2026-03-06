@@ -32,6 +32,12 @@ _remove_dir_contents :: proc(dir: string) {
 	defer os.close(dh)
 
 	entries, _ := os.read_dir(dh, -1)
+	defer {
+		for &entry in entries {
+			delete(entry.fullpath)
+		}
+		delete(entries)
+	}
 	for entry in entries {
 		if entry.is_dir {
 			_remove_dir_contents(entry.fullpath)
@@ -1902,7 +1908,9 @@ _inject_mempool_entry :: proc(mp: ^mempool.Mempool, tx: ^wire.Tx, fee: i64) -> H
 	txid := wire.tx_id(tx)
 	vsize := consensus.get_tx_vsize(tx)
 	entry := new(mempool.Mempool_Entry)
-	entry.tx = tx^
+	// Deep-clone the tx so mempool owns all memory (inputs/outputs/scripts).
+	// Without this, _free_tx in mempool_destroy tries to delete temp-allocated slices.
+	entry.tx = _clone_tx_for_mempool(tx)
 	entry.txid = txid
 	entry.fee = fee
 	entry.vsize = vsize
@@ -1913,6 +1921,52 @@ _inject_mempool_entry :: proc(mp: ^mempool.Mempool, tx: ^wire.Tx, fee: i64) -> H
 		mp.spent_outpoints[tx.inputs[in_idx].previous_output] = txid
 	}
 	return txid
+}
+
+_clone_tx_for_mempool :: proc(tx: ^wire.Tx) -> wire.Tx {
+	result: wire.Tx
+	result.version = tx.version
+	result.locktime = tx.locktime
+
+	if len(tx.inputs) > 0 {
+		result.inputs = make([]wire.Tx_In, len(tx.inputs))
+		for i in 0 ..< len(tx.inputs) {
+			result.inputs[i].previous_output = tx.inputs[i].previous_output
+			result.inputs[i].sequence = tx.inputs[i].sequence
+			if len(tx.inputs[i].script_sig) > 0 {
+				result.inputs[i].script_sig = make([]byte, len(tx.inputs[i].script_sig))
+				copy(result.inputs[i].script_sig, tx.inputs[i].script_sig)
+			}
+		}
+	}
+
+	if len(tx.outputs) > 0 {
+		result.outputs = make([]wire.Tx_Out, len(tx.outputs))
+		for i in 0 ..< len(tx.outputs) {
+			result.outputs[i].value = tx.outputs[i].value
+			if len(tx.outputs[i].script_pubkey) > 0 {
+				result.outputs[i].script_pubkey = make([]byte, len(tx.outputs[i].script_pubkey))
+				copy(result.outputs[i].script_pubkey, tx.outputs[i].script_pubkey)
+			}
+		}
+	}
+
+	if len(tx.witness) > 0 {
+		result.witness = make([][][]byte, len(tx.witness))
+		for i in 0 ..< len(tx.witness) {
+			if len(tx.witness[i]) > 0 {
+				result.witness[i] = make([][]byte, len(tx.witness[i]))
+				for j in 0 ..< len(tx.witness[i]) {
+					if len(tx.witness[i][j]) > 0 {
+						result.witness[i][j] = make([]byte, len(tx.witness[i][j]))
+						copy(result.witness[i][j], tx.witness[i][j])
+					}
+				}
+			}
+		}
+	}
+
+	return result
 }
 
 @(test)

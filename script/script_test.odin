@@ -878,15 +878,14 @@ test_signet_250058_tx11_p2wpkh :: proc(t: ^testing.T) {
 
 	// Trim whitespace and decode
 	tx_hex_str := strings.trim_space(string(tx_hex_raw))
-	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str)
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str, context.temp_allocator)
 	if !hex_ok {
 		testing.expect(t, false, "failed to hex-decode tx")
 		return
 	}
-	defer delete(tx_bytes)
 
 	r := wire.reader_init(tx_bytes)
-	tx, tx_err := wire.deserialize_tx(&r)
+	tx, tx_err := wire.deserialize_tx(&r, context.temp_allocator)
 	if tx_err != nil {
 		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
 		return
@@ -905,19 +904,16 @@ test_signet_250058_tx11_p2wpkh :: proc(t: ^testing.T) {
 	defer delete(prevout_raw)
 
 	// Parse prevouts: each line is "value scriptPubKey_hex"
-	spent_outputs := make([]wire.Tx_Out, len(tx.inputs))
-	defer delete(spent_outputs)
+	spent_outputs := make([]wire.Tx_Out, len(tx.inputs), context.temp_allocator)
 
-	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n")
-	defer delete(lines)
+	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n", context.temp_allocator)
 	testing.expect_value(t, len(lines), 996)
 
 	for i in 0 ..< len(lines) {
-		parts := strings.split(lines[i], " ")
-		defer delete(parts)
+		parts := strings.split(lines[i], " ", context.temp_allocator)
 		value, val_ok := strconv.parse_i64(parts[0])
 		if !val_ok { continue }
-		spk, spk_ok := hex.decode(transmute([]u8)parts[1])
+		spk, spk_ok := hex.decode(transmute([]u8)parts[1], context.temp_allocator)
 		if !spk_ok { continue }
 		spent_outputs[i] = wire.Tx_Out{value = value, script_pubkey = spk}
 	}
@@ -994,15 +990,14 @@ test_signet_2148_tx1_two_phase :: proc(t: ^testing.T) {
 	defer delete(tx_hex_raw)
 
 	tx_hex_str := strings.trim_space(string(tx_hex_raw))
-	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str)
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str, context.temp_allocator)
 	if !hex_ok {
 		testing.expect(t, false, "failed to hex-decode tx")
 		return
 	}
-	defer delete(tx_bytes)
 
 	r := wire.reader_init(tx_bytes)
-	tx, tx_err := wire.deserialize_tx(&r)
+	tx, tx_err := wire.deserialize_tx(&r, context.temp_allocator)
 	if tx_err != nil {
 		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
 		return
@@ -1020,19 +1015,16 @@ test_signet_2148_tx1_two_phase :: proc(t: ^testing.T) {
 	}
 	defer delete(prevout_raw)
 
-	spent_outputs := make([]wire.Tx_Out, len(tx.inputs))
-	defer delete(spent_outputs)
+	spent_outputs := make([]wire.Tx_Out, len(tx.inputs), context.temp_allocator)
 
-	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n")
-	defer delete(lines)
+	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n", context.temp_allocator)
 	testing.expect_value(t, len(lines), 400)
 
 	for i in 0 ..< len(lines) {
-		parts := strings.split(lines[i], " ")
-		defer delete(parts)
+		parts := strings.split(lines[i], " ", context.temp_allocator)
 		value, val_ok := strconv.parse_i64(parts[0])
 		if !val_ok { continue }
-		spk, spk_ok := hex.decode(transmute([]u8)parts[1])
+		spk, spk_ok := hex.decode(transmute([]u8)parts[1], context.temp_allocator)
 		if !spk_ok { continue }
 		spent_outputs[i] = wire.Tx_Out{value = value, script_pubkey = spk}
 	}
@@ -1110,15 +1102,14 @@ test_signet_90719_tapscript_codeseparator :: proc(t: ^testing.T) {
 	defer delete(tx_hex_raw)
 
 	tx_hex_str := strings.trim_space(string(tx_hex_raw))
-	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str)
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str, context.temp_allocator)
 	if !hex_ok {
 		testing.expect(t, false, "failed to hex-decode tx")
 		return
 	}
-	defer delete(tx_bytes)
 
 	r := wire.reader_init(tx_bytes)
-	tx, tx_err := wire.deserialize_tx(&r)
+	tx, tx_err := wire.deserialize_tx(&r, context.temp_allocator)
 	if tx_err != nil {
 		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
 		return
@@ -1137,16 +1128,13 @@ test_signet_90719_tapscript_codeseparator :: proc(t: ^testing.T) {
 	}
 	defer delete(prevout_raw)
 
-	spent_outputs := make([]wire.Tx_Out, 1)
-	defer delete(spent_outputs)
+	spent_outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
 
-	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n")
-	defer delete(lines)
+	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n", context.temp_allocator)
 
-	parts := strings.split(lines[0], " ")
-	defer delete(parts)
+	parts := strings.split(lines[0], " ", context.temp_allocator)
 	value, _ := strconv.parse_i64(parts[0])
-	spk, _ := hex.decode(transmute([]u8)parts[1])
+	spk, _ := hex.decode(transmute([]u8)parts[1], context.temp_allocator)
 	spent_outputs[0] = wire.Tx_Out{value = value, script_pubkey = spk}
 
 	arena_buf := make([]byte, 2 * 1024 * 1024)
@@ -1377,15 +1365,14 @@ test_testnet4_100497_p2pkh_large :: proc(t: ^testing.T) {
 	defer delete(tx_hex_raw)
 
 	tx_hex_str := strings.trim_space(string(tx_hex_raw))
-	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str)
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str, context.temp_allocator)
 	if !hex_ok {
 		testing.expect(t, false, "failed to hex-decode tx")
 		return
 	}
-	defer delete(tx_bytes)
 
 	r := wire.reader_init(tx_bytes)
-	tx, tx_err := wire.deserialize_tx(&r)
+	tx, tx_err := wire.deserialize_tx(&r, context.temp_allocator)
 	if tx_err != nil {
 		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
 		return
@@ -1402,15 +1389,12 @@ test_testnet4_100497_p2pkh_large :: proc(t: ^testing.T) {
 	}
 	defer delete(prevout_raw)
 
-	spent_outputs := make([]wire.Tx_Out, 1)
-	defer delete(spent_outputs)
+	spent_outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
 
-	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n")
-	defer delete(lines)
-	parts := strings.split(lines[0], " ")
-	defer delete(parts)
+	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n", context.temp_allocator)
+	parts := strings.split(lines[0], " ", context.temp_allocator)
 	value, _ := strconv.parse_i64(parts[0])
-	spk, _ := hex.decode(transmute([]u8)parts[1])
+	spk, _ := hex.decode(transmute([]u8)parts[1], context.temp_allocator)
 	spent_outputs[0] = wire.Tx_Out{value = value, script_pubkey = spk}
 
 	// Use a 4 MB arena (matching the fix) — 2 MB would cause Sig_Null_Fail.
@@ -1457,15 +1441,14 @@ test_testnet4_118555_bare_script :: proc(t: ^testing.T) {
 	defer delete(tx_hex_raw)
 
 	tx_hex_str := strings.trim_space(string(tx_hex_raw))
-	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str)
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str, context.temp_allocator)
 	if !hex_ok {
 		testing.expect(t, false, "failed to hex-decode tx")
 		return
 	}
-	defer delete(tx_bytes)
 
 	r := wire.reader_init(tx_bytes)
-	tx, tx_err := wire.deserialize_tx(&r)
+	tx, tx_err := wire.deserialize_tx(&r, context.temp_allocator)
 	if tx_err != nil {
 		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
 		return
@@ -1482,18 +1465,15 @@ test_testnet4_118555_bare_script :: proc(t: ^testing.T) {
 	}
 	defer delete(prevout_raw)
 
-	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n")
-	defer delete(lines)
+	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n", context.temp_allocator)
 	testing.expect(t, len(lines) >= 2, "expected at least 2 prevout lines")
 
-	spent_outputs := make([]wire.Tx_Out, 2)
-	defer delete(spent_outputs)
+	spent_outputs := make([]wire.Tx_Out, 2, context.temp_allocator)
 
 	for i in 0 ..< 2 {
-		parts := strings.split(lines[i], " ")
-		defer delete(parts)
+		parts := strings.split(lines[i], " ", context.temp_allocator)
 		value, _ := strconv.parse_i64(parts[0])
-		spk, _ := hex.decode(transmute([]u8)parts[1])
+		spk, _ := hex.decode(transmute([]u8)parts[1], context.temp_allocator)
 		spent_outputs[i] = wire.Tx_Out{value = value, script_pubkey = spk}
 	}
 
@@ -1542,15 +1522,14 @@ test_testnet3_26860_p2pkh :: proc(t: ^testing.T) {
 	defer delete(tx_hex_raw)
 
 	tx_hex_str := strings.trim_space(string(tx_hex_raw))
-	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str)
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str, context.temp_allocator)
 	if !hex_ok {
 		testing.expect(t, false, "failed to hex-decode tx")
 		return
 	}
-	defer delete(tx_bytes)
 
 	r := wire.reader_init(tx_bytes)
-	tx, tx_err := wire.deserialize_tx(&r)
+	tx, tx_err := wire.deserialize_tx(&r, context.temp_allocator)
 	if tx_err != nil {
 		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
 		return
@@ -1567,11 +1546,9 @@ test_testnet3_26860_p2pkh :: proc(t: ^testing.T) {
 	}
 	defer delete(prevout_raw)
 
-	parts := strings.split(strings.trim_space(string(prevout_raw)), " ")
-	defer delete(parts)
+	parts := strings.split(strings.trim_space(string(prevout_raw)), " ", context.temp_allocator)
 	value, _ := strconv.parse_i64(parts[0])
-	spk, _ := hex.decode(transmute([]u8)parts[1])
-	defer delete(spk)
+	spk, _ := hex.decode(transmute([]u8)parts[1], context.temp_allocator)
 
 	spent_outputs := []wire.Tx_Out{{value = value, script_pubkey = spk}}
 
