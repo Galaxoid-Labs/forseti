@@ -18,6 +18,11 @@ Secp256k1_ECDSA_Signature :: struct {
 	data: [64]u8,
 }
 
+// Parsed recoverable ECDSA signature (internal representation, 65 bytes)
+Secp256k1_ECDSA_Recoverable_Signature :: struct {
+	data: [65]u8,
+}
+
 // Parsed x-only public key for Schnorr/Taproot (internal representation, 64 bytes)
 Secp256k1_XOnly_Pubkey :: struct {
 	data: [64]u8,
@@ -162,6 +167,36 @@ foreign secp256k1_lib {
 
 	// BIP324 hash function for ellswift XDH.
 	secp256k1_ellswift_xdh_hash_function_bip324: rawptr
+
+	secp256k1_ecdsa_sign_recoverable :: proc(
+		ctx: Secp256k1_Context,
+		sig: ^Secp256k1_ECDSA_Recoverable_Signature,
+		msghash32: [^]u8,
+		seckey: [^]u8,
+		noncefp: rawptr,
+		ndata: rawptr,
+	) -> c.int ---
+
+	secp256k1_ecdsa_recoverable_signature_serialize_compact :: proc(
+		ctx: Secp256k1_Context,
+		output64: [^]u8,
+		recid: ^c.int,
+		sig: ^Secp256k1_ECDSA_Recoverable_Signature,
+	) -> c.int ---
+
+	secp256k1_ecdsa_recover :: proc(
+		ctx: Secp256k1_Context,
+		pubkey: ^Secp256k1_Pubkey,
+		sig: ^Secp256k1_ECDSA_Recoverable_Signature,
+		msghash32: [^]u8,
+	) -> c.int ---
+
+	secp256k1_ecdsa_recoverable_signature_parse_compact :: proc(
+		ctx: Secp256k1_Context,
+		sig: ^Secp256k1_ECDSA_Recoverable_Signature,
+		input64: [^]u8,
+		recid: c.int,
+	) -> c.int ---
 }
 
 // System random bytes (macOS arc4random_buf).
@@ -390,6 +425,86 @@ ellswift_ecdh_bip324 :: proc(our_ell64, their_ell64: [64]u8, our_seckey: []u8, i
 		return {}, false
 	}
 	return secret, true
+}
+
+// Compute Bitcoin message hash: SHA256d(varint(len(magic)) + magic + varint(len(msg)) + msg)
+// Magic string: "Bitcoin Signed Message:\n"
+message_hash :: proc(message: string) -> Hash256 {
+	MAGIC :: "Bitcoin Signed Message:\n"
+	// Build buffer: varint(24) + magic(24) + varint(msg_len) + msg
+	buf: [512]u8
+	pos := 0
+	// Magic prefix length as varint (24 = 0x18, fits in 1 byte)
+	buf[pos] = 24
+	pos += 1
+	copy(buf[pos:], MAGIC)
+	pos += len(MAGIC)
+	// Message length as varint
+	msg_len := len(message)
+	if msg_len < 253 {
+		buf[pos] = u8(msg_len)
+		pos += 1
+	} else if msg_len <= 0xFFFF {
+		buf[pos] = 0xFD
+		buf[pos + 1] = u8(msg_len & 0xFF)
+		buf[pos + 2] = u8((msg_len >> 8) & 0xFF)
+		pos += 3
+	} else {
+		// Shouldn't happen for reasonable messages
+		return {}
+	}
+	copy(buf[pos:], message)
+	pos += msg_len
+	return sha256d(buf[:pos])
+}
+
+// Sign with recoverable ECDSA. Returns 64-byte compact signature + recovery id.
+sign_recoverable :: proc(seckey: []u8, msg_hash: Hash256) -> (compact: [64]u8, recid: int, ok: bool) {
+	ctx := _global_secp256k1_ctx
+	if ctx == nil || len(seckey) != 32 { return {}, 0, false }
+
+	hash := msg_hash
+	sig: Secp256k1_ECDSA_Recoverable_Signature
+	if secp256k1_ecdsa_sign_recoverable(ctx, &sig, &hash[0], raw_data(seckey), nil, nil) != 1 {
+		return {}, 0, false
+	}
+
+	recid_c: c.int
+	if secp256k1_ecdsa_recoverable_signature_serialize_compact(ctx, &compact[0], &recid_c, &sig) != 1 {
+		return {}, 0, false
+	}
+
+	return compact, int(recid_c), true
+}
+
+// Recover a public key from a recoverable ECDSA signature.
+// Returns both compressed (33-byte) and uncompressed (65-byte) serializations.
+recover_pubkey :: proc(compact: []u8, recid: int, msg_hash: Hash256) -> (compressed: [33]u8, uncompressed: [65]u8, ok: bool) {
+	ctx := _global_secp256k1_ctx
+	if ctx == nil || len(compact) != 64 || recid < 0 || recid > 3 { return {}, {}, false }
+
+	sig: Secp256k1_ECDSA_Recoverable_Signature
+	if secp256k1_ecdsa_recoverable_signature_parse_compact(ctx, &sig, raw_data(compact), c.int(recid)) != 1 {
+		return {}, {}, false
+	}
+
+	hash := msg_hash
+	pubkey: Secp256k1_Pubkey
+	if secp256k1_ecdsa_recover(ctx, &pubkey, &sig, &hash[0]) != 1 {
+		return {}, {}, false
+	}
+
+	comp_len := c.size_t(33)
+	if secp256k1_ec_pubkey_serialize(ctx, &compressed[0], &comp_len, &pubkey, SECP256K1_EC_COMPRESSED) != 1 {
+		return {}, {}, false
+	}
+
+	uncomp_len := c.size_t(65)
+	if secp256k1_ec_pubkey_serialize(ctx, &uncompressed[0], &uncomp_len, &pubkey, SECP256K1_EC_UNCOMPRESSED) != 1 {
+		return {}, {}, false
+	}
+
+	return compressed, uncompressed, true
 }
 
 // Verify that output_key is the result of tweaking internal_key with tweak.

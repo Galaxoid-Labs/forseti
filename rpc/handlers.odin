@@ -1,5 +1,6 @@
 package rpc
 
+import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
 import "core:strings"
@@ -2632,4 +2633,108 @@ _handle_getblockfilter :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Resp
 	obj["header"] = json.Value(json.String(_bytes_to_hex(filter_header[:])))
 
 	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// --- BIP 137: signmessagewithprivkey ---
+
+_handle_signmessagewithprivkey :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	arr, is_arr := params.(json.Array)
+	if !is_arr || len(arr) < 2 {
+		return _make_error(.Invalid_Params, "Expected [privkey, message]", srv._current_id)
+	}
+
+	wif_str, wif_ok := arr[0].(json.String)
+	message, msg_ok := arr[1].(json.String)
+	if !wif_ok || !msg_ok {
+		return _make_error(.Invalid_Params, "Expected string arguments", srv._current_id)
+	}
+
+	seckey, compressed, decode_ok := crypto.wif_decode(wif_str)
+	if !decode_ok {
+		return _make_error(.Invalid_Params, "Invalid private key", srv._current_id)
+	}
+
+	msg_hash := crypto.message_hash(message)
+	compact, recid, sign_ok := crypto.sign_recoverable(seckey[:], msg_hash)
+	if !sign_ok {
+		return _make_error(.Internal_Error, "Signing failed", srv._current_id)
+	}
+
+	// Build 65-byte signature: flag_byte + compact(64)
+	// flag = 27 + recid + (4 if compressed)
+	sig65: [65]u8
+	sig65[0] = u8(27 + recid + (compressed ? 4 : 0))
+	copy(sig65[1:], compact[:])
+
+	sig_b64 := base64.encode(sig65[:], allocator = context.temp_allocator)
+	return _make_result(json.Value(json.String(sig_b64)), srv._current_id)
+}
+
+// --- BIP 137: verifymessage ---
+
+_handle_verifymessage :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	arr, is_arr := params.(json.Array)
+	if !is_arr || len(arr) < 3 {
+		return _make_error(.Invalid_Params, "Expected [address, signature, message]", srv._current_id)
+	}
+
+	address, addr_ok := arr[0].(json.String)
+	sig_b64, sig_ok := arr[1].(json.String)
+	message, msg_ok := arr[2].(json.String)
+	if !addr_ok || !sig_ok || !msg_ok {
+		return _make_error(.Invalid_Params, "Expected string arguments", srv._current_id)
+	}
+
+	// Decode base64 signature → 65 bytes
+	sig_bytes, b64_err := base64.decode(sig_b64, allocator = context.temp_allocator)
+	if b64_err != nil || len(sig_bytes) != 65 {
+		return _make_error(.Invalid_Params, "Invalid signature encoding", srv._current_id)
+	}
+
+	flag := sig_bytes[0]
+	if flag < 27 || flag > 34 {
+		return _make_error(.Invalid_Params, "Invalid signature flag byte", srv._current_id)
+	}
+
+	recid := int((flag - 27) & 3)
+	is_compressed := flag >= 31
+
+	msg_hash := crypto.message_hash(message)
+	compressed_pub, uncompressed_pub, recover_ok := crypto.recover_pubkey(sig_bytes[1:], recid, msg_hash)
+	if !recover_ok {
+		return _make_result(json.Value(json.Boolean(false)), srv._current_id)
+	}
+
+	// Compute address from recovered pubkey and compare
+	p := srv.chain.params
+	pub_bytes := is_compressed ? compressed_pub[:] : uncompressed_pub[:]
+	pub_hash := crypto.hash160(pub_bytes)
+
+	// Try matching as P2PKH (base58)
+	p2pkh_addr := crypto.base58check_encode(p.p2pkh_prefix, pub_hash[:])
+	if p2pkh_addr == address {
+		return _make_result(json.Value(json.Boolean(true)), srv._current_id)
+	}
+
+	// Try matching as P2SH-P2WPKH (base58): only for compressed keys
+	if is_compressed {
+		// P2SH-P2WPKH redeem script: OP_0 <20> <pubkey_hash>
+		redeem: [22]u8
+		redeem[0] = 0x00 // OP_0
+		redeem[1] = 0x14 // push 20
+		copy(redeem[2:], pub_hash[:])
+		script_hash := crypto.hash160(redeem[:])
+		p2sh_addr := crypto.base58check_encode(p.p2sh_prefix, script_hash[:])
+		if p2sh_addr == address {
+			return _make_result(json.Value(json.Boolean(true)), srv._current_id)
+		}
+
+		// Try matching as bech32 P2WPKH
+		bech32_addr := crypto.bech32_encode(p.bech32_hrp, 0, pub_hash[:])
+		if bech32_addr == address {
+			return _make_result(json.Value(json.Boolean(true)), srv._current_id)
+		}
+	}
+
+	return _make_result(json.Value(json.Boolean(false)), srv._current_id)
 }

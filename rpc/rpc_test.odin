@@ -2109,3 +2109,80 @@ test_verifytxoutproof_invalid :: proc(t: ^testing.T) {
 	_, has_err := resp.error.?
 	testing.expect(t, has_err, "should error on invalid proof")
 }
+
+@(test)
+test_signmessagewithprivkey :: proc(t: ^testing.T) {
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "signmsg", 1)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	// WIF for private key 1, mainnet compressed
+	wif := "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn"
+	message := "Hello World"
+
+	p := _make_params(json.Value(json.String(wif)), json.Value(json.String(message)))
+	resp := _handle_signmessagewithprivkey(srv, p)
+
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "signmessagewithprivkey should not error")
+
+	sig_b64, sig_ok := resp.result.(json.String)
+	testing.expect(t, sig_ok, "result should be a base64 string")
+	testing.expect(t, len(sig_b64) > 0, "signature should not be empty")
+}
+
+@(test)
+test_verifymessage :: proc(t: ^testing.T) {
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "verifymsg", 1)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv._current_id = json.Value(json.Integer(1))
+
+	// First sign a message
+	wif := "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn"
+	message := "Hello World"
+
+	sign_p := _make_params(json.Value(json.String(wif)), json.Value(json.String(message)))
+	sign_resp := _handle_signmessagewithprivkey(srv, sign_p)
+	sig_b64, _ := sign_resp.result.(json.String)
+
+	// The P2PKH address for privkey 1 compressed on mainnet is 1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH
+	// But our test server uses regtest params. Compute the address for regtest.
+	seckey: [32]u8
+	seckey[31] = 1
+	pubkey_bytes, _ := crypto.pubkey_from_seckey(seckey[:])
+	pub_hash := crypto.hash160(pubkey_bytes[:])
+	// regtest p2pkh prefix = mainnet (0x00) for most tests
+	address := crypto.base58check_encode(srv.chain.params.p2pkh_prefix, pub_hash[:])
+
+	// Verify with correct address
+	verify_p := _make_params(
+		json.Value(json.String(address)),
+		json.Value(json.String(sig_b64)),
+		json.Value(json.String(message)),
+	)
+	resp := _handle_verifymessage(srv, verify_p)
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "verifymessage should not error")
+
+	result, r_ok := resp.result.(json.Boolean)
+	testing.expect(t, r_ok, "result should be boolean")
+	testing.expect(t, bool(result), "signature should verify")
+
+	// Wrong message should fail
+	wrong_p := _make_params(
+		json.Value(json.String(address)),
+		json.Value(json.String(sig_b64)),
+		json.Value(json.String("Wrong message")),
+	)
+	wrong_resp := _handle_verifymessage(srv, wrong_p)
+	wrong_result, _ := wrong_resp.result.(json.Boolean)
+	testing.expect(t, !bool(wrong_result), "wrong message should not verify")
+}

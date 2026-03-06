@@ -2,15 +2,15 @@
 
 A Bitcoin full node implementation written in [Odin](https://odin-lang.org/). Built from scratch with no Bitcoin library dependencies — only libsecp256k1 for elliptic curve cryptography, vendored RIPEMD-160, and LevelDB for storage.
 
-This is an educational/experimental project implementing 32 BIPs. It covers the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, inbound + outbound connections (Bitcoin Core 28 defaults), v2 encrypted transport (BIP324), compact block relay (BIP152), compact block filters (BIP157/158), feefilter (BIP133), wtxid relay (BIP339), addr relay with addrv2 (BIP155), mempool with RBF, and a JSON-RPC interface with 43 methods.
+This is an educational/experimental project implementing 33 BIPs. It covers the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, inbound + outbound connections (Bitcoin Core 28 defaults), v2 encrypted transport (BIP324), compact block relay (BIP152), compact block filters (BIP157/158), feefilter (BIP133), wtxid relay (BIP339), addr relay with addrv2 (BIP155), mempool with RBF, and a JSON-RPC interface with 45 methods.
 
 ## Status
 
-**310 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Accepts both inbound and outbound P2P connections with v2 encrypted transport enabled by default. Builds on macOS and Linux.
+**314 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Accepts both inbound and outbound P2P connections with v2 encrypted transport enabled by default. Builds on macOS and Linux.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
-| 0 | Crypto + C Bindings | Complete (37 tests) |
+| 0 | Crypto + C Bindings | Complete (39 tests) |
 | 1 | Wire Protocol + Serialization | Complete (44 tests) |
 | 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH, Taproot) | Complete (50 tests) |
 | 3 | Consensus Rules + Block Validation | Complete (22 tests) |
@@ -18,7 +18,7 @@ This is an educational/experimental project implementing 32 BIPs. It covers the 
 | 5 | Persistent Storage (LevelDB) | Complete (18 tests) |
 | 6 | P2P Networking | Complete (33 tests) |
 | 7 | Mempool + Persistence + RBF + Config | Complete (32 tests) |
-| 8 | RPC Interface (43 methods) | Complete (52 tests) |
+| 8 | RPC Interface (45 methods) | Complete (54 tests) |
 | 9 | P2P Integration + CLI + Shutdown | Complete |
 | 10 | Signet Sync (BIP325) | Complete |
 | 11 | LevelDB Storage Migration | Complete |
@@ -417,11 +417,11 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 ## Testing
 
 ```bash
-# Run all 310 tests
+# Run all 314 tests
 make test
 
 # Test individual packages
-odin test crypto          # 37 tests
+odin test crypto          # 39 tests
 odin test wire            # 44 tests
 odin test script          # 50 tests (use -define:ODIN_TEST_THREADS=1 if flaky)
 odin test consensus       # 22 tests
@@ -429,7 +429,7 @@ odin test storage         # 18 tests
 odin test chain           # 22 tests
 odin test p2p             # 33 tests
 odin test mempool         # 32 tests
-odin test rpc             # 52 tests
+odin test rpc             # 54 tests
 ```
 
 ## Project Structure
@@ -446,7 +446,7 @@ bitcoin-node-odin/
 ├── chain/                 # UTXO cache, block index (skip list), undo data, chain state, block filter building
 ├── p2p/                   # Peer connections, sync manager, connection manager, address manager, BIP324 v2 transport, inbound listener
 ├── mempool/               # Fee rates, relay policy, validation pipeline, RBF, persistence, configurable limits
-├── rpc/                   # JSON-RPC server (43 methods), handlers, types
+├── rpc/                   # JSON-RPC server (45 methods), handlers, types
 └── deps/                  # C/C++ dependencies
     ├── libsecp256k1/      # Git submodule (bitcoin-core/secp256k1 v0.7.1)
     ├── leveldb/           # Git submodule (google/leveldb 1.23)
@@ -538,6 +538,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 | 125 | Replace-by-Fee | Mempool (opt-in + fullrbf, fee checks, eviction limits) |
 | 130 | sendheaders | P2P (header-based block announcements) |
 | 133 | feefilter | P2P (per-peer minimum fee rate for tx relay) |
+| 137 | Signatures of Messages | RPC (signmessagewithprivkey, verifymessage) |
 | 141 | Segregated Witness (Consensus) | Script interpreter, consensus validation |
 | 143 | Segwit Sighash (v0) | Sighash computation + caching |
 | 144 | Segregated Witness (Peer Services) | P2P (NODE_WITNESS service bit) |

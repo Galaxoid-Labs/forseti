@@ -600,3 +600,50 @@ test_gcs_match_any :: proc(t: ^testing.T) {
 	testing.expect(t, !gcs_match_any_n(block_hash, filter, 3, fake_q[:]), "non-member should not match")
 }
 
+@(test)
+test_message_hash :: proc(t: ^testing.T) {
+	// Known test vector: message "Hello World"
+	// Bitcoin Core's signmessage uses SHA256d(varint(24) + "Bitcoin Signed Message:\n" + varint(len) + msg)
+	h := message_hash("Hello World")
+	// Just verify it's deterministic and non-zero
+	all_zero := true
+	for b in h {
+		if b != 0 { all_zero = false; break }
+	}
+	testing.expect(t, !all_zero, "message hash should not be all zeros")
+
+	// Same input → same output
+	h2 := message_hash("Hello World")
+	testing.expect(t, h == h2, "message hash should be deterministic")
+
+	// Different input → different output
+	h3 := message_hash("Hello World!")
+	testing.expect(t, h != h3, "different messages should produce different hashes")
+}
+
+@(test)
+test_sign_recover_roundtrip :: proc(t: ^testing.T) {
+	init_secp256k1()
+	defer destroy_secp256k1()
+
+	// Use well-known private key 1 (compressed)
+	seckey: [32]u8
+	seckey[31] = 1
+
+	msg_hash := message_hash("test message")
+
+	compact, recid, sign_ok := sign_recoverable(seckey[:], msg_hash)
+	testing.expect(t, sign_ok, "sign_recoverable should succeed")
+	testing.expect(t, recid >= 0 && recid <= 3, "recid should be 0-3")
+
+	// Recover pubkey
+	compressed_pub, _, recover_ok := recover_pubkey(compact[:], recid, msg_hash)
+	testing.expect(t, recover_ok, "recover_pubkey should succeed")
+
+	// Derive expected pubkey from seckey
+	expected_pub, pk_ok := pubkey_from_seckey(seckey[:])
+	testing.expect(t, pk_ok, "pubkey_from_seckey should succeed")
+
+	testing.expect(t, compressed_pub == expected_pub, "recovered pubkey should match derived pubkey")
+}
+
