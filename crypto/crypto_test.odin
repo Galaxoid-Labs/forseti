@@ -319,6 +319,48 @@ test_verify_schnorr :: proc(t: ^testing.T) {
 	testing.expect(t, !verify_schnorr(pubkey, sig[:32], msg), "short sig should fail")
 }
 
+@(test)
+test_schnorr_bip340_vectors :: proc(t: ^testing.T) {
+	// Additional BIP 340 test vectors (verification-only, from bip-0340/test-vectors.csv)
+	init_secp256k1()
+	defer destroy_secp256k1()
+
+	Test_Case :: struct {
+		pubkey: string,
+		msg:    string,
+		sig:    string,
+		valid:  bool,
+		label:  string,
+	}
+
+	cases := [?]Test_Case{
+		// Vector 4: public key not on curve (should fail verification)
+		{
+			pubkey = "EEFDEA4CDB677750A420FEE807EACF21EB9898AE79B9768766E4FAA04A2D4A34",
+			msg    = "4DF3C3F68FCC83B27E9D42C90431A72499F17875C81A599B566C9889B9696703",
+			sig    = "00000000000000000000003B78CE563F89A0ED9414F5AA28AD0D96D6795F9C6376AFB1548AF603B3EB45C9F8207DEE1060CB71C04E80F593060B07D28308D7F4",
+			valid  = false,
+			label  = "vector 4: public key not on curve",
+		},
+		// Vector 6: R.y is not a quadratic residue (sig is invalid despite valid sig format)
+		{
+			pubkey = "DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659",
+			msg    = "243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89",
+			sig    = "FFF97BD5755EEA420453A14355235D382F6472F8568A18B2F057A14602975563CC18884970D52D1F09A8FACE633D42C14BB2B85D3A5FEBED64340F6E8EFBB5540",
+			valid  = false,
+			label  = "vector 6: R.y not quadratic residue",
+		},
+	}
+
+	for tc in cases {
+		pubkey := hex_decode(tc.pubkey)
+		msg := hex_decode(tc.msg)
+		sig := hex_decode(tc.sig)
+		result := verify_schnorr(pubkey, sig, msg)
+		testing.expectf(t, result == tc.valid, "BIP340 %s: expected %v, got %v", tc.label, tc.valid, result)
+	}
+}
+
 // --- WIF decode ---
 
 @(test)
@@ -334,6 +376,16 @@ test_wif_decode :: proc(t: ^testing.T) {
 		testing.expectf(t, seckey[i] == 0, "seckey byte %d should be 0", i)
 	}
 	testing.expect_value(t, seckey[31], u8(1))
+
+	// Mainnet uncompressed WIF for private key = 1
+	wif_unc := "5HpHagT65TZzG1PH3CSu63k8DbpvD8s5ip4nEB3kEsreAnchuDf"
+	seckey2, compressed2, ok2 := wif_decode(wif_unc)
+	testing.expect(t, ok2, "uncompressed WIF should decode")
+	testing.expect(t, !compressed2, "should be uncompressed")
+	for i in 0 ..< 31 {
+		testing.expectf(t, seckey2[i] == 0, "seckey2 byte %d should be 0", i)
+	}
+	testing.expect_value(t, seckey2[31], u8(1))
 
 	// Invalid WIF should fail
 	_, _, bad_ok := wif_decode("1InvalidWIFString1234567890123456789012345678901")
@@ -602,23 +654,17 @@ test_gcs_match_any :: proc(t: ^testing.T) {
 
 @(test)
 test_message_hash :: proc(t: ^testing.T) {
-	// Known test vector: message "Hello World"
-	// Bitcoin Core's signmessage uses SHA256d(varint(24) + "Bitcoin Signed Message:\n" + varint(len) + msg)
+	// Bitcoin message hash: SHA256d(varint(24) + "Bitcoin Signed Message:\n" + varint(len) + msg)
+	// Precomputed: message_hash("Hello World") = a7af0baad5ae99b97fc69b3a0d1abcf3ef17f131cc4776e1bc11933ec8550f49
 	h := message_hash("Hello World")
-	// Just verify it's deterministic and non-zero
-	all_zero := true
-	for b in h {
-		if b != 0 { all_zero = false; break }
+	expected := hex_decode("a7af0baad5ae99b97fc69b3a0d1abcf3ef17f131cc4776e1bc11933ec8550f49")
+	for i in 0 ..< 32 {
+		testing.expect_value(t, h[i], expected[i])
 	}
-	testing.expect(t, !all_zero, "message hash should not be all zeros")
-
-	// Same input → same output
-	h2 := message_hash("Hello World")
-	testing.expect(t, h == h2, "message hash should be deterministic")
 
 	// Different input → different output
-	h3 := message_hash("Hello World!")
-	testing.expect(t, h != h3, "different messages should produce different hashes")
+	h2 := message_hash("Hello World!")
+	testing.expect(t, h != h2, "different messages should produce different hashes")
 }
 
 @(test)

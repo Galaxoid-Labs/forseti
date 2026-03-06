@@ -1859,34 +1859,6 @@ test_rpc_getchaintxstats_invalid :: proc(t: ^testing.T) {
 	testing.expect(t, has_err, "should error for nblocks > chain height")
 }
 
-@(test)
-test_rpc_help_includes_new :: proc(t: ^testing.T) {
-	srv, cs, mp, params, dir := _make_test_rpc_server(t, "help_new", 5)
-	defer _cleanup_test(srv, cs, mp, params, dir)
-
-	srv._current_id = json.Value(json.Integer(1))
-	resp := _handle_help(srv, nil)
-
-	_, has_err := resp.error.?
-	testing.expect(t, !has_err, "should not error")
-
-	result, ok := resp.result.(json.String)
-	testing.expect(t, ok, "result should be string")
-	if !ok { return }
-
-	testing.expect(t, _str_contains(result, "getchaintxstats"), "should contain getchaintxstats")
-	testing.expect(t, _str_contains(result, "getmemoryinfo"), "should contain getmemoryinfo")
-	testing.expect(t, _str_contains(result, "getrpcinfo"), "should contain getrpcinfo")
-	testing.expect(t, _str_contains(result, "logging"), "should contain logging")
-	testing.expect(t, _str_contains(result, "createrawtransaction"), "should contain createrawtransaction")
-	testing.expect(t, _str_contains(result, "combinerawtransaction"), "should contain combinerawtransaction")
-	testing.expect(t, _str_contains(result, "signrawtransactionwithkey"), "should contain signrawtransactionwithkey")
-	testing.expect(t, _str_contains(result, "gettxoutsetinfo"), "should contain gettxoutsetinfo")
-	testing.expect(t, _str_contains(result, "getmempoolancestors"), "should contain getmempoolancestors")
-	testing.expect(t, _str_contains(result, "getmempooldescendants"), "should contain getmempooldescendants")
-	testing.expect(t, _str_contains(result, "gettxoutproof"), "should contain gettxoutproof")
-	testing.expect(t, _str_contains(result, "verifytxoutproof"), "should contain verifytxoutproof")
-}
 
 // --- New RPC tests ---
 

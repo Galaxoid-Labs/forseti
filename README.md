@@ -6,19 +6,19 @@ This is an educational/experimental project implementing 33 BIPs. It covers the 
 
 ## Status
 
-**314 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Accepts both inbound and outbound P2P connections with v2 encrypted transport enabled by default. Builds on macOS and Linux.
+**315 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Accepts both inbound and outbound P2P connections with v2 encrypted transport enabled by default. Builds on macOS and Linux.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
-| 0 | Crypto + C Bindings | Complete (39 tests) |
+| 0 | Crypto + C Bindings | Complete (40 tests) |
 | 1 | Wire Protocol + Serialization | Complete (44 tests) |
-| 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH, Taproot) | Complete (50 tests) |
+| 2 | Script Interpreter (P2PKH, P2SH, P2WPKH, P2WSH, Taproot) | Complete (51 tests) |
 | 3 | Consensus Rules + Block Validation | Complete (22 tests) |
 | 4 | UTXO Set + Chain State | Complete (22 tests) |
 | 5 | Persistent Storage (LevelDB) | Complete (18 tests) |
 | 6 | P2P Networking | Complete (33 tests) |
 | 7 | Mempool + Persistence + RBF + Config | Complete (32 tests) |
-| 8 | RPC Interface (45 methods) | Complete (54 tests) |
+| 8 | RPC Interface (45 methods) | Complete (53 tests) |
 | 9 | P2P Integration + CLI + Shutdown | Complete |
 | 10 | Signet Sync (BIP325) | Complete |
 | 11 | LevelDB Storage Migration | Complete |
@@ -417,19 +417,19 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 ## Testing
 
 ```bash
-# Run all 314 tests
+# Run all 315 tests
 make test
 
 # Test individual packages
-odin test crypto          # 39 tests
+odin test crypto          # 40 tests
 odin test wire            # 44 tests
-odin test script          # 50 tests (use -define:ODIN_TEST_THREADS=1 if flaky)
+odin test script          # 51 tests (use -define:ODIN_TEST_THREADS=1 if flaky)
 odin test consensus       # 22 tests
 odin test storage         # 18 tests
 odin test chain           # 22 tests
 odin test p2p             # 33 tests
 odin test mempool         # 32 tests
-odin test rpc             # 54 tests
+odin test rpc             # 53 tests
 ```
 
 ## Project Structure

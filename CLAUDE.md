@@ -4,7 +4,7 @@
 
 ```bash
 make              # Build deps + binary
-make test         # Run all 314 tests (9 packages)
+make test         # Run all 315 tests (9 packages)
 make debug        # Build with debug symbols
 odin build . -out:btcnode   # Build binary only
 odin test <pkg>   # Test single package (crypto, wire, script, consensus, storage, chain, p2p, mempool, rpc)

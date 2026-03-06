@@ -439,6 +439,36 @@ test_sighash_bip143_p2wpkh :: proc(t: ^testing.T) {
 	testing.expect_value(t, got, "c37af31116d1b27caf68aae9e3ac82f1477929014d5b917657d0eb49478cb670")
 }
 
+@(test)
+test_sighash_bip143_p2sh_p2wpkh :: proc(t: ^testing.T) {
+	// BIP143 Example 2: P2SH-P2WPKH
+	// From https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki#p2sh-p2wpkh
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	tx_hex := "0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a54770100000000feffffff" +
+	          "02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac" +
+	          "0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac" +
+	          "92040000"
+	tx_bytes := hex_decode(tx_hex)
+	r := wire.reader_init(tx_bytes)
+	tx, tx_err := wire.deserialize_tx(&r, context.temp_allocator)
+	testing.expect(t, tx_err == nil, "tx deserialization should succeed")
+
+	// Script code for P2SH-P2WPKH: OP_DUP OP_HASH160 <20-byte-pubkey-hash> OP_EQUALVERIFY OP_CHECKSIG
+	script_code := hex_decode("76a91479091972186c449eb1ded22b78e40d009bdf008988ac")
+
+	// Input index 0, amount = 10 BTC (1000000000 satoshis)
+	amount: i64 = 1000000000
+	hash_type := SIGHASH_ALL
+
+	hash := compute_sighash_witness_v0(&tx, 0, script_code, amount, hash_type)
+	got := hex_encode(hash[:])
+
+	// Expected sighash from BIP143 Example 2
+	testing.expect_value(t, got, "64f3b0f4dd2bb3aa1ce8566d220cc74dda9df97d8490cc81d89d735c92e59fb6")
+}
+
 // --- DER signature encoding test ---
 
 @(test)
@@ -558,23 +588,19 @@ test_script_cltv :: proc(t: ^testing.T) {
 
 @(test)
 test_tagged_hash :: proc(t: ^testing.T) {
-	// BIP340 tagged hash test: tagged_hash("BIP0340/challenge", data)
-	// We'll verify the structure: SHA256(SHA256(tag) || SHA256(tag) || msg)
+	// BIP 340 tagged hash: SHA256(SHA256(tag) || SHA256(tag) || msg)
+	// Test vector: tagged_hash("BIP0340/challenge", 0x bytes) from BIP 340 reference
+	// Verify against a known precomputed value.
+	// tagged_hash("TapLeaf", [0xc0, 0x01, 0x51]) for OP_TRUE tapscript
 	result := crypto.tagged_hash("TapLeaf", []byte{0xc0, 0x01, 0x51})
-	// Just verify it produces a 32-byte result that's not all zeros
-	non_zero := false
-	for b in result {
-		if b != 0 { non_zero = true; break }
+	expected := hex_decode("a85b2107f791b26a84e7586c28cec7cb61202ed3d01944d832500f363782d675")
+	for i in 0 ..< 32 {
+		testing.expect_value(t, result[i], expected[i])
 	}
-	testing.expect(t, non_zero, "tagged hash should produce non-zero result")
-
-	// Verify determinism
-	result2 := crypto.tagged_hash("TapLeaf", []byte{0xc0, 0x01, 0x51})
-	testing.expect(t, result == result2, "tagged hash should be deterministic")
 
 	// Different tag should produce different result
-	result3 := crypto.tagged_hash("TapBranch", []byte{0xc0, 0x01, 0x51})
-	testing.expect(t, result != result3, "different tags should produce different results")
+	result2 := crypto.tagged_hash("TapBranch", []byte{0xc0, 0x01, 0x51})
+	testing.expect(t, result != result2, "different tags should produce different results")
 }
 
 @(test)
@@ -627,21 +653,20 @@ test_taproot_sighash_type_validation :: proc(t: ^testing.T) {
 
 @(test)
 test_tapleaf_hash :: proc(t: ^testing.T) {
-	// Compute tapleaf hash for a simple OP_TRUE script
+	// Tapleaf hash for OP_TRUE (OP_1 = 0x51) with leaf version 0xc0
+	// = tagged_hash("TapLeaf", 0xc0 || compact_size(1) || 0x51)
+	// = tagged_hash("TapLeaf", [0xc0, 0x01, 0x51])
 	script := []byte{0x51} // OP_1
 	hash := compute_tapleaf_hash(TAPROOT_LEAF_TAPSCRIPT, script)
 
-	// Verify non-zero and deterministic
-	non_zero := false
-	for b in hash { if b != 0 { non_zero = true; break } }
-	testing.expect(t, non_zero, "tapleaf hash should be non-zero")
-
-	hash2 := compute_tapleaf_hash(TAPROOT_LEAF_TAPSCRIPT, script)
-	testing.expect(t, hash == hash2, "tapleaf hash should be deterministic")
+	expected := hex_decode("a85b2107f791b26a84e7586c28cec7cb61202ed3d01944d832500f363782d675")
+	for i in 0 ..< 32 {
+		testing.expect_value(t, hash[i], expected[i])
+	}
 
 	// Different leaf version should produce different hash
-	hash3 := compute_tapleaf_hash(0xc2, script)
-	testing.expect(t, hash != hash3, "different leaf version should produce different hash")
+	hash2 := compute_tapleaf_hash(0xc2, script)
+	testing.expect(t, hash != hash2, "different leaf version should produce different hash")
 }
 
 @(test)
@@ -679,7 +704,9 @@ test_checkmultisig_disabled_tapscript :: proc(t: ^testing.T) {
 
 @(test)
 test_taproot_sighash_computation :: proc(t: ^testing.T) {
-	// Test basic sighash computation structure
+	// Test sighash computation with known expected values.
+	// Tx: version=2, 1 input (zero outpoint, seq=0xffffffff), 1 output (50000 to P2TR), locktime=0
+	// Spent output: value=100000, P2TR with pubkey=0xb0*32
 	crypto.init_secp256k1()
 	defer crypto.destroy_secp256k1()
 
@@ -712,21 +739,26 @@ test_taproot_sighash_computation :: proc(t: ^testing.T) {
 		spent_outputs  = spent_outputs,
 	}
 
-	// Compute sighash with DEFAULT type (key path)
-	sighash := compute_sighash_taproot(&verifier, SIGHASH_DEFAULT)
+	// SIGHASH_DEFAULT (0x00) — precomputed expected value
+	sighash_default := compute_sighash_taproot(&verifier, SIGHASH_DEFAULT)
+	expected_default := hex_decode("7eaa861a2f1031d0bec52f99a7b1ee17278073eb27acd531cdc25842cec448b5")
+	for i in 0 ..< 32 {
+		testing.expect_value(t, sighash_default[i], expected_default[i])
+	}
 
-	// Should be deterministic
-	sighash2 := compute_sighash_taproot(&verifier, SIGHASH_DEFAULT)
-	testing.expect(t, sighash == sighash2, "taproot sighash should be deterministic")
+	// SIGHASH_NONE (0x02)
+	sighash_none := compute_sighash_taproot(&verifier, SIGHASH_NONE)
+	expected_none := hex_decode("937fd128d7cb36b2b60e5c038f8f2991c30dc263dfbec6f691da92ed7df06a89")
+	for i in 0 ..< 32 {
+		testing.expect_value(t, sighash_none[i], expected_none[i])
+	}
 
-	// Different hash_type should produce different result
-	sighash3 := compute_sighash_taproot(&verifier, SIGHASH_NONE)
-	testing.expect(t, sighash != sighash3, "different hash_type should produce different sighash")
-
-	// SIGHASH_ALL should produce same as DEFAULT
-	sighash4 := compute_sighash_taproot(&verifier, SIGHASH_ALL)
-	// These are NOT the same because the hash_type byte differs in the preimage
-	testing.expect(t, sighash != sighash4, "DEFAULT and ALL should differ (hash_type byte differs)")
+	// SIGHASH_ALL (0x01) — differs from DEFAULT because hash_type byte is in preimage
+	sighash_all := compute_sighash_taproot(&verifier, SIGHASH_ALL)
+	expected_all := hex_decode("cf06a1984e3bd5f3ded5e25b785a8a34bd6e3bddc33ef7a117f8f9198ab5f43d")
+	for i in 0 ..< 32 {
+		testing.expect_value(t, sighash_all[i], expected_all[i])
+	}
 }
 
 @(test)
