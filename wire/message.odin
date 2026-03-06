@@ -41,6 +41,10 @@ CMD_GETCFHEADERS :: "getcfheaders"
 CMD_CFHEADERS   :: "cfheaders"
 CMD_GETCFCHECKPT :: "getcfcheckpt"
 CMD_CFCHECKPT   :: "cfcheckpt"
+CMD_MEMPOOL     :: "mempool"
+CMD_FILTERLOAD  :: "filterload"
+CMD_FILTERADD   :: "filteradd"
+CMD_FILTERCLEAR :: "filterclear"
 CMD_UNKNOWN     :: "unknown"
 
 // Computes the 4-byte checksum (first 4 bytes of SHA256d of payload).
@@ -105,6 +109,10 @@ command_from_bytes :: proc(cmd: [COMMAND_SIZE]byte) -> string {
 	case CMD_CFHEADERS:   return CMD_CFHEADERS
 	case CMD_GETCFCHECKPT: return CMD_GETCFCHECKPT
 	case CMD_CFCHECKPT:   return CMD_CFCHECKPT
+	case CMD_MEMPOOL:     return CMD_MEMPOOL
+	case CMD_FILTERLOAD:  return CMD_FILTERLOAD
+	case CMD_FILTERADD:   return CMD_FILTERADD
+	case CMD_FILTERCLEAR: return CMD_FILTERCLEAR
 	}
 
 	// Unknown command — return static string (must not use temp_allocator;

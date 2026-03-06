@@ -1046,3 +1046,44 @@ test_v2_responder_init :: proc(t: ^testing.T) {
 	// State should be Awaiting_EllSwift (waiting for initiator's ell64).
 	testing.expect_value(t, transport.state, V2_State.Awaiting_EllSwift)
 }
+
+@(test)
+test_node_bloom_service_bit :: proc(t: ^testing.T) {
+	// BIP111: NODE_BLOOM should be bit 2 (value 4).
+	testing.expect_value(t, NODE_BLOOM, u64(4))
+
+	// Default LOCAL_SERVICES should NOT include NODE_BLOOM (disabled by default).
+	testing.expect(t, LOCAL_SERVICES & NODE_BLOOM == 0, "NODE_BLOOM should not be in default LOCAL_SERVICES")
+
+	// When enabled, it should be set.
+	services := LOCAL_SERVICES | NODE_BLOOM
+	testing.expect(t, services & NODE_BLOOM != 0, "NODE_BLOOM should be set when enabled")
+}
+
+@(test)
+test_bip159_node_network_limited :: proc(t: ^testing.T) {
+	// BIP159: NODE_NETWORK_LIMITED should be bit 10 (value 1024).
+	testing.expect_value(t, NODE_NETWORK_LIMITED, u64(1024))
+
+	// Full nodes set BOTH NODE_NETWORK and NODE_NETWORK_LIMITED.
+	testing.expect(t, LOCAL_SERVICES & NODE_NETWORK != 0, "full node should set NODE_NETWORK")
+	testing.expect(t, LOCAL_SERVICES & NODE_NETWORK_LIMITED != 0, "full node should set NODE_NETWORK_LIMITED")
+}
+
+@(test)
+test_wire_mempool_command :: proc(t: ^testing.T) {
+	// BIP35: mempool command should roundtrip through wire encoding.
+	bytes := wire.command_to_bytes(wire.CMD_MEMPOOL)
+	back := wire.command_from_bytes(bytes)
+	testing.expect_value(t, back, wire.CMD_MEMPOOL)
+}
+
+@(test)
+test_wire_bloom_filter_commands :: proc(t: ^testing.T) {
+	// BIP111: bloom filter commands should roundtrip through wire encoding.
+	for cmd in ([3]string{wire.CMD_FILTERLOAD, wire.CMD_FILTERADD, wire.CMD_FILTERCLEAR}) {
+		bytes := wire.command_to_bytes(cmd)
+		back := wire.command_from_bytes(bytes)
+		testing.expect(t, back == cmd, fmt.tprintf("command %s should roundtrip", cmd))
+	}
+}

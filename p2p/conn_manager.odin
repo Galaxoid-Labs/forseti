@@ -58,6 +58,8 @@ Conn_Manager :: struct {
 	local_services: u64,
 	// Log level for the P2P thread (inherited from CLI --debug flag).
 	log_level: log.Level,
+	// BIP111: enable bloom filter support (also gates BIP35 mempool message).
+	peer_bloom_filters: bool,
 }
 
 conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) -> Net_Error {
@@ -608,6 +610,15 @@ _conn_manager_dispatch :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, cmd: string,
 		_conn_manager_handle_getcfheaders(cm, peer_id, payload)
 	case wire.CMD_GETCFCHECKPT:
 		_conn_manager_handle_getcfcheckpt(cm, peer_id, payload)
+	case wire.CMD_MEMPOOL:
+		_conn_manager_handle_mempool(cm, peer_id)
+	case wire.CMD_FILTERLOAD, wire.CMD_FILTERADD, wire.CMD_FILTERCLEAR:
+		// BIP111: disconnect peers that send bloom filter messages when we don't advertise NODE_BLOOM.
+		if !cm.peer_bloom_filters {
+			log.debugf("Peer %d sent %s but we don't support bloom filters, disconnecting", peer_id, cmd)
+			sync_handle_disconnect(&cm.sync_mgr, peer_id, &cm.peers)
+			conn_manager_remove_peer(cm, peer_id)
+		}
 	case:
 		// Unknown command — ignore.
 	}
@@ -917,6 +928,61 @@ _conn_manager_handle_getdata :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 			}
 			peer_send_message(peer, wire.CMD_BLOCK, raw)
 		}
+	}
+}
+
+// BIP35: handle mempool message — reply with inv of all mempool txids.
+// Gated by peer_bloom_filters (BIP111) — ignored if NODE_BLOOM is not advertised.
+_conn_manager_handle_mempool :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
+	if !cm.peer_bloom_filters {
+		log.debugf("Peer %d sent mempool but bloom filters disabled, ignoring", peer_id)
+		return
+	}
+
+	peer, found := cm.peers[peer_id]
+	if !found || peer.state != .Active {
+		return
+	}
+
+	if cm.mp == nil {
+		return
+	}
+
+	MAX_INV_SZ :: 50000
+	mp_count := mempool.mempool_count(cm.mp)
+	if mp_count == 0 {
+		return
+	}
+	count := min(mp_count, MAX_INV_SZ)
+
+	inv := make([]wire.Inv_Vector, count, context.temp_allocator)
+	idx := 0
+	for txid, entry in cm.mp.entries {
+		if idx >= count {
+			break
+		}
+		// BIP133: filter by peer's feefilter.
+		if peer.fee_filter > 0 {
+			rate := mempool.fee_rate_per_kvb(entry.fee_rate)
+			if rate < peer.fee_filter {
+				continue
+			}
+		}
+		// BIP339: use wtxid if peer negotiated wtxid relay.
+		if peer.wtxid_relay && peer.wtxid_relay_us {
+			inv[idx] = wire.Inv_Vector{type = .Witness_Tx, hash = entry.wtxid}
+		} else {
+			inv[idx] = wire.Inv_Vector{type = .Tx, hash = txid}
+		}
+		idx += 1
+	}
+
+	if idx > 0 {
+		inv_msg := wire.Inv_Message{inventory = inv[:idx]}
+		w := wire.writer_init(context.temp_allocator)
+		wire.serialize_inv(&w, &inv_msg)
+		peer_send_message(peer, wire.CMD_INV, wire.writer_bytes(&w))
+		log.debugf("BIP35: sent %d mempool inv entries to peer %d", idx, peer_id)
 	}
 }
 

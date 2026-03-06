@@ -86,6 +86,7 @@ V2_HANDSHAKE_TIMEOUT_SECS   :: 5      // seconds before v2 → v1 fallback
 
 // Services flags.
 NODE_NETWORK         :: u64(1)
+NODE_BLOOM           :: u64(1 << 2)   // BIP111: bloom filter support
 NODE_WITNESS         :: u64(1 << 3)
 NODE_COMPACT_FILTERS :: u64(1 << 6)
 NODE_NETWORK_LIMITED :: u64(1 << 10)

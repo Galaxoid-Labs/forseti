@@ -71,6 +71,7 @@ CLI_Flag :: enum {
 	V2_Transport,
 	Block_Filter_Index,
 	Listen,
+	Peer_Bloom_Filters,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
 
@@ -107,6 +108,7 @@ CLI_Config :: struct {
 	block_filter_index:     bool,   // BIP158 compact block filter index
 	listen:                 bool,   // accept inbound connections (default: true)
 	debug:                  bool,   // enable debug logging (default: false)
+	peer_bloom_filters:     bool,   // BIP111: bloom filter support (default: false)
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -337,6 +339,12 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 			flags_set += {.Listen}
 		} else if arg == "--debug" {
 			cfg.debug = true
+		} else if arg == "--peerbloomfilters" || arg == "--peerbloomfilters=1" {
+			cfg.peer_bloom_filters = true
+			flags_set += {.Peer_Bloom_Filters}
+		} else if arg == "--peerbloomfilters=0" {
+			cfg.peer_bloom_filters = false
+			flags_set += {.Peer_Bloom_Filters}
 		} else {
 			fmt.eprintln("Error: unknown flag:", arg)
 			_print_usage()
@@ -385,6 +393,7 @@ _print_usage :: proc() {
 	fmt.println("  --blocksonly          Disable tx relay, only sync blocks (default: off)")
 	fmt.println("  --persistmempool=<0|1> Save/load mempool on shutdown/startup (default: 1)")
 	fmt.println()
+	fmt.println("  --peerbloomfilters=<0|1> Enable BIP 37 bloom filters + BIP 35 mempool msg (default: 0)")
 	fmt.println("  --debug               Enable debug logging (default: off)")
 	fmt.println("  --help, -h            Show this help message")
 }
@@ -637,6 +646,12 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 	if .Listen not_in flags_set {
 		if val, found := _ini_get(&m, cfg.network, "listen"); found {
 			cfg.listen = val == "1" || val == "true" || val == "yes"
+		}
+	}
+
+	if .Peer_Bloom_Filters not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "peerbloomfilters"); found {
+			cfg.peer_bloom_filters = val == "1" || val == "true" || val == "yes"
 		}
 	}
 }
@@ -940,6 +955,10 @@ main :: proc() {
 			}
 			if cfg.v2_transport {
 				cm.local_services |= p2p.NODE_P2P_V2
+			}
+			if cfg.peer_bloom_filters {
+				cm.peer_bloom_filters = true
+				cm.local_services |= p2p.NODE_BLOOM
 			}
 
 			// Compute inbound connection budget.

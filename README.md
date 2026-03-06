@@ -2,11 +2,11 @@
 
 A Bitcoin full node implementation written in [Odin](https://odin-lang.org/). Built from scratch with no Bitcoin library dependencies — only libsecp256k1 for elliptic curve cryptography, vendored RIPEMD-160, and LevelDB for storage.
 
-This is an educational/experimental project. It implements the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, inbound + outbound connections (Bitcoin Core 28 defaults), v2 encrypted transport (BIP324), compact block relay (BIP152), compact block filters (BIP157/158), feefilter (BIP133), wtxid relay (BIP339), addr relay with addrv2 (BIP155), mempool with RBF, and a JSON-RPC interface with 43 methods.
+This is an educational/experimental project implementing 32 BIPs. It covers the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, inbound + outbound connections (Bitcoin Core 28 defaults), v2 encrypted transport (BIP324), compact block relay (BIP152), compact block filters (BIP157/158), feefilter (BIP133), wtxid relay (BIP339), addr relay with addrv2 (BIP155), mempool with RBF, and a JSON-RPC interface with 43 methods.
 
 ## Status
 
-**306 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Accepts both inbound and outbound P2P connections with v2 encrypted transport enabled by default. Builds on macOS and Linux.
+**310 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Accepts both inbound and outbound P2P connections with v2 encrypted transport enabled by default. Builds on macOS and Linux.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
@@ -16,7 +16,7 @@ This is an educational/experimental project. It implements the core components o
 | 3 | Consensus Rules + Block Validation | Complete (22 tests) |
 | 4 | UTXO Set + Chain State | Complete (22 tests) |
 | 5 | Persistent Storage (LevelDB) | Complete (18 tests) |
-| 6 | P2P Networking | Complete (29 tests) |
+| 6 | P2P Networking | Complete (33 tests) |
 | 7 | Mempool + Persistence + RBF + Config | Complete (32 tests) |
 | 8 | RPC Interface (43 methods) | Complete (52 tests) |
 | 9 | P2P Integration + CLI + Shutdown | Complete |
@@ -199,6 +199,7 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | `--assumevalid=<height>` | Skip script verification below height (0=disable) | Network default |
 | `--v2transport=<0\|1>` | BIP 324 v2 encrypted P2P transport | `1` |
 | `--blockfilterindex=<0\|1>` | Build and serve BIP 157 compact block filters | `0` |
+| `--peerbloomfilters=<0\|1>` | Enable BIP 37 bloom filters + BIP 35 mempool message | `0` |
 | `--debug` | Enable debug logging | `false` |
 
 **Mempool (matching Bitcoin Core):**
@@ -243,6 +244,7 @@ assumevalid=880000
 maxconnections=125
 listen=1
 blockfilterindex=0
+peerbloomfilters=0
 
 # Mempool settings (Bitcoin Core compatible)
 maxmempool=300
@@ -415,7 +417,7 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 ## Testing
 
 ```bash
-# Run all 306 tests
+# Run all 310 tests
 make test
 
 # Test individual packages
@@ -425,7 +427,7 @@ odin test script          # 50 tests (use -define:ODIN_TEST_THREADS=1 if flaky)
 odin test consensus       # 22 tests
 odin test storage         # 18 tests
 odin test chain           # 22 tests
-odin test p2p             # 29 tests
+odin test p2p             # 33 tests
 odin test mempool         # 32 tests
 odin test rpc             # 52 tests
 ```
@@ -524,11 +526,13 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 | 16 | Pay to Script Hash | Script interpreter (P2SH evaluation) |
 | 22 | getblocktemplate | — (not yet) |
 | 30 | Duplicate Transactions | Consensus validation (reject duplicate coinbase txids) |
+| 35 | mempool P2P Message | P2P (reply with inv of mempool txids, gated by `--peerbloomfilters`) |
 | 34 | Block v2 (Height in Coinbase) | Consensus validation |
 | 65 | OP_CHECKMULTISIGVERIFY | Script interpreter |
 | 66 | Strict DER Signatures | Script interpreter (DERSIG flag) |
 | 68 | Relative Lock-time (Sequence Numbers) | Consensus validation (sequence locks in connect_block) |
 | 94 | Testnet4 | Chain params, difficulty retarget fix |
+| 111 | NODE_BLOOM Service Bit | P2P (NODE_BLOOM flag, `--peerbloomfilters`, disconnect on unsupported) |
 | 112 | CHECKSEQUENCEVERIFY | Script interpreter |
 | 113 | Median Time Past for Lock-time | Consensus validation (MTP calculation) |
 | 125 | Replace-by-Fee | Mempool (opt-in + fullrbf, fee checks, eviction limits) |
@@ -539,6 +543,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 | 144 | Segregated Witness (Peer Services) | P2P (NODE_WITNESS service bit) |
 | 152 | Compact Block Relay | P2P (send + receive, SipHash short IDs, reconstruction) |
 | 155 | addrv2 | P2P (addr relay, address manager, v1↔v2 conversion) |
+| 159 | NODE_NETWORK_LIMITED | P2P (service bit for nodes serving recent 288 blocks) |
 | 157 | Client Side Block Filtering | P2P (serve getcfilters/getcfheaders/getcfcheckpt) |
 | 158 | Compact Block Filters (Basic) | GCS construction, filter building, filter DB |
 | 173 | Bech32 Addresses (v0) | Address encoding/decoding (P2WPKH, P2WSH) |

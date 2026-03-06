@@ -1126,6 +1126,7 @@ _handle_getpeerinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respons
 _services_to_names :: proc(services: u64) -> json.Array {
 	count := 0
 	if services & 1 != 0 { count += 1 }       // NODE_NETWORK
+	if services & 4 != 0 { count += 1 }       // NODE_BLOOM (BIP111)
 	if services & 8 != 0 { count += 1 }       // NODE_WITNESS
 	if services & 64 != 0 { count += 1 }      // NODE_COMPACT_FILTERS
 	if services & 1024 != 0 { count += 1 }    // NODE_NETWORK_LIMITED
@@ -1135,6 +1136,10 @@ _services_to_names :: proc(services: u64) -> json.Array {
 	idx := 0
 	if services & 1 != 0 {
 		names[idx] = json.Value(json.String("NETWORK"))
+		idx += 1
+	}
+	if services & 4 != 0 {
+		names[idx] = json.Value(json.String("BLOOM"))
 		idx += 1
 	}
 	if services & 8 != 0 {
