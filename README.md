@@ -479,6 +479,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 
 ### Performance
 
+- **Multi-backend SHA-256** — Currently uses Odin's `core:crypto/sha2` which only has Intel SHA-NI and generic scalar paths. On CPUs without SHA-NI (Intel pre-10th gen, older AMD), this is ~2x slower than necessary. Bitcoin Core ships AVX2, SSE4.1, and ARMv8 crypto backends with 4/8-way parallel hashing. Vendoring an optimized C implementation (like Bitcoin Core's `sha256_avx2.cpp`) via FFI would close this gap on older hardware
 - **Snappy compression for LevelDB** — Would reduce disk usage for mainnet
 
 ### Features
