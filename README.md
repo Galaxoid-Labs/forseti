@@ -1,6 +1,6 @@
 # bitcoin-node-odin
 
-A Bitcoin full node implementation written in [Odin](https://odin-lang.org/). Built from scratch with no Bitcoin library dependencies — only libsecp256k1 for elliptic curve cryptography, vendored RIPEMD-160, and LevelDB for storage.
+A Bitcoin full node implementation written in [Odin](https://odin-lang.org/). Built from scratch with no Bitcoin library dependencies — only libsecp256k1 for elliptic curve cryptography, Bitcoin Core's multi-backend SHA-256 (SHA-NI/AVX2/SSE4.1/ARMv8), vendored RIPEMD-160, and LevelDB for storage.
 
 This is an educational/experimental project implementing 33 BIPs. It covers the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, inbound + outbound connections (Bitcoin Core 28 defaults), v2 encrypted transport (BIP324), compact block relay (BIP152), compact block filters (BIP157/158), feefilter (BIP133), wtxid relay (BIP339), addr relay with addrv2 (BIP155), mempool with RBF, and a JSON-RPC interface with 45 methods.
 
