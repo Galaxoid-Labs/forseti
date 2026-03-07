@@ -24,7 +24,7 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 
 ## Project Structure
 
-- `crypto/` — (package btccrypto) SHA-256d, RIPEMD-160, HASH160, secp256k1 bindings (verify+sign+ElligatorSwift), Merkle root, Base58Check, Bech32/Bech32m, WIF decode, SipHash-2-4
+- `crypto/` — (package btccrypto) SHA-256d (Bitcoin Core multi-backend FFI: SHA-NI/AVX2/SSE4.1/ARMv8/generic), RIPEMD-160, HASH160, secp256k1 bindings (verify+sign+ElligatorSwift), Merkle root (SHA256D64 SIMD), Base58Check, Bech32/Bech32m, WIF decode, SipHash-2-4
 - `wire/` — Protocol types, CompactSize, tx/block serialization, message framing, compact block messages (BIP152), addrv2 messages (BIP155)
 - `script/` — Script interpreter, opcodes, standard types, Taproot (BIP341/342)
 - `consensus/` — Chain params, PoW, difficulty, block/tx validation, BIP325 signet
@@ -33,7 +33,7 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 - `p2p/` — Peer connections (outbound + inbound), sync manager, connection manager, address manager, BIP324 v2 transport, TCP listener (8 files)
 - `mempool/` — Fee rates, relay policy, validation pipeline, RBF (BIP125), persistence, configurable limits (6 files)
 - `rpc/` — JSON-RPC server, 45 methods, HTTP server (4 files)
-- `deps/` — libsecp256k1 (submodule), ripemd160 (vendored C), leveldb (vendored C++), static libs in deps/lib/
+- `deps/` — libsecp256k1 (submodule), ripemd160 (vendored C), leveldb (vendored C++), sha256 (vendored from Bitcoin Core, multi-backend), static libs in deps/lib/
 
 ## Key Architecture
 

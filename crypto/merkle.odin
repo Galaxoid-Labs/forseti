@@ -3,6 +3,7 @@ package btccrypto
 // Computes the Merkle root from a list of transaction hashes.
 // Uses Bitcoin's Merkle tree construction: if odd number of leaves,
 // the last element is duplicated.
+// Uses SHA256D64 for parallel SIMD hashing of 64-byte pairs (up to 8-way AVX2).
 merkle_root :: proc(hashes: []Hash256) -> Hash256 {
 	if len(hashes) == 0 {
 		return HASH_ZERO
@@ -24,15 +25,14 @@ merkle_root :: proc(hashes: []Hash256) -> Hash256 {
 			n += 1
 		}
 
-		next := n / 2
-		for i in 0 ..< next {
-			// Concatenate two 32-byte hashes and double-hash
-			pair: [64]byte
-			copy(pair[:32], buf[i * 2][:])
-			copy(pair[32:], buf[i * 2 + 1][:])
-			buf[i] = sha256d(pair[:])
-		}
-		n = next
+		num_pairs := n / 2
+		// SHA256D64 takes blocks*64 bytes input (pairs of 32-byte hashes laid out
+		// contiguously) and produces blocks*32 bytes output. Our buf is [N][32]byte,
+		// which is exactly the right layout: buf[0..2*num_pairs] is num_pairs*64 bytes.
+		input := ([^]u8)(&buf[0])
+		output := ([^]u8)(&buf[0])
+		sha256_ffi_d64(output, input, uint(num_pairs))
+		n = num_pairs
 	}
 
 	return buf[0]

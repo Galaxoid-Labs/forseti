@@ -63,6 +63,7 @@ This is an educational/experimental project implementing 33 BIPs. It covers the 
 - [libsecp256k1](https://github.com/bitcoin-core/secp256k1) v0.7.1 — git submodule, built with schnorrsig + recovery + extrakeys + ellswift modules
 - [LevelDB](https://github.com/google/leveldb) 1.23 — git submodule, compiled as static library with C++17
 - RIPEMD-160 — vendored C implementation in `deps/ripemd160/`
+- SHA-256 — vendored from [Bitcoin Core](https://github.com/bitcoin/bitcoin) (`deps/sha256/`), multi-backend with runtime CPU detection: SHA-NI, AVX2 8-way, SSE4.1 4-way, ARMv8 crypto, generic scalar
 
 ## Building
 
@@ -480,7 +481,6 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 
 ### Performance
 
-- **Multi-backend SHA-256** — Currently uses Odin's `core:crypto/sha2` which only has Intel SHA-NI and generic scalar paths. On CPUs without SHA-NI (Intel pre-10th gen, older AMD), this is ~2x slower than necessary. Bitcoin Core ships AVX2, SSE4.1, and ARMv8 crypto backends with 4/8-way parallel hashing. Vendoring an optimized C implementation (like Bitcoin Core's `sha256_avx2.cpp`) via FFI would close this gap on older hardware
 - **Snappy compression for LevelDB** — Would reduce disk usage for mainnet
 
 ### Features
@@ -560,7 +560,17 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 
 ## Hardware Recommendations
 
-Initial block download (IBD) is CPU-bound. The dominant cost is SHA-256 hashing — used for block hashes, transaction IDs, merkle roots, sighash computation, and script verification. The node's SHA-256 implementation (via Odin's `core:crypto/sha2`) uses **hardware SHA-NI instructions** when available, which are 3-5x faster than software SHA-256.
+Initial block download (IBD) is CPU-bound. The dominant cost is SHA-256 hashing — used for block hashes, transaction IDs, merkle roots, sighash computation, and script verification. The node uses **Bitcoin Core's multi-backend SHA-256** with runtime CPU detection, automatically selecting the best available implementation:
+
+| Backend | CPUs | Speedup vs generic |
+|---------|------|--------------------|
+| **SHA-NI** | AMD Zen 1+ (2017+), Intel Ice Lake+ (2019+) | ~5x |
+| **AVX2 8-way** | Intel Haswell+ (2013+), AMD Excavator+ (2015+) | ~2-3x |
+| **SSE4.1 4-way** | Intel Penryn+ (2008+), AMD Bulldozer+ (2011+) | ~1.5x |
+| **ARMv8 crypto** | Apple Silicon, AWS Graviton, ARM Cortex-A72+ | ~5x |
+| **Generic scalar** | Everything else | 1x (baseline) |
+
+The node logs which backend was selected at startup (e.g., `SHA-256 backend: sse4(1way),avx2(8way)`).
 
 **Recommended (fast IBD):**
 
@@ -571,21 +581,22 @@ Initial block download (IBD) is CPU-bound. The dominant cost is SHA-256 hashing 
 | Storage | SSD (NVMe preferred) | Block reads are ~29% of sync time; HDD will bottleneck |
 | Network | 50+ Mbps | Block download from 8 peers saturates slower connections |
 
-**CPU matters most.** SHA-NI support is the dividing line:
+**CPU matters most.** SHA-NI is fastest, but AVX2 CPUs (like Intel Haswell Xeons) now get the 8-way parallel backend instead of falling back to generic scalar:
 
 - **With SHA-NI** (AMD Zen 1+ / Intel Ice Lake+): Full mainnet IBD in ~8-12 hours
-- **Without SHA-NI** (Intel Haswell/Skylake, older AMD): IBD takes 2-3x longer. The node falls back to software SHA-256, which dominates the `valid` (59%) and `read` (29%) phases in block profiling
+- **With AVX2** (Intel Haswell/Broadwell/Skylake): ~1.5-2x slower than SHA-NI, but ~2-3x faster than generic
+- **Generic only** (very old CPUs): IBD takes 3-5x longer than SHA-NI
 
-You can check for SHA-NI support:
+You can check your CPU's capabilities:
 ```bash
 # Linux
-grep -o sha_ni /proc/cpuinfo | head -1
+grep -oE 'sha_ni|avx2|sse4_1' /proc/cpuinfo | sort -u
 
 # macOS (Apple Silicon always has hardware SHA-256 via ARM crypto extensions)
 sysctl -a | grep hw.optional.armv8_2_sha
 ```
 
-**Budget options:** A $5-10/month AMD EPYC VPS (Hetzner, Vultr, etc.) will sync mainnet significantly faster than a high-end Intel Haswell server, purely due to SHA-NI.
+**Budget options:** A $5-10/month AMD EPYC VPS (Hetzner, Vultr, etc.) will sync mainnet fastest due to SHA-NI. But older Haswell/Broadwell Xeon servers now perform well too with the AVX2 backend.
 
 **Minimum viable:** Any 64-bit x86 or ARM machine with 2+ GB RAM and 50+ GB disk will work — just slower. Use `--dbcache=256` on memory-constrained machines. Signet and testnet sync in minutes regardless of hardware.
 

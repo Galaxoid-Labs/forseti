@@ -17,10 +17,10 @@ build: deps
 	odin build . -out:btcnode -extra-linker-flags:"$(CXX_LINK)"
 
 test: deps
-	odin test crypto -define:ODIN_TEST_THREADS=1
-	odin test wire
-	odin test script -define:ODIN_TEST_THREADS=1
-	odin test consensus
+	odin test crypto -extra-linker-flags:"$(CXX_LINK)" -define:ODIN_TEST_THREADS=1
+	odin test wire -extra-linker-flags:"$(CXX_LINK)"
+	odin test script -extra-linker-flags:"$(CXX_LINK)" -define:ODIN_TEST_THREADS=1
+	odin test consensus -extra-linker-flags:"$(CXX_LINK)"
 	odin test storage -extra-linker-flags:"$(CXX_LINK)"
 	odin test chain -extra-linker-flags:"$(CXX_LINK)"
 	odin test p2p -extra-linker-flags:"$(CXX_LINK)" -define:ODIN_TEST_THREADS=1

@@ -798,6 +798,7 @@ main :: proc() {
 		}
 	}
 
+	crypto.sha256_init_backend()
 	crypto.init_secp256k1()
 	defer crypto.destroy_secp256k1()
 

@@ -92,6 +92,67 @@ ar rcs "$LIB_DIR/libleveldb.a" $OBJS
 for obj in $OBJS; do rm -f "$obj"; done
 echo "Built libleveldb.a"
 
+echo "=== Building SHA-256 (Bitcoin Core multi-backend) ==="
+SHA256_DIR="$SCRIPT_DIR/sha256"
+SHA256_CXXFLAGS="-O2 -DNDEBUG -std=c++20 $DEPLOY_FLAGS -I$SHA256_DIR/include"
+SHA256_OBJS=""
+
+# Detect architecture for SIMD flags
+ARCH="$(uname -m)"
+
+# Main sha256.cpp — generic + dispatch (always enable all backends at compile time;
+# runtime CPUID selects the right one)
+if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
+    $CXX $SHA256_CXXFLAGS -DENABLE_SSE41 -DENABLE_AVX2 -DENABLE_X86_SHANI \
+        -c "$SHA256_DIR/sha256.cpp" -o "$SHA256_DIR/sha256.o"
+elif [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
+    $CXX $SHA256_CXXFLAGS -DENABLE_ARM_SHANI \
+        -c "$SHA256_DIR/sha256.cpp" -o "$SHA256_DIR/sha256.o"
+else
+    $CXX $SHA256_CXXFLAGS \
+        -c "$SHA256_DIR/sha256.cpp" -o "$SHA256_DIR/sha256.o"
+fi
+SHA256_OBJS="$SHA256_OBJS $SHA256_DIR/sha256.o"
+
+# SSE4/SSE4.1 — x86 inline asm, no special compiler flags needed (uses asm blocks)
+if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
+    $CXX $SHA256_CXXFLAGS \
+        -c "$SHA256_DIR/sha256_sse4.cpp" -o "$SHA256_DIR/sha256_sse4.o"
+    SHA256_OBJS="$SHA256_OBJS $SHA256_DIR/sha256_sse4.o"
+
+    # AVX2 — needs -mavx2
+    $CXX $SHA256_CXXFLAGS -DENABLE_AVX2 -mavx2 \
+        -c "$SHA256_DIR/sha256_avx2.cpp" -o "$SHA256_DIR/sha256_avx2.o"
+    SHA256_OBJS="$SHA256_OBJS $SHA256_DIR/sha256_avx2.o"
+
+    # x86 SHA-NI — needs -msse4.1 -msha
+    $CXX $SHA256_CXXFLAGS -DENABLE_SSE41 -DENABLE_X86_SHANI -msse4.1 -msha \
+        -c "$SHA256_DIR/sha256_x86_shani.cpp" -o "$SHA256_DIR/sha256_x86_shani.o"
+    SHA256_OBJS="$SHA256_OBJS $SHA256_DIR/sha256_x86_shani.o"
+fi
+
+# ARM SHA — needs crypto extensions
+if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
+    ARM_SHA_FLAGS=""
+    # Apple Silicon has SHA built-in, no extra flags needed
+    # Linux ARM may need -march=armv8-a+crypto
+    if [ "$(uname -s)" != "Darwin" ]; then
+        ARM_SHA_FLAGS="-march=armv8-a+crypto"
+    fi
+    $CXX $SHA256_CXXFLAGS -DENABLE_ARM_SHANI $ARM_SHA_FLAGS \
+        -c "$SHA256_DIR/sha256_arm_shani.cpp" -o "$SHA256_DIR/sha256_arm_shani.o"
+    SHA256_OBJS="$SHA256_OBJS $SHA256_DIR/sha256_arm_shani.o"
+fi
+
+# C wrapper
+$CXX $SHA256_CXXFLAGS -I"$SHA256_DIR" \
+    -c "$SHA256_DIR/sha256_c.cpp" -o "$SHA256_DIR/sha256_c.o"
+SHA256_OBJS="$SHA256_OBJS $SHA256_DIR/sha256_c.o"
+
+ar rcs "$LIB_DIR/libsha256.a" $SHA256_OBJS
+for obj in $SHA256_OBJS; do rm -f "$obj"; done
+echo "Built libsha256.a"
+
 echo "=== Building libsecp256k1 ==="
 cd "$SCRIPT_DIR/libsecp256k1"
 
