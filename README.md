@@ -556,6 +556,37 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 | 342 | Tapscript | Script interpreter (OP_CHECKSIGADD, leaf versioning) |
 | 350 | Bech32m Addresses (v1+) | Address encoding/decoding (P2TR) |
 
+## Hardware Recommendations
+
+Initial block download (IBD) is CPU-bound. The dominant cost is SHA-256 hashing — used for block hashes, transaction IDs, merkle roots, sighash computation, and script verification. The node's SHA-256 implementation (via Odin's `core:crypto/sha2`) uses **hardware SHA-NI instructions** when available, which are 3-5x faster than software SHA-256.
+
+**Recommended (fast IBD):**
+
+| Component | Recommendation | Why |
+|-----------|---------------|-----|
+| CPU | AMD Ryzen/EPYC (Zen 1+) or Intel 10th gen+ | SHA-NI hardware acceleration. This is the single biggest factor for sync speed |
+| RAM | 8 GB+ | Allows `--dbcache=4096` for fewer UTXO flushes during IBD |
+| Storage | SSD (NVMe preferred) | Block reads are ~29% of sync time; HDD will bottleneck |
+| Network | 50+ Mbps | Block download from 8 peers saturates slower connections |
+
+**CPU matters most.** SHA-NI support is the dividing line:
+
+- **With SHA-NI** (AMD Zen 1+ / Intel Ice Lake+): Full mainnet IBD in ~8-12 hours
+- **Without SHA-NI** (Intel Haswell/Skylake, older AMD): IBD takes 2-3x longer. The node falls back to software SHA-256, which dominates the `valid` (59%) and `read` (29%) phases in block profiling
+
+You can check for SHA-NI support:
+```bash
+# Linux
+grep -o sha_ni /proc/cpuinfo | head -1
+
+# macOS (Apple Silicon always has hardware SHA-256 via ARM crypto extensions)
+sysctl -a | grep hw.optional.armv8_2_sha
+```
+
+**Budget options:** A $5-10/month AMD EPYC VPS (Hetzner, Vultr, etc.) will sync mainnet significantly faster than a high-end Intel Haswell server, purely due to SHA-NI.
+
+**Minimum viable:** Any 64-bit x86 or ARM machine with 2+ GB RAM and 50+ GB disk will work — just slower. Use `--dbcache=256` on memory-constrained machines. Signet and testnet sync in minutes regardless of hardware.
+
 ## License
 
 MIT
