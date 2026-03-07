@@ -84,20 +84,16 @@ coins_cache_add :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: storage
 	new_script: []byte
 	if len(coin.script) > 0 {
 		new_script = make([]byte, len(coin.script), cc.allocator)
-		for i in 0 ..< len(coin.script) {
-			new_script[i] = coin.script[i]
-		}
-	}
-
-	cached_coin := storage.UTXO_Coin {
-		height      = coin.height,
-		is_coinbase = coin.is_coinbase,
-		amount      = coin.amount,
-		script      = new_script,
+		copy(new_script, coin.script)
 	}
 
 	cc.cache[outpoint] = Cache_Entry {
-		coin  = cached_coin,
+		coin  = storage.UTXO_Coin {
+			height      = coin.height,
+			is_coinbase = coin.is_coinbase,
+			amount      = coin.amount,
+			script      = new_script,
+		},
 		flags = {.Dirty, .Fresh},
 	}
 	cc.mem_usage += CACHE_ENTRY_OVERHEAD + len(new_script)
@@ -164,9 +160,7 @@ coins_cache_restore :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: sto
 	new_script: []byte
 	if len(coin.script) > 0 {
 		new_script = make([]byte, len(coin.script), cc.allocator)
-		for i in 0 ..< len(coin.script) {
-			new_script[i] = coin.script[i]
-		}
+		copy(new_script, coin.script)
 	}
 
 	cached_coin := storage.UTXO_Coin {
@@ -230,17 +224,34 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 		return .Storage_Error
 	}
 
-	log.infof("UTXO flush OK: wrote %d, deleted %d, evicting cache", written, deleted)
+	log.infof("UTXO flush OK: wrote %d, deleted %d, pruning cache", written, deleted)
 
-	// Evict entire cache after flush to bound memory usage.
-	for _, entry in cc.cache {
-		if len(entry.coin.script) > 0 {
-			delete(entry.coin.script, cc.allocator)
+	// Prune spent sentinels and clear dirty flags. Keep live entries as clean
+	// cache so subsequent blocks don't need to re-read from LevelDB.
+	// This dramatically reduces LevelDB reads after a flush.
+	evicted := 0
+	keys_to_delete := make([dynamic]wire.Outpoint, 0, deleted, context.temp_allocator)
+	for outpoint, &entry in cc.cache {
+		if _is_spent_sentinel(&entry) {
+			// Spent sentinel — already flushed to DB as delete, remove from cache
+			append(&keys_to_delete, outpoint)
+			evicted += 1
+		} else {
+			// Live entry — clear dirty/fresh flags (now clean in DB)
+			entry.flags = {}
 		}
 	}
-	delete(cc.cache)
-	cc.cache = make(map[wire.Outpoint]Cache_Entry, 1024, cc.allocator)
+	for key in keys_to_delete {
+		delete_key(&cc.cache, key)
+	}
+	// Recalculate mem_usage after pruning
 	cc.mem_usage = 0
+	for _, entry in cc.cache {
+		cc.mem_usage += CACHE_ENTRY_OVERHEAD + len(entry.coin.script)
+	}
+
+	log.debugf("Cache pruned: evicted %d sentinels, kept %d live entries (%d MB)",
+		evicted, len(cc.cache), cc.mem_usage / (1024 * 1024))
 
 	return .None
 }

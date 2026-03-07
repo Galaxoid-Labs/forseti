@@ -314,6 +314,8 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 	}
 
 	// --- Phase 1: UTXO processing + check collection ---
+	// Single pass: look up, validate, spend, collect script checks, add outputs.
+	// Merges the separate get+spend into one operation to avoid double map lookups.
 	for tx_idx in 0 ..< len(block.txs) {
 		tx := block.txs[tx_idx]
 
@@ -321,42 +323,46 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 			continue
 		}
 
-		// 4a. Look up inputs
+		// 4a. Look up + spend inputs in a single pass
 		spent_outputs := make([]wire.Tx_Out, len(tx.inputs), context.temp_allocator)
 		input_heights := make([]int, len(tx.inputs), context.temp_allocator)
 		input_sum: i64 = 0
 
 		for in_idx in 0 ..< len(tx.inputs) {
 			prev_out := tx.inputs[in_idx].previous_output
-			coin, found := coins_cache_get(&cs.coins, prev_out)
-			if !found {
+
+			// coins_cache_spend does the lookup+spend atomically.
+			// The returned coin's script is cloned to temp_allocator.
+			spent_coin, ok := coins_cache_spend(&cs.coins, prev_out)
+			if !ok {
 				_rollback_applied_txs(cs, block, applied_tx_indices[:], undo_coins[:])
 				return .Inputs_Unavailable
 			}
 
-			if coin.is_coinbase {
-				if height - int(coin.height) < consensus.COINBASE_MATURITY {
+			if spent_coin.is_coinbase {
+				if height - int(spent_coin.height) < consensus.COINBASE_MATURITY {
+					// Restore the spent coin before rolling back
+					coins_cache_restore(&cs.coins, prev_out, spent_coin)
 					_rollback_applied_txs(cs, block, applied_tx_indices[:], undo_coins[:])
 					return .Coinbase_Not_Mature
 				}
 			}
 
-			input_heights[in_idx] = int(coin.height)
+			input_heights[in_idx] = int(spent_coin.height)
 
-			// Clone script to temp_allocator — coins_cache_spend (step 4d)
-			// frees the cache-owned script, so we need a copy that survives
-			// through Phase 2 script verification.
-			script_clone := make([]byte, len(coin.script), context.temp_allocator)
-			copy(script_clone, coin.script)
+			// Script is already on temp_allocator from coins_cache_spend
 			spent_outputs[in_idx] = wire.Tx_Out {
-				value         = coin.amount,
-				script_pubkey = script_clone,
+				value         = spent_coin.amount,
+				script_pubkey = spent_coin.script,
 			}
-			input_sum += coin.amount
+			input_sum += spent_coin.amount
+
+			// Collect undo coins immediately
+			append(&undo_coins, Undo_Coin{outpoint = prev_out, coin = spent_coin})
 
 			// Collect for BIP158 filter.
 			if cs.filter_db != nil {
-				append(&all_spent_scripts, script_clone)
+				append(&all_spent_scripts, spent_coin.script)
 			}
 		}
 
@@ -402,18 +408,7 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 		}
 		total_fees += input_sum - output_sum
 
-		// 4d. Spend inputs and collect undo coins
-		for in_idx in 0 ..< len(tx.inputs) {
-			prev_out := tx.inputs[in_idx].previous_output
-			spent_coin, ok := coins_cache_spend(&cs.coins, prev_out)
-			if !ok {
-				_rollback_applied_txs(cs, block, applied_tx_indices[:], undo_coins[:])
-				return .Invalid_State
-			}
-			append(&undo_coins, Undo_Coin{outpoint = prev_out, coin = spent_coin})
-		}
-
-		// 4e. Add outputs (available for later txs in same block)
+		// 4d. Add outputs (available for later txs in same block)
 		for out_idx in 0 ..< len(tx.outputs) {
 			op := wire.Outpoint{hash = txids[tx_idx], index = u32(out_idx)}
 			coin := storage.UTXO_Coin {
