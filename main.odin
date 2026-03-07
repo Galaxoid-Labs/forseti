@@ -137,7 +137,7 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 	cfg.persist_mempool = true
 	cfg.server = true
 	cfg.max_connections = 125
-	cfg.v2_transport = true
+	cfg.v2_transport = false
 	cfg.block_filter_index = false
 	cfg.listen = true
 
@@ -370,7 +370,7 @@ _print_usage :: proc() {
 	fmt.println("  --no-p2p              Disable P2P networking (RPC-only mode)")
 	fmt.println("  --listen=<0|1>        Accept inbound P2P connections (default: 1)")
 	fmt.println("  --maxconnections=<N>  Total peer connections (default: 125)")
-	fmt.println("  --v2transport=<0|1>   Enable BIP 324 v2 encrypted P2P transport (default: 1)")
+	fmt.println("  --v2transport=<0|1>   Enable BIP 324 v2 encrypted P2P transport (default: 0)")
 	fmt.println("  --blockfilterindex=<0|1|basic> Enable BIP 158 compact block filter index (default: 0)")
 	fmt.println("  --dbcache=<MB>        Database cache size in MiB (default: 450, min: 4)")
 	fmt.println("  --par=<N>             Script verification threads (0=auto, 1=serial, 2+=parallel; default: 0)")

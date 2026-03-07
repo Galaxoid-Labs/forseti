@@ -197,7 +197,7 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | `--dbcache=<MB>` | Database cache size in MiB | `450` |
 | `--par=<N>` | Script verification threads (0=auto, 1=serial, 2+=parallel) | `0` |
 | `--assumevalid=<height>` | Skip script verification below height (0=disable) | Network default |
-| `--v2transport=<0\|1>` | BIP 324 v2 encrypted P2P transport | `1` |
+| `--v2transport=<0\|1>` | BIP 324 v2 encrypted P2P transport | `0` |
 | `--blockfilterindex=<0\|1>` | Build and serve BIP 157 compact block filters | `0` |
 | `--peerbloomfilters=<0\|1>` | Enable BIP 37 bloom filters + BIP 35 mempool message | `0` |
 | `--debug` | Enable debug logging | `false` |
@@ -476,6 +476,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 ### Correctness
 
 - **Crash consistency on fresh DB** — If node is killed before first UTXO flush, recovery fails due to absent meta tip
+- **V2 transport (BIP324) sync issues** — `--v2transport=1` can cause peer disconnections and sync stalls during IBD. Default is disabled (`0`). Needs investigation: likely related to handshake timing, fallback logic, or encrypted message framing under high throughput
 
 ### Performance
 
