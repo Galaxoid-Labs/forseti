@@ -306,6 +306,14 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 	prev_height: int
 	_, prev_height = chain.chain_tip(sm.chain)
 
+	// Log when a block is stored but can't connect yet (out-of-order arrival).
+	block_entry, block_known := sm.chain.block_index.entries[block_hash]
+	if block_known && block_entry.height > prev_height + 1 {
+		gap := block_entry.height - prev_height - 1
+		log.debugf("Block %d stored (peer %d), waiting for %d block(s) from height %d",
+			block_entry.height, peer_id, gap, prev_height + 1)
+	}
+
 	redownload := make([dynamic]Hash256, 0, 4, context.temp_allocator)
 	connected, cerr := chain.connect_pending_blocks(sm.chain, &redownload)
 	if cerr != .None && cerr != .Storage_Error {
@@ -701,6 +709,82 @@ sync_check_stalls :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) -> Peer_
 			log.infof("Evicting slow peer %d (%.1f blk/s vs fastest %.1f blk/s)", slowest_pid, slowest_rate, fastest_rate)
 			sm.last_disconnect = now
 			return slowest_pid
+		}
+	}
+
+	// Race tip-critical blocks: if blocks near the chain tip have been in-flight
+	// for > TIP_BLOCK_RACE_SECS, send duplicate requests to another peer.
+	// The first response wins; duplicates are no-ops (Has_Data check).
+	if sm.state == .Downloading_Blocks && len(sm.blocks_in_flight) > 0 {
+		_, tip_height := chain.chain_tip(sm.chain)
+
+		// Collect tip-critical blocks (within 16 of tip) that are slow.
+		race_blocks := make([dynamic]Hash256, 0, 16, context.temp_allocator)
+		race_owners := make([dynamic]Peer_Id, 0, 16, context.temp_allocator)
+
+		for hash, owner_pid in sm.blocks_in_flight {
+			entry, known := sm.chain.block_index.entries[hash]
+			if !known {
+				continue
+			}
+			// Only race blocks close to the chain tip — these are blocking progress.
+			if entry.height > tip_height + 16 {
+				continue
+			}
+			req_time, has_time := sm.block_request_time[hash]
+			if has_time && now - req_time >= TIP_BLOCK_RACE_SECS {
+				append(&race_blocks, hash)
+				append(&race_owners, owner_pid)
+			}
+		}
+
+		if len(race_blocks) > 0 {
+			// Find a peer to race with — pick the one with the most delivered blocks
+			// that isn't the current owner of any of these blocks.
+			best_racer: Peer_Id = 0
+			best_delivered := 0
+			for pid in sm.peer_rr_list {
+				ps, found := sm.peer_sync[pid]
+				if !found {
+					continue
+				}
+				peer, pfound := peers[pid]
+				if !pfound || peer.state != .Active {
+					continue
+				}
+				if ps.blocks_delivered > best_delivered {
+					// Make sure this peer isn't already the owner of all race blocks.
+					is_all_owner := true
+					for oi in 0 ..< len(race_owners) {
+						if race_owners[oi] != pid {
+							is_all_owner = false
+							break
+						}
+					}
+					if !is_all_owner {
+						best_delivered = ps.blocks_delivered
+						best_racer = pid
+					}
+				}
+			}
+
+			if best_racer != 0 {
+				racer_peer, racer_found := peers[best_racer]
+				if racer_found {
+					// Send duplicate getdata for tip-critical blocks to the racer.
+					inv := make([dynamic]wire.Inv_Vector, 0, len(race_blocks), context.temp_allocator)
+					for ri in 0 ..< len(race_blocks) {
+						if race_owners[ri] != best_racer {
+							append(&inv, wire.Inv_Vector{type = .Witness_Block, hash = race_blocks[ri]})
+						}
+					}
+					if len(inv) > 0 {
+						peer_send_getdata(racer_peer, inv[:])
+						log.debugf("Racing %d tip-critical block(s) to peer %d (was: various, waited >%ds)",
+							len(inv), best_racer, TIP_BLOCK_RACE_SECS)
+					}
+				}
+			}
 		}
 	}
 
@@ -1262,8 +1346,9 @@ _build_download_queue :: proc(sm: ^Sync_Manager) {
 	by_height := make([]Hash256, max_h + 1, context.temp_allocator)
 
 	for hash, entry in sm.chain.block_index.entries {
-		if .Valid_Header in entry.status && .Has_Data not_in entry.status {
-			if entry.height >= 0 && entry.height <= max_h {
+		// Skip genesis (height 0) — peers don't serve it; connect_pending_blocks handles it.
+		if .Valid_Header in entry.status && .Has_Data not_in entry.status && entry.height > 0 {
+			if entry.height <= max_h {
 				by_height[entry.height] = hash
 			}
 		}

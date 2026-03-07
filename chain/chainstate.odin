@@ -888,6 +888,23 @@ connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 =
 	// Remaining blocks are picked up on the next incoming block message.
 	MAX_CONNECT_BATCH :: 256
 
+	// Bootstrap genesis: peers don't serve genesis via getdata (it's hardcoded),
+	// so it never gets Has_Data from download. If the chain is empty and block 1
+	// has data waiting, promote genesis directly so the chain can advance.
+	if len(cs.active_chain) == 0 && cs.block_index.genesis != nil && .Valid_Chain not_in cs.block_index.genesis.status {
+		genesis_hash := cs.block_index.genesis.hash
+		// Check if block 1 (child of genesis) exists and has data.
+		child := cs.block_index.by_prev[genesis_hash]
+		if child != nil && .Has_Data in child.status {
+			cs.block_index.genesis.status += {.Valid_Chain}
+			append(&cs.active_chain, genesis_hash)
+			rec := block_index_to_record(cs.block_index.genesis)
+			storage.index_db_put(&cs.index_db, rec)
+			log.infof("Genesis block bootstrapped into active chain")
+			connected += 1
+		}
+	}
+
 	for connected < MAX_CONNECT_BATCH {
 		tip_hash, _ := chain_tip(cs)
 
