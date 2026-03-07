@@ -120,6 +120,11 @@ if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
         -c "$SHA256_DIR/sha256_sse4.cpp" -o "$SHA256_DIR/sha256_sse4.o"
     SHA256_OBJS="$SHA256_OBJS $SHA256_DIR/sha256_sse4.o"
 
+    # SSE4.1 4-way — needs -msse4.1
+    $CXX $SHA256_CXXFLAGS -DENABLE_SSE41 -msse4.1 \
+        -c "$SHA256_DIR/sha256_sse41.cpp" -o "$SHA256_DIR/sha256_sse41.o"
+    SHA256_OBJS="$SHA256_OBJS $SHA256_DIR/sha256_sse41.o"
+
     # AVX2 — needs -mavx2
     $CXX $SHA256_CXXFLAGS -DENABLE_AVX2 -mavx2 \
         -c "$SHA256_DIR/sha256_avx2.cpp" -o "$SHA256_DIR/sha256_avx2.o"
