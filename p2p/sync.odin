@@ -62,7 +62,6 @@ Sync_Manager :: struct {
 	peer_rr_cursor:     int,
 	last_stall_check:   i64,
 	header_lead_peer:   Peer_Id, // fastest responder becomes lead for header sync
-	stall_timeout:      i64,     // adaptive stall timeout (seconds), doubles on disconnect, decays on connect
 	last_disconnect:    i64,     // timestamp of last stall disconnect (rate limit)
 	compact_state:      ^Compact_Block_State, // pending compact block reconstruction (nil = none)
 }
@@ -81,7 +80,6 @@ sync_manager_init :: proc(sm: ^Sync_Manager, cs: ^chain.Chain_State, params: ^co
 	sm.peer_rr_list = make([dynamic]Peer_Id, 0, 16)
 	sm.peer_rr_cursor = 0
 	sm.last_stall_check = time.to_unix_seconds(time.now())
-	sm.stall_timeout = BLOCK_STALL_TIMEOUT_DEFAULT
 
 	// Initialize best_header_height from loaded block index
 	if cs.block_index.best_header != nil {
@@ -332,8 +330,6 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 		_, height := chain.chain_tip(sm.chain)
 		sm.last_tip_update = time.to_unix_seconds(time.now())
 
-		// Decay stall timeout toward default after successful connects.
-		sync_decay_stall_timeout(sm)
 
 		// Budget-based UTXO flush: flush when coins cache exceeds its memory budget,
 		// or every 5000 blocks as a durability safety net (only when budget < 1 GiB,
@@ -633,7 +629,7 @@ sync_check_stalls :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) -> Peer_
 		}
 
 		// Only act if chain hasn't progressed recently (actual stall).
-		if now - sm.last_tip_update < sm.stall_timeout {
+		if now - sm.last_tip_update < BLOCK_STALL_TIMEOUT_DEFAULT {
 			return 0
 		}
 
@@ -664,16 +660,8 @@ sync_check_stalls :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) -> Peer_
 		}
 
 		// If the blocking peer's block exceeds the stall timeout, disconnect.
-		if staller_peer != 0 && staller_time > 0 && now - staller_time > sm.stall_timeout {
+		if staller_peer != 0 && staller_time > 0 && now - staller_time > BLOCK_STALL_TIMEOUT_DEFAULT {
 			sm.last_disconnect = now
-
-			// Double the timeout for next time (prevents churn if our connection is slow).
-			new_timeout := min(sm.stall_timeout * 2, BLOCK_STALL_TIMEOUT_MAX)
-			if new_timeout != sm.stall_timeout {
-				log.infof("Stall timeout increased: %ds -> %ds", sm.stall_timeout, new_timeout)
-				sm.stall_timeout = new_timeout
-			}
-
 			log.infof("Peer %d stalling chain at height %d (no progress for %ds, block in-flight %ds) — disconnecting",
 				staller_peer, staller_height, now - sm.last_tip_update, now - staller_time)
 			return staller_peer
@@ -826,15 +814,6 @@ sync_check_stalls :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) -> Peer_
 
 // Decay the stall timeout toward the default after successful block connects.
 // Bitcoin Core uses 0.85x decay per block connect.
-sync_decay_stall_timeout :: proc(sm: ^Sync_Manager) {
-	if sm.stall_timeout > BLOCK_STALL_TIMEOUT_DEFAULT {
-		new_timeout := max(i64(f64(sm.stall_timeout) * 0.85), BLOCK_STALL_TIMEOUT_DEFAULT)
-		if new_timeout != sm.stall_timeout {
-			sm.stall_timeout = new_timeout
-		}
-	}
-}
-
 // Log per-peer throughput stats.
 _log_peer_throughput :: proc(sm: ^Sync_Manager) {
 	now := time.to_unix_seconds(time.now())

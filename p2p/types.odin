@@ -76,7 +76,6 @@ PING_INTERVAL_SECS          :: 120
 HANDSHAKE_TIMEOUT_SECS      :: 10
 STALE_TIP_SECS              :: 600
 BLOCK_STALL_TIMEOUT_DEFAULT :: 10  // Seconds before disconnecting a stalling peer
-BLOCK_STALL_TIMEOUT_MAX     :: 30  // Max after repeated doublings
 TIP_BLOCK_RACE_SECS         :: 3   // Seconds before racing tip blocks to a faster peer
 STALL_CHECK_INTERVAL_SECS   :: 1
 HEADER_REQUEST_TIMEOUT_SECS :: 60

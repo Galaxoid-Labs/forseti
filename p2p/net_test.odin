@@ -253,29 +253,6 @@ test_peer_block_limit_slow_peer :: proc(t: ^testing.T) {
 
 // --- Stall timeout decay ---
 
-@(test)
-test_sync_decay_stall_timeout :: proc(t: ^testing.T) {
-	sm: Sync_Manager
-	cs, ok := _make_test_chain_state(t, 5)
-	testing.expect(t, ok, "failed to make test chain")
-	sync_manager_init(&sm, cs, &consensus.REGTEST_PARAMS)
-	defer sync_manager_destroy(&sm)
-
-	// Set elevated stall timeout
-	sm.stall_timeout = BLOCK_STALL_TIMEOUT_MAX // 64
-
-	// Decay should reduce by 15% each call
-	sync_decay_stall_timeout(&sm)
-	testing.expect(t, sm.stall_timeout < BLOCK_STALL_TIMEOUT_MAX, "should decay")
-	testing.expect(t, sm.stall_timeout >= BLOCK_STALL_TIMEOUT_DEFAULT, "should not go below default")
-
-	// Keep decaying until we hit the floor
-	for i in 0 ..< 100 {
-		sync_decay_stall_timeout(&sm)
-	}
-	testing.expect_value(t, sm.stall_timeout, i64(BLOCK_STALL_TIMEOUT_DEFAULT))
-}
-
 // --- Sync manager init/destroy ---
 
 @(test)
@@ -288,7 +265,6 @@ test_sync_manager_init :: proc(t: ^testing.T) {
 	defer sync_manager_destroy(&sm)
 
 	testing.expect_value(t, sm.state, Sync_State.Idle)
-	testing.expect_value(t, sm.stall_timeout, i64(BLOCK_STALL_TIMEOUT_DEFAULT))
 	testing.expect(t, sm.chain == cs, "chain should be set")
 	testing.expect(t, sm.params == &consensus.REGTEST_PARAMS, "params should be set")
 }
