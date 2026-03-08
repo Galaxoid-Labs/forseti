@@ -343,6 +343,8 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 		if should_flush || safety_flush {
 			tip_hash, tip_h := chain.chain_tip(sm.chain)
 			chain.coins_cache_flush(&sm.chain.coins, tip_hash, tip_h)
+			// Reset tip update time so flush duration doesn't trigger false stall detection.
+			sm.last_tip_update = time.to_unix_seconds(time.now())
 		}
 
 		// Remove confirmed/conflicting txs from mempool and update tip for BIP 68/113.
