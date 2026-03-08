@@ -127,9 +127,9 @@ coins_cache_spend :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage
 			delete_key(&cc.cache, outpoint)
 		} else {
 			// Was in DB — leave a spent sentinel so flush deletes it
+			cc.mem_usage -= len(spent_coin.script) // script was freed, only overhead remains
 			entry.coin = storage.UTXO_Coin{}
 			entry.flags = {.Dirty}
-			// Sentinel is smaller (no script), but we keep overhead for the map entry
 		}
 
 		return spent_coin, true
@@ -149,8 +149,9 @@ coins_cache_spend :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage
 		coin.script = temp_script
 	}
 
-	// Mark as spent sentinel in cache
+	// Mark as spent sentinel in cache (no script, just overhead)
 	cc.cache[outpoint] = Cache_Entry{coin = {}, flags = {.Dirty}}
+	cc.mem_usage += CACHE_ENTRY_OVERHEAD
 	return coin, true
 }
 
@@ -226,32 +227,10 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 
 	log.infof("UTXO flush OK: wrote %d, deleted %d, pruning cache", written, deleted)
 
-	// Prune spent sentinels and clear dirty flags. Keep live entries as clean
-	// cache so subsequent blocks don't need to re-read from LevelDB.
-	evicted := 0
-	keys_to_delete := make([dynamic]wire.Outpoint, 0, deleted, context.temp_allocator)
-	for outpoint, &entry in cc.cache {
-		if _is_spent_sentinel(&entry) {
-			append(&keys_to_delete, outpoint)
-			evicted += 1
-		} else {
-			entry.flags = {}
-		}
-	}
-	for key in keys_to_delete {
-		delete_key(&cc.cache, key)
-	}
-
-	// Recalculate mem_usage after sentinel pruning
-	cc.mem_usage = 0
-	for _, entry in cc.cache {
-		cc.mem_usage += CACHE_ENTRY_OVERHEAD + len(entry.coin.script)
-	}
-
-	// If still over budget after pruning sentinels, the UTXO set is too large
-	// to keep warm. Fall back to full eviction to reclaim memory.
+	// If over budget, do a full eviction — the UTXO set is too large to keep warm.
+	// This avoids iterating 100M+ entries just to prune sentinels.
 	if cc.mem_usage >= cc.budget {
-		log.infof("Cache still over budget (%d MB / %d MB), full eviction (%d entries)",
+		log.infof("Cache over budget (%d MB / %d MB), full eviction (%d entries)",
 			cc.mem_usage / (1024 * 1024), cc.budget / (1024 * 1024), len(cc.cache))
 		for _, entry in cc.cache {
 			if len(entry.coin.script) > 0 {
@@ -262,8 +241,21 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 		cc.cache = make(map[wire.Outpoint]Cache_Entry, 1024, cc.allocator)
 		cc.mem_usage = 0
 	} else {
+		// Under budget — prune spent sentinels and keep live entries warm.
+		keys_to_delete := make([dynamic]wire.Outpoint, 0, deleted, context.temp_allocator)
+		for outpoint, &entry in cc.cache {
+			if _is_spent_sentinel(&entry) {
+				append(&keys_to_delete, outpoint)
+				cc.mem_usage -= CACHE_ENTRY_OVERHEAD
+			} else {
+				entry.flags = {}
+			}
+		}
+		for key in keys_to_delete {
+			delete_key(&cc.cache, key)
+		}
 		log.debugf("Cache pruned: evicted %d sentinels, kept %d live entries (%d MB)",
-			evicted, len(cc.cache), cc.mem_usage / (1024 * 1024))
+			len(keys_to_delete), len(cc.cache), cc.mem_usage / (1024 * 1024))
 	}
 
 	return .None
