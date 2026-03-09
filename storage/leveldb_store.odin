@@ -43,6 +43,7 @@ ldb_open :: proc(data_dir: string, db_cache_mb: int = 450) -> (store: LDB_Store,
 	leveldb_writeoptions_set_sync(store.sync_opts, 1)
 
 	// --- Open chainstate DB: <datadir>/chainstate/ ---
+	log.infof("Opening chainstate LevelDB...")
 	cs_opts := leveldb_options_create()
 	leveldb_options_set_create_if_missing(cs_opts, 1)
 	leveldb_options_set_compression(cs_opts, 0)
@@ -66,8 +67,10 @@ ldb_open :: proc(data_dir: string, db_cache_mb: int = 450) -> (store: LDB_Store,
 		return store, .IO_Error
 	}
 	leveldb_options_destroy(cs_opts)
+	log.infof("Chainstate LevelDB opened")
 
 	// --- Open block index DB: <datadir>/blocks/index/ ---
+	log.infof("Opening block index LevelDB...")
 	idx_opts := leveldb_options_create()
 	leveldb_options_set_create_if_missing(idx_opts, 1)
 	leveldb_options_set_compression(idx_opts, 0)
@@ -96,6 +99,7 @@ ldb_open :: proc(data_dir: string, db_cache_mb: int = 450) -> (store: LDB_Store,
 		return store, .IO_Error
 	}
 	leveldb_options_destroy(idx_opts)
+	log.infof("Block index LevelDB opened")
 
 	return store, .None
 }
