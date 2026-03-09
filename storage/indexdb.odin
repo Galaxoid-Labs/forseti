@@ -1,6 +1,7 @@
 package storage
 
 import "core:c"
+import "core:log"
 
 Block_Status_Flag :: enum u8 {
 	Has_Data,
@@ -44,12 +45,29 @@ Index_DB :: struct {
 // Initialize index database, loading all records from LevelDB into memory.
 index_db_init :: proc(store: ^LDB_Store, allocator := context.allocator) -> (db: Index_DB, err: Storage_Error) {
 	db.store = store
-	db.records = make(map[Hash256]Block_Index_Record, 1024, allocator)
 
-	// Load all records via iterator scan
+	// First pass: count records so we can pre-allocate the map.
+	log.infof("Scanning block index...")
 	iter := leveldb_create_iterator(store.index_db, store.read_opts)
+
+	count := 0
+	leveldb_iter_seek_to_first(iter)
+	for leveldb_iter_valid(iter) != 0 {
+		count += 1
+		leveldb_iter_next(iter)
+	}
+	leveldb_iter_destroy(iter)
+
+	log.infof("Found %d block index records, loading...", count)
+
+	// Pre-allocate map to avoid repeated resizing (1024 → 861k = ~10 rehashes).
+	db.records = make(map[Hash256]Block_Index_Record, max(count * 2, 1024), allocator)
+
+	// Second pass: load records.
+	iter = leveldb_create_iterator(store.index_db, store.read_opts)
 	defer leveldb_iter_destroy(iter)
 
+	loaded := 0
 	leveldb_iter_seek_to_first(iter)
 	for leveldb_iter_valid(iter) != 0 {
 		vlen: c.size_t
@@ -59,10 +77,12 @@ index_db_init :: proc(store: ^LDB_Store, allocator := context.allocator) -> (db:
 			rec, ok := _deserialize_index_record(data)
 			if ok {
 				db.records[rec.hash] = rec
+				loaded += 1
 			}
 		}
 		leveldb_iter_next(iter)
 	}
+	log.infof("Loaded %d block index records", loaded)
 
 	return db, .None
 }

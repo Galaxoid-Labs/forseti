@@ -100,9 +100,9 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	}
 	cs.undo_files = undo_files
 
-	// Build in-memory block index
-	cs.block_index = block_index_init()
-	log.infof("Loading block index from LevelDB (%d records)...", len(cs.index_db.records))
+	// Build in-memory block index — pre-allocate maps to avoid rehashing.
+	cs.block_index = block_index_init(capacity = len(cs.index_db.records) * 2)
+	log.infof("Building block index (%d records)...", len(cs.index_db.records))
 	block_index_load(&cs.block_index, &cs.index_db)
 	log.infof("Block index loaded: %d entries, best header height %d",
 		len(cs.block_index.entries),

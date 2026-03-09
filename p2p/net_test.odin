@@ -20,7 +20,7 @@ _hex :: proc(s: string) -> []u8 {
 _make_test_chain_state :: proc(t: ^testing.T, num_blocks: int) -> (^chain.Chain_State, bool) {
 	cs := new(chain.Chain_State, context.temp_allocator)
 	cs.params = &consensus.REGTEST_PARAMS
-	cs.block_index = chain.block_index_init(context.temp_allocator)
+	cs.block_index = chain.block_index_init(allocator = context.temp_allocator)
 	cs.active_chain = make([dynamic]Hash256, 0, num_blocks + 1, context.temp_allocator)
 
 	// Genesis block.

@@ -35,10 +35,10 @@ Block_Index :: struct {
 	allocator:   mem.Allocator,
 }
 
-block_index_init :: proc(allocator := context.allocator) -> Block_Index {
+block_index_init :: proc(capacity: int = 1024, allocator := context.allocator) -> Block_Index {
 	idx: Block_Index
-	idx.entries = make(map[Hash256]^Block_Index_Entry, 1024, allocator)
-	idx.by_prev = make(map[Hash256]^Block_Index_Entry, 1024, allocator)
+	idx.entries = make(map[Hash256]^Block_Index_Entry, max(capacity, 1024), allocator)
+	idx.by_prev = make(map[Hash256]^Block_Index_Entry, max(capacity, 1024), allocator)
 	idx.allocator = allocator
 	return idx
 }
