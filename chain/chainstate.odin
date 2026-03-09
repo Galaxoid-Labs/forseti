@@ -43,6 +43,7 @@ Chain_State :: struct {
 Block_Profile :: struct {
 	blocks:      int,          // blocks since last log
 	t_read:      time.Duration, // disk read + deserialize
+	t_prefetch:  time.Duration, // UTXO prefetch (parallel LevelDB reads)
 	t_txid:      time.Duration, // txid computation
 	t_utxo:      time.Duration, // Phase 1: UTXO lookups + spends + adds
 	t_scripts:   time.Duration, // Phase 2: script verification
@@ -935,6 +936,14 @@ connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 =
 		}
 		cs.prof.t_read += time.tick_diff(t_read_start, time.tick_now())
 
+		// Prefetch UTXOs: parallel LevelDB reads to warm coins cache.
+		// Reuses the script verification thread pool (idle under assumevalid).
+		if cs.script_threads >= 2 {
+			t_pf_start := time.tick_now()
+			_prefetch_block_utxos(cs, &block, block_alloc)
+			cs.prof.t_prefetch += time.tick_diff(t_pf_start, time.tick_now())
+		}
+
 		cerr := connect_block(cs, &block, next_entry, txids)
 		if cerr != .None {
 			if cerr == .Storage_Error {
@@ -959,20 +968,22 @@ connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 =
 		// Log profiling data every 1000 blocks.
 		if cs.prof.blocks >= 1000 {
 			p := &cs.prof
-			// Wall time = read (disk+deserialize+txid) + connect_block phases.
-			wall_ms := time.duration_milliseconds(p.t_read + p.t_total)
+			// Wall time = read + prefetch + connect_block phases.
+			wall_ms := time.duration_milliseconds(p.t_read + p.t_prefetch + p.t_total)
 			if wall_ms > 0 {
-				read_ms    := time.duration_milliseconds(p.t_read)
-				valid_ms   := time.duration_milliseconds(p.t_txid) // check_block + txid (near-zero with precomputed)
-				utxo_ms    := time.duration_milliseconds(p.t_utxo)
-				scripts_ms := time.duration_milliseconds(p.t_scripts)
-				undo_ms    := time.duration_milliseconds(p.t_undo)
-				index_ms   := time.duration_milliseconds(p.t_index)
+				read_ms     := time.duration_milliseconds(p.t_read)
+				prefetch_ms := time.duration_milliseconds(p.t_prefetch)
+				valid_ms    := time.duration_milliseconds(p.t_txid) // check_block + txid (near-zero with precomputed)
+				utxo_ms     := time.duration_milliseconds(p.t_utxo)
+				scripts_ms  := time.duration_milliseconds(p.t_scripts)
+				undo_ms     := time.duration_milliseconds(p.t_undo)
+				index_ms    := time.duration_milliseconds(p.t_index)
 				log.infof(
-					"PROFILE %d blks @ height %d: wall=%.0fms (%.1fms/blk) | read=%.0fms (%.0f%%) valid=%.0fms (%.0f%%) utxo=%.0fms (%.0f%%) scripts=%.0fms (%.0f%%) undo=%.0fms (%.0f%%) index=%.0fms (%.0f%%)",
+					"PROFILE %d blks @ height %d: wall=%.0fms (%.1fms/blk) | read=%.0fms (%.0f%%) prefetch=%.0fms (%.0f%%) valid=%.0fms (%.0f%%) utxo=%.0fms (%.0f%%) scripts=%.0fms (%.0f%%) undo=%.0fms (%.0f%%) index=%.0fms (%.0f%%)",
 					p.blocks, next_entry.height,
 					wall_ms, wall_ms / f64(p.blocks),
 					read_ms, read_ms / wall_ms * 100,
+					prefetch_ms, prefetch_ms / wall_ms * 100,
 					valid_ms, valid_ms / wall_ms * 100,
 					utxo_ms, utxo_ms / wall_ms * 100,
 					scripts_ms, scripts_ms / wall_ms * 100,
@@ -982,6 +993,7 @@ connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 =
 			}
 			p.blocks = 0
 			p.t_read = {}
+			p.t_prefetch = {}
 			p.t_txid = {}
 			p.t_utxo = {}
 			p.t_scripts = {}
@@ -992,6 +1004,47 @@ connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 =
 	}
 
 	return connected, .None
+}
+
+// Prefetch a block's input UTXOs from LevelDB in parallel to warm the coins cache.
+// Collects all input outpoints not already cached, dispatches parallel LevelDB reads
+// across the script verification thread pool, then merges results into the cache.
+_prefetch_block_utxos :: proc(cs: ^Chain_State, block: ^wire.Block, block_alloc: mem.Allocator) {
+	// Count total non-coinbase inputs.
+	total_inputs := 0
+	for tx_idx in 0 ..< len(block.txs) {
+		if consensus.is_coinbase_tx(&block.txs[tx_idx]) { continue }
+		total_inputs += len(block.txs[tx_idx].inputs)
+	}
+
+	if total_inputs < PARALLEL_THRESHOLD {
+		return
+	}
+
+	// Collect outpoints not already in the cache.
+	outpoints := make([dynamic]wire.Outpoint, 0, total_inputs, block_alloc)
+	for tx_idx in 0 ..< len(block.txs) {
+		tx := block.txs[tx_idx]
+		if consensus.is_coinbase_tx(&tx) { continue }
+		for in_idx in 0 ..< len(tx.inputs) {
+			op := tx.inputs[in_idx].previous_output
+			if op not_in cs.coins.cache {
+				append(&outpoints, op)
+			}
+		}
+	}
+
+	if len(outpoints) == 0 {
+		return
+	}
+
+	items := prefetch_utxos_parallel(cs, &cs.verify_pool, outpoints[:], block_alloc)
+	if items != nil {
+		merged := coins_cache_prefetch_merge(&cs.coins, items)
+		if merged > 0 {
+			log.debugf("Prefetched %d/%d UTXOs (%d cache misses)", merged, total_inputs, len(outpoints))
+		}
+	}
 }
 
 // Roll back UTXO cache changes from a partially-applied block.

@@ -5,6 +5,7 @@ import "core:mem"
 import "core:sync"
 import "core:thread"
 import "../script"
+import "../storage"
 import "../wire"
 
 // Minimum number of checks before using parallel verification.
@@ -158,6 +159,101 @@ verify_checks_parallel :: proc(
 	}
 
 	return .None
+}
+
+// --- UTXO Prefetch: parallel LevelDB reads to warm coins cache ---
+
+// A single UTXO prefetch result (one outpoint).
+Prefetch_Item :: struct {
+	outpoint: wire.Outpoint,
+	coin:     storage.UTXO_Coin,
+	found:    bool,
+}
+
+// Task data for a prefetch worker thread.
+Prefetch_Task :: struct {
+	items: []Prefetch_Item,   // slice into shared items array
+	db:    ^storage.UTXO_DB,
+	cs:    ^Chain_State,      // for arena pool access
+	wg:    ^sync.Wait_Group,
+}
+
+// Thread pool worker: reads UTXOs from LevelDB for a batch of outpoints.
+// Scripts are allocated with the heap allocator (they'll live in coins_cache).
+prefetch_worker :: proc(task: thread.Task) {
+	pt := cast(^Prefetch_Task)task.data
+
+	// Acquire a pre-allocated arena buffer for temp allocations (ldb_get internals).
+	arena_buf := _arena_pool_acquire(pt.cs)
+	defer _arena_pool_release(pt.cs, arena_buf)
+
+	arena: mem.Arena
+	mem.arena_init(&arena, arena_buf)
+	alloc := mem.arena_allocator(&arena)
+	context.temp_allocator = alloc
+
+	for i in 0 ..< len(pt.items) {
+		// Scripts go to heap (context.allocator) since they'll be owned by coins_cache.
+		coin, found := storage.utxo_db_get(pt.db, pt.items[i].outpoint)
+		pt.items[i].coin = coin
+		pt.items[i].found = found
+
+		// Reset arena periodically to avoid exhaustion on large batches.
+		if (i + 1) % 256 == 0 {
+			mem.arena_free_all(&arena)
+		}
+	}
+
+	sync.wait_group_done(pt.wg)
+}
+
+// Dispatch parallel UTXO prefetch across worker threads.
+// Caller provides outpoints not already in the coins cache.
+// Returns prefetched items (caller should merge into cache).
+prefetch_utxos_parallel :: proc(
+	cs: ^Chain_State,
+	pool: ^thread.Pool,
+	outpoints: []wire.Outpoint,
+	allocator := context.allocator,
+) -> []Prefetch_Item {
+	n := len(outpoints)
+	if n == 0 {
+		return nil
+	}
+
+	items := make([]Prefetch_Item, n, allocator)
+	for i in 0 ..< n {
+		items[i].outpoint = outpoints[i]
+	}
+
+	num_workers := cs.script_threads
+	if num_workers > n {
+		num_workers = n
+	}
+
+	// Partition items across workers.
+	tasks := make([]Prefetch_Task, num_workers, allocator)
+	chunk_size := n / num_workers
+	remainder := n % num_workers
+
+	wg: sync.Wait_Group
+	sync.wait_group_add(&wg, num_workers)
+
+	offset := 0
+	for w in 0 ..< num_workers {
+		sz := chunk_size + (1 if w < remainder else 0)
+		tasks[w] = Prefetch_Task{
+			items = items[offset:][:sz],
+			db    = &cs.utxo_db,
+			cs    = cs,
+			wg    = &wg,
+		}
+		thread.pool_add_task(pool, context.allocator, prefetch_worker, &tasks[w])
+		offset += sz
+	}
+
+	sync.wait_group_wait(&wg)
+	return items
 }
 
 // Serial fallback: verify all checks using the Chain_State's verify arena.

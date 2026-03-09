@@ -266,6 +266,28 @@ coins_cache_should_flush :: proc(cc: ^Coins_Cache) -> bool {
 	return cc.mem_usage >= cc.budget
 }
 
+// Merge prefetched UTXO results into the cache (read-only warming).
+// Entries are inserted as clean (not Dirty, not Fresh) — identical to a normal
+// cache-miss read in coins_cache_get. Scripts are heap-allocated by workers.
+// Frees scripts for items that can't be merged (duplicates or already cached).
+coins_cache_prefetch_merge :: proc(cc: ^Coins_Cache, items: []Prefetch_Item) -> int {
+	merged := 0
+	for &item in items {
+		if !item.found { continue }
+		if item.outpoint in cc.cache {
+			// Already in cache — free the heap-allocated script.
+			if len(item.coin.script) > 0 {
+				delete(item.coin.script)
+			}
+			continue
+		}
+		cc.cache[item.outpoint] = Cache_Entry{coin = item.coin, flags = {}}
+		cc.mem_usage += CACHE_ENTRY_OVERHEAD + len(item.coin.script)
+		merged += 1
+	}
+	return merged
+}
+
 // A spent sentinel is a zeroed coin marked Dirty (but not Fresh).
 _is_spent_sentinel :: proc(entry: ^Cache_Entry) -> bool {
 	return entry.coin.amount == 0 &&

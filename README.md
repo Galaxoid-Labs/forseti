@@ -33,7 +33,7 @@ This is an educational/experimental project implementing 33 BIPs. It covers the 
 | 20 | Control + Raw Transaction RPCs | Complete |
 | 21 | Testnet4 Support (BIP94) | Complete |
 | 22 | Testnet3 Fixes (BIP16 activation, lax DER, difficulty) | Complete |
-| 23 | Mainnet Sync (BIP30, adaptive stall detection, peer management) | Complete |
+| 23 | Mainnet Sync (BIP30, stall detection, peer management) | Complete |
 | 24 | Assumevalid + Txid Optimization | Complete |
 | 25 | nbio Async I/O Migration | Complete |
 | 26 | Cross-thread RPC Relay Safety | Complete |
@@ -49,6 +49,7 @@ This is an educational/experimental project implementing 33 BIPs. It covers the 
 | 36 | BIP 324 v2 Encrypted Transport | Complete |
 | 37 | BIP 157/158 Compact Block Filters | Complete |
 | 38 | Inbound P2P Connections + Core 28 Parity | Complete |
+| 39 | UTXO Prefetch (Parallel LevelDB Reads) | Complete |
 
 ## Dependencies
 
@@ -498,13 +499,14 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **V2 encrypted transport (BIP324)**: Optional encrypted P2P via `--v2transport`. ElligatorSwift ECDH key exchange (libsecp256k1), FSChaCha20 length encryption + FSChaCha20Poly1305 AEAD packet encryption with 2^24 rekey interval, HKDF-SHA256 key derivation. V2 transport state machine handles handshake (ell64 exchange → garbage terminator → version packet with garbage AAD → active). 28 short command IDs for bandwidth efficiency. Automatic v1 fallback: 5-second handshake timeout, v1 magic byte detection on first wire byte, per-address tracking to skip v2 on reconnect
 - **Compact block filters (BIP157/158)**: Optional `--blockfilterindex` builds GCS (Golomb-coded set) basic filters during block connection. Filters are stored in a dedicated LevelDB instance (`<datadir>/filters/`). P2P serves `getcfilters`, `getcfheaders`, and `getcfcheckpt` requests. `getblockfilter` RPC returns the filter for a given block hash. `NODE_COMPACT_FILTERS` service bit advertised when enabled
 - **Steady-state sync**: BIP130 `sendheaders` for header announcements, periodic `getheaders` polling (120s), and `inv`-triggered header requests keep the node up-to-date after IBD
-- **Adaptive stall detection**: Bitcoin Core-style stall handling — default 10s timeout, doubles on disconnect (max 64s), decays by 0.85x on successful block connects. Slow peers (throughput <10% of fastest) are evicted after a trial period. Disconnected peers are replaced via DNS discovery
+- **Stall detection**: 10s flat timeout — peers that can't deliver a block in time are replaced. Slow peers (throughput <10% of fastest) are evicted after a trial period. Disconnected peers are replaced via DNS discovery
 - **Inbound connections**: TCP listener accepts inbound P2P connections (Bitcoin Core 28 defaults: 125 total = 8 outbound + 116 inbound + 1 reserved). Inbound listener is deferred until sync completes to avoid wasting event loop cycles during IBD. V2 encrypted transport works in both initiator (outbound) and responder (inbound) modes. Inbound V1 fallback is in-place (feeds buffered bytes back to V1 parser, no reconnect). `--listen=0` disables inbound. `--maxconnections=N` controls total budget. `NODE_P2P_V2` (bit 11) advertised in service flags when v2 transport is enabled
 - **Peer discovery + addr relay (BIP155)**: DNS seeds populate an address manager at startup. After handshake, `sendaddrv2` is negotiated and `getaddr` requests peers' address lists. Inbound `addr`/`addrv2` messages add to the address manager (FNV-1a dedup, 5000 entry cap). Small announcements (≤10 entries) are forwarded to 1-2 random peers with automatic v1↔v2 format conversion. Replacement peers are drawn from the address manager
 - **Write-back UTXO cache**: In-memory cache with dirty/fresh flags, flushed atomically to LevelDB when memory usage exceeds the configurable budget (`--dbcache`, default 450 MiB). Rollback support for failed block validation
 - **Block index**: In-memory tree with skip list pointers for O(log n) ancestor lookup, persisted to LevelDB. `by_prev` index provides O(1) next-block lookup for chain traversal
 - **Sighash caching**: BIP143 (SegWit v0) and BIP341 (Taproot) intermediate hashes are cached per-transaction, avoiding O(n^2) re-computation for transactions with many inputs
 - **Parallel script verification**: Two-phase block validation — Phase 1 processes UTXO updates sequentially (single-threaded, no locking), Phase 2 dispatches all script checks to a persistent thread pool (`--par=N`). Sighash caches are eagerly pre-computed before dispatch so workers read immutable data without synchronization. Serial fallback for small blocks (<16 inputs) or `--par=1`. Workers use pre-allocated 8MB arena buffers from a mutex-protected pool (avoids per-check heap allocation)
+- **UTXO prefetch**: Before connecting each block, input outpoints not already in the coins cache are collected and read from LevelDB in parallel across the script verification thread pool. This converts sequential LevelDB reads into parallel reads, warming the cache so Phase 1 gets map lookups instead of disk I/O. Especially impactful below assumevalid where the thread pool would otherwise be idle
 - **Per-input verification arena**: A 4MB heap-allocated scratch arena is reset between each input's script verification (serial path), preventing sighash writer accumulation from exhausting the 64MB block arena on large transactions
 - **Mempool configuration**: 16 configurable settings matching Bitcoin Core defaults — memory-based size limiting (`--maxmempool`, default 300 MB) with fee-based eviction and dynamic minimum fee, transaction expiry (`--mempoolexpiry`, default 336 hours), ancestor/descendant chain limits (count and size), configurable relay/dust/incremental fees, datacarrier toggle, bare multisig toggle, blocks-only mode (`--blocksonly`), and optional persistence (`--persistmempool`). All settings supported via CLI flags and `btcnode.conf`
 - **Memory-based mempool limiting**: Tracks total vsize of all entries. When usage exceeds the limit, lowest fee-rate transactions are evicted and the dynamic minimum fee (`mempoolminfee` in `getmempoolinfo`) is raised. Resets when usage drops below the limit after a block connect
@@ -516,7 +518,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Configurable DB cache**: `--dbcache` controls total database memory (default 450 MiB), split following Bitcoin Core's algorithm — small LevelDB caches (2-8 MiB), large in-memory coins cache (~440 MiB). Lower values reduce RAM usage at the cost of more frequent UTXO flushes during sync
 - **Assumevalid**: Skips script verification below a network-specific height (mainnet=880,000, signet=267,665, testnet3=2,100,000, testnet4=200,000). Configurable via `--assumevalid=<height>` (0 disables)
 - **Zero-allocation txid computation**: Transaction IDs are computed from raw stream bytes during block deserialization — non-witness txs hash raw bytes directly, witness txs use incremental `sha256d_multi` (no memory allocation). Pre-computed txids are passed through `connect_block` → `check_block` (Merkle root), eliminating redundant re-serialization. Reduced `connect_block` time by ~23% at mainnet height 360k
-- **Block profiling**: Timing instrumentation logs per-phase breakdown every 1000 blocks (read, validation, UTXO, scripts, undo, index) for bottleneck identification
+- **Block profiling**: Timing instrumentation logs per-phase breakdown every 1000 blocks (read, prefetch, validation, UTXO, scripts, undo, index) for bottleneck identification
 - **No external Odin dependencies**: Only `core:` and `base:` standard library packages
 
 ## Supported BIPs
