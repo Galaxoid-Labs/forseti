@@ -102,7 +102,11 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 
 	// Build in-memory block index
 	cs.block_index = block_index_init()
+	log.infof("Loading block index from LevelDB (%d records)...", len(cs.index_db.records))
 	block_index_load(&cs.block_index, &cs.index_db)
+	log.infof("Block index loaded: %d entries, best header height %d",
+		len(cs.block_index.entries),
+		cs.block_index.best_header != nil ? cs.block_index.best_header.height : 0)
 
 	// Free the redundant in-memory records map — all data is now in block_index.entries.
 	storage.index_db_clear_records(&cs.index_db)
@@ -122,6 +126,7 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	_recover_from_meta(cs)
 
 	_rebuild_active_chain(cs)
+	log.infof("Active chain rebuilt: %d blocks", len(cs.active_chain))
 
 	// Compute cumulative chain_tx for the active chain
 	_compute_chain_tx(cs)
@@ -147,6 +152,7 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	}
 
 	// Connect any stored-but-not-connected blocks from a previous session.
+	log.infof("Connecting pending blocks (if any)...")
 	pending_connected, _ := connect_pending_blocks(cs)
 	if pending_connected > 0 {
 		_, tip_height := chain_tip(cs)
