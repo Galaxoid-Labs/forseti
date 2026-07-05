@@ -107,6 +107,15 @@ sync_add_peer :: proc(sm: ^Sync_Manager, peer_id: Peer_Id) {
 	append(&sm.peer_rr_list, peer_id)
 }
 
+// Whether our header chain already covers the best peer's advertised height.
+// Peers that advertise start_height <= 0 (crawlers, spy nodes, misconfigured
+// peers) must never convince a fresh node it is synced — without the
+// best_peer_height > 0 guard, the first such peer to finish its handshake
+// wedged a fresh node In_Sync at height 0 and header sync never started.
+_headers_up_to_date :: proc(our_best_header: int, best_peer_height: i32) -> bool {
+	return best_peer_height > 0 && our_best_header >= int(best_peer_height)
+}
+
 // Start header sync by racing all active peers. The fastest responder
 // becomes the lead peer for the remainder of header download.
 sync_start_header_sync :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) -> Peer_Id {
@@ -128,7 +137,7 @@ sync_start_header_sync :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) -> 
 	}
 
 	// If we already have headers up to or beyond the best peer's height, skip to block download.
-	if sm.best_header_height >= int(best_height) {
+	if _headers_up_to_date(sm.best_header_height, best_height) {
 		log.infof("Headers already up to date (height %d). Building download queue...", sm.best_header_height)
 		_build_download_queue(sm)
 		if len(sm.blocks_to_download) == 0 {

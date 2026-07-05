@@ -1063,3 +1063,19 @@ test_wire_bloom_filter_commands :: proc(t: ^testing.T) {
 		testing.expect(t, back == cmd, fmt.tprintf("command %s should roundtrip", cmd))
 	}
 }
+
+@(test)
+test_headers_up_to_date_ignores_zero_start_height :: proc(t: ^testing.T) {
+	// Regression: first mainnet peer advertised start_height=0, convincing a
+	// fresh node (best header 0) it was In_Sync at genesis — header sync never
+	// started. Peers reporting height <= 0 must not count as "we are synced".
+	testing.expect(t, !_headers_up_to_date(0, 0), "fresh node + zero-height peer must NOT be up to date")
+	testing.expect(t, !_headers_up_to_date(0, -1), "negative peer height must NOT be up to date")
+	testing.expect(t, !_headers_up_to_date(0, 900_000), "fresh node behind real peer is not up to date")
+	testing.expect(t, !_headers_up_to_date(899_999, 900_000), "one header behind is not up to date")
+	testing.expect(t, _headers_up_to_date(900_000, 900_000), "equal heights are up to date")
+	testing.expect(t, _headers_up_to_date(900_001, 900_000), "ahead of peer is up to date")
+	// A synced node among only zero-height peers: no shortcut taken; the
+	// getheaders race runs instead, which is harmless.
+	testing.expect(t, !_headers_up_to_date(900_000, 0), "zero-height peers never trigger the shortcut")
+}
