@@ -31,7 +31,7 @@ _remove_dir_contents :: proc(dir: string) {
 	if derr != nil do return
 	defer os.close(dh)
 
-	entries, _ := os.read_dir(dh, -1)
+	entries, _ := os.read_dir(dh, -1, context.allocator)
 	defer {
 		for &entry in entries {
 			delete(entry.fullpath)
@@ -39,7 +39,7 @@ _remove_dir_contents :: proc(dir: string) {
 		delete(entries)
 	}
 	for entry in entries {
-		if entry.is_dir {
+		if entry.type == .Directory {
 			_remove_dir_contents(entry.fullpath)
 			os.remove(entry.fullpath)
 		} else {

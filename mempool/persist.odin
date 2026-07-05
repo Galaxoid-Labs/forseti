@@ -18,7 +18,7 @@ mempool_save :: proc(mp: ^Mempool, data_dir: string) -> bool {
 	tmp_path := fmt.tprintf("%s/mempool.dat.tmp", data_dir)
 	final_path := fmt.tprintf("%s/mempool.dat", data_dir)
 
-	fd, ferr := os.open(tmp_path, os.O_WRONLY | os.O_CREATE | os.O_TRUNC, 0o644)
+	fd, ferr := os.open(tmp_path, os.O_WRONLY | os.O_CREATE | os.O_TRUNC, os.Permissions_Read_All + {.Write_User})
 	if ferr != nil {
 		log.warnf("Failed to open %s for writing: %v", tmp_path, ferr)
 		return false
@@ -68,8 +68,8 @@ mempool_load :: proc(mp: ^Mempool, data_dir: string) -> (loaded: int, skipped: i
 		return 0, 0
 	}
 
-	data, ok := os.read_entire_file(path, context.temp_allocator)
-	if !ok {
+	data, read_err := os.read_entire_file(path, context.temp_allocator)
+	if read_err != nil {
 		log.warnf("Failed to read %s", path)
 		return 0, 0
 	}
@@ -155,7 +155,7 @@ mempool_load :: proc(mp: ^Mempool, data_dir: string) -> (loaded: int, skipped: i
 
 // --- File I/O helpers ---
 
-_write_u64le :: proc(fd: os.Handle, val: u64) -> bool {
+_write_u64le :: proc(fd: ^os.File, val: u64) -> bool {
 	buf: [8]byte
 	buf[0] = byte(val)
 	buf[1] = byte(val >> 8)
@@ -169,11 +169,11 @@ _write_u64le :: proc(fd: os.Handle, val: u64) -> bool {
 	return err == nil
 }
 
-_write_i64le :: proc(fd: os.Handle, val: i64) -> bool {
+_write_i64le :: proc(fd: ^os.File, val: i64) -> bool {
 	return _write_u64le(fd, transmute(u64)val)
 }
 
-_write_u32le :: proc(fd: os.Handle, val: u32) -> bool {
+_write_u32le :: proc(fd: ^os.File, val: u32) -> bool {
 	buf: [4]byte
 	buf[0] = byte(val)
 	buf[1] = byte(val >> 8)
@@ -183,7 +183,7 @@ _write_u32le :: proc(fd: os.Handle, val: u32) -> bool {
 	return err == nil
 }
 
-_write_bytes :: proc(fd: os.Handle, data: []byte) -> bool {
+_write_bytes :: proc(fd: ^os.File, data: []byte) -> bool {
 	if len(data) == 0 {
 		return true
 	}

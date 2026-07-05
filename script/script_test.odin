@@ -869,8 +869,8 @@ test_signet_250058_tx11_p2wpkh :: proc(t: ^testing.T) {
 	// Read raw tx hex from test data file (relative to source location)
 	src_dir := #location().file_path
 	base_dir := src_dir[:strings.last_index(src_dir, "/")]
-	tx_hex_raw, tx_ok := os.read_entire_file(fmt.tprintf("%s/testdata/signet_250058_tx11.hex", base_dir))
-	if !tx_ok {
+	tx_hex_raw, tx_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/signet_250058_tx11.hex", base_dir), context.allocator)
+	if tx_read_err != nil {
 		testing.expect(t, false, "failed to read testdata/signet_250058_tx11.hex")
 		return
 	}
@@ -896,8 +896,8 @@ test_signet_250058_tx11_p2wpkh :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(tx.witness), 996)
 
 	// Read prevout data
-	prevout_raw, prev_ok := os.read_entire_file(fmt.tprintf("%s/testdata/signet_250058_tx11_prevouts.txt", base_dir))
-	if !prev_ok {
+	prevout_raw, prev_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/signet_250058_tx11_prevouts.txt", base_dir), context.allocator)
+	if prev_read_err != nil {
 		testing.expect(t, false, "failed to read prevouts file")
 		return
 	}
@@ -982,8 +982,8 @@ test_signet_2148_tx1_two_phase :: proc(t: ^testing.T) {
 
 	src_dir := #location().file_path
 	base_dir := src_dir[:strings.last_index(src_dir, "/")]
-	tx_hex_raw, tx_ok := os.read_entire_file(fmt.tprintf("%s/testdata/signet_2148_tx1.hex", base_dir))
-	if !tx_ok {
+	tx_hex_raw, tx_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/signet_2148_tx1.hex", base_dir), context.allocator)
+	if tx_read_err != nil {
 		testing.expect(t, false, "failed to read testdata/signet_2148_tx1.hex")
 		return
 	}
@@ -1008,8 +1008,8 @@ test_signet_2148_tx1_two_phase :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(tx.witness), 400)
 
 	// Read prevout data
-	prevout_raw, prev_ok := os.read_entire_file(fmt.tprintf("%s/testdata/signet_2148_tx1_prevouts.txt", base_dir))
-	if !prev_ok {
+	prevout_raw, prev_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/signet_2148_tx1_prevouts.txt", base_dir), context.allocator)
+	if prev_read_err != nil {
 		testing.expect(t, false, "failed to read prevouts file")
 		return
 	}
@@ -1094,8 +1094,8 @@ test_signet_90719_tapscript_codeseparator :: proc(t: ^testing.T) {
 
 	src_dir := #location().file_path
 	base_dir := src_dir[:strings.last_index(src_dir, "/")]
-	tx_hex_raw, tx_ok := os.read_entire_file(fmt.tprintf("%s/testdata/signet_90719_tx9.hex", base_dir))
-	if !tx_ok {
+	tx_hex_raw, tx_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/signet_90719_tx9.hex", base_dir), context.allocator)
+	if tx_read_err != nil {
 		testing.expect(t, false, "failed to read testdata/signet_90719_tx9.hex")
 		return
 	}
@@ -1121,8 +1121,8 @@ test_signet_90719_tapscript_codeseparator :: proc(t: ^testing.T) {
 	testing.expect(t, len(tx.witness[0]) == 5, "expected 5 witness items (3 sigs + script + control)")
 
 	// Read prevout data
-	prevout_raw, prev_ok := os.read_entire_file(fmt.tprintf("%s/testdata/signet_90719_tx9_prevouts.txt", base_dir))
-	if !prev_ok {
+	prevout_raw, prev_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/signet_90719_tx9_prevouts.txt", base_dir), context.allocator)
+	if prev_read_err != nil {
 		testing.expect(t, false, "failed to read prevouts file")
 		return
 	}
@@ -1357,8 +1357,8 @@ test_testnet4_100497_p2pkh_large :: proc(t: ^testing.T) {
 
 	src_dir := #location().file_path
 	base_dir := src_dir[:strings.last_index(src_dir, "/")]
-	tx_hex_raw, tx_ok := os.read_entire_file(fmt.tprintf("%s/testdata/testnet4_100497_tx27.hex", base_dir))
-	if !tx_ok {
+	tx_hex_raw, tx_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/testnet4_100497_tx27.hex", base_dir), context.allocator)
+	if tx_read_err != nil {
 		testing.expect(t, false, "failed to read testdata/testnet4_100497_tx27.hex")
 		return
 	}
@@ -1382,8 +1382,8 @@ test_testnet4_100497_p2pkh_large :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(tx.outputs), 10001)
 
 	// Read prevout data
-	prevout_raw, prev_ok := os.read_entire_file(fmt.tprintf("%s/testdata/testnet4_100497_tx27_prevouts.txt", base_dir))
-	if !prev_ok {
+	prevout_raw, prev_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/testnet4_100497_tx27_prevouts.txt", base_dir), context.allocator)
+	if prev_read_err != nil {
 		testing.expect(t, false, "failed to read prevouts file")
 		return
 	}
@@ -1433,8 +1433,8 @@ test_testnet4_118555_bare_script :: proc(t: ^testing.T) {
 
 	src_dir := #location().file_path
 	base_dir := src_dir[:strings.last_index(src_dir, "/")]
-	tx_hex_raw, tx_ok := os.read_entire_file(fmt.tprintf("%s/testdata/testnet4_118555_tx3.hex", base_dir))
-	if !tx_ok {
+	tx_hex_raw, tx_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/testnet4_118555_tx3.hex", base_dir), context.allocator)
+	if tx_read_err != nil {
 		testing.expect(t, false, "failed to read testdata/testnet4_118555_tx3.hex")
 		return
 	}
@@ -1458,8 +1458,8 @@ test_testnet4_118555_bare_script :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(tx.outputs), 1)
 
 	// Read prevout data (2 lines, one per input)
-	prevout_raw, prev_ok := os.read_entire_file(fmt.tprintf("%s/testdata/testnet4_118555_tx3_prevouts.txt", base_dir))
-	if !prev_ok {
+	prevout_raw, prev_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/testnet4_118555_tx3_prevouts.txt", base_dir), context.allocator)
+	if prev_read_err != nil {
 		testing.expect(t, false, "failed to read prevouts file")
 		return
 	}
@@ -1514,8 +1514,8 @@ test_testnet3_26860_p2pkh :: proc(t: ^testing.T) {
 	src_dir := #location().file_path
 	base_dir := src_dir[:strings.last_index(src_dir, "/")]
 
-	tx_hex_raw, tx_ok := os.read_entire_file(fmt.tprintf("%s/testdata/testnet3_26860_tx1.hex", base_dir))
-	if !tx_ok {
+	tx_hex_raw, tx_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/testnet3_26860_tx1.hex", base_dir), context.allocator)
+	if tx_read_err != nil {
 		testing.expect(t, false, "failed to read testdata/testnet3_26860_tx1.hex")
 		return
 	}
@@ -1539,8 +1539,8 @@ test_testnet3_26860_p2pkh :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(tx.outputs), 2)
 
 	// Prevout: 8750000000 sats, P2PKH
-	prevout_raw, prev_ok := os.read_entire_file(fmt.tprintf("%s/testdata/testnet3_26860_tx1_prevouts.txt", base_dir))
-	if !prev_ok {
+	prevout_raw, prev_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/testnet3_26860_tx1_prevouts.txt", base_dir), context.allocator)
+	if prev_read_err != nil {
 		testing.expect(t, false, "failed to read prevouts")
 		return
 	}

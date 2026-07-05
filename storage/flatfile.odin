@@ -17,7 +17,7 @@ Flat_File_Manager :: struct {
 	prefix:       string, // "blk" or "rev"
 	current_file: u32,
 	current_pos:  u32,
-	fd:           os.Handle,
+	fd:           ^os.File,
 }
 
 // Build path like "data_dir/blk00042.dat" into caller-provided buffer.
@@ -32,7 +32,7 @@ flat_file_open :: proc(data_dir: string, prefix: string) -> (mgr: Flat_File_Mana
 	mgr.prefix = prefix
 	mgr.current_file = 0
 	mgr.current_pos = 0
-	mgr.fd = os.INVALID_HANDLE
+	mgr.fd = nil
 
 	// Scan existing files to find the last one
 	path_buf: [512]byte
@@ -67,9 +67,9 @@ flat_file_open :: proc(data_dir: string, prefix: string) -> (mgr: Flat_File_Mana
 
 // Close the open file descriptor.
 flat_file_close :: proc(mgr: ^Flat_File_Manager) {
-	if mgr.fd != os.INVALID_HANDLE {
+	if mgr.fd != nil {
 		os.close(mgr.fd)
-		mgr.fd = os.INVALID_HANDLE
+		mgr.fd = nil
 	}
 }
 
@@ -138,7 +138,7 @@ _open_current :: proc(mgr: ^Flat_File_Manager) -> Storage_Error {
 	path_buf: [512]byte
 	path := flat_file_path(mgr, mgr.current_file, path_buf[:])
 
-	fd, err := os.open(path, os.O_WRONLY | os.O_CREATE, 0o644)
+	fd, err := os.open(path, os.O_WRONLY | os.O_CREATE, os.Permissions_Read_All + {.Write_User})
 	if err != nil {
 		return .IO_Error
 	}
@@ -146,10 +146,10 @@ _open_current :: proc(mgr: ^Flat_File_Manager) -> Storage_Error {
 
 	// Seek to current_pos for appending
 	if mgr.current_pos > 0 {
-		_, serr := os.seek(mgr.fd, i64(mgr.current_pos), os.SEEK_SET)
+		_, serr := os.seek(mgr.fd, i64(mgr.current_pos), .Start)
 		if serr != nil {
 			os.close(mgr.fd)
-			mgr.fd = os.INVALID_HANDLE
+			mgr.fd = nil
 			return .IO_Error
 		}
 	}

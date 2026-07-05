@@ -666,7 +666,7 @@ _resolve_par_threads :: proc(par: int) -> int {
 		return 0 // serial
 	}
 	// Auto-detect: use available CPUs minus 2 (for main + P2P threads)
-	n := os.processor_core_count()
+	n := os.get_processor_core_count()
 	if n <= 0 {
 		return 4 // fallback
 	}
@@ -740,6 +740,7 @@ main :: proc() {
 	log_level: log.Level = cfg.debug ? .Debug : .Info
 	context.logger = log.create_console_logger(log_level, {.Level, .Time, .Terminal_Color})
 
+
 	// Load config file (CLI flags take precedence).
 	_load_config_file(fmt.tprintf("%s/btcnode.conf", cfg.data_dir), &cfg, flags_set)
 
@@ -759,13 +760,13 @@ main :: proc() {
 		// Read 32 random bytes from /dev/urandom → 64 hex chars.
 		random_bytes: [32]byte
 		urandom_handle, urandom_err := os.open("/dev/urandom")
-		if urandom_err != os.ERROR_NONE {
+		if urandom_err != nil {
 			fmt.eprintln("Error: failed to open /dev/urandom for cookie generation")
 			return
 		}
 		_, read_err := os.read(urandom_handle, random_bytes[:])
 		os.close(urandom_handle)
-		if read_err != os.ERROR_NONE {
+		if read_err != nil {
 			fmt.eprintln("Error: failed to read random bytes for cookie generation")
 			return
 		}
@@ -781,7 +782,7 @@ main :: proc() {
 		cookie_content := fmt.aprintf("__cookie__:%s\n", cookie_hex)
 		defer delete(cookie_content)
 
-		if !os.write_entire_file(cookie_path, transmute([]byte)cookie_content) {
+		if os.write_entire_file(cookie_path, transmute([]byte)cookie_content) != nil {
 			fmt.eprintln("Error: failed to write cookie file:", cookie_path)
 			delete(cookie_path)
 			return
