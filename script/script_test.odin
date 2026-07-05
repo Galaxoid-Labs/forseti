@@ -1566,3 +1566,105 @@ test_testnet3_26860_p2pkh :: proc(t: ^testing.T) {
 	serr := verify_script(&verifier, tx.inputs[0].script_sig, spent_outputs[0].script_pubkey, nil)
 	testing.expect(t, serr == .None, fmt.tprintf("P2PKH should pass: got %v", serr))
 }
+
+@(test)
+test_signet_297396_tx1_policy_flags_not_consensus :: proc(t: ^testing.T) {
+	// Real-world regression test: signet block 297396, tx index 1.
+	// 50 legacy P2SH inputs whose redeem script pushes a 9-byte "signature"
+	// and a pubkey, then repeats OP_2DUP OP_CHECKSIG OP_CODESEPARATOR OP_DROP —
+	// every CHECKSIG fails and its result is dropped. Valid by consensus, but
+	// get_script_flags wrongly enforced the policy-only NULLFAIL rule during
+	// block validation, halting sync with Sig_Null_Fail. Low_S, Null_Fail,
+	// Strict_Enc, and Witness_Pub_Key_Compressed are mempool policy, not consensus.
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	src_dir := #location().file_path
+	base_dir := src_dir[:strings.last_index(src_dir, "/")]
+	tx_hex_raw, tx_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/signet_297396_tx1.hex", base_dir), context.allocator)
+	if tx_read_err != nil {
+		testing.expect(t, false, "failed to read testdata/signet_297396_tx1.hex")
+		return
+	}
+	defer delete(tx_hex_raw)
+
+	tx_hex_str := strings.trim_space(string(tx_hex_raw))
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str, context.temp_allocator)
+	if !hex_ok {
+		testing.expect(t, false, "failed to hex-decode tx")
+		return
+	}
+
+	r := wire.reader_init(tx_bytes)
+	tx, tx_err := wire.deserialize_tx(&r, context.temp_allocator)
+	if tx_err != nil {
+		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
+		return
+	}
+
+	testing.expect_value(t, len(tx.inputs), 50)
+	testing.expect_value(t, len(tx.outputs), 1)
+
+	prevout_raw, prev_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/signet_297396_tx1_prevouts.txt", base_dir), context.allocator)
+	if prev_read_err != nil {
+		testing.expect(t, false, "failed to read prevouts file")
+		return
+	}
+	defer delete(prevout_raw)
+
+	spent_outputs := make([]wire.Tx_Out, len(tx.inputs), context.temp_allocator)
+	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n", context.temp_allocator)
+	testing.expect_value(t, len(lines), 50)
+
+	for i in 0 ..< len(lines) {
+		parts := strings.split(lines[i], " ", context.temp_allocator)
+		value, val_ok := strconv.parse_i64(parts[0])
+		if !val_ok { continue }
+		spk, spk_ok := hex.decode(transmute([]u8)parts[1], context.temp_allocator)
+		if !spk_ok { continue }
+		spent_outputs[i] = wire.Tx_Out{value = value, script_pubkey = spk}
+	}
+
+	// Consensus flags for signet at height 297396 (per get_script_flags after
+	// the fix): no Low_S / Null_Fail / Strict_Enc / Witness_Pub_Key_Compressed.
+	consensus_flags := Verify_Flags{.P2SH, .DER_Sig, .Check_Locktime, .Check_Sequence, .Witness, .Null_Dummy}
+
+	sighash_cache: Sighash_Cache
+	verified := 0
+	for in_idx in 0 ..< len(tx.inputs) {
+		verifier := Script_Verifier {
+			tx            = &tx,
+			input_idx     = in_idx,
+			amount        = spent_outputs[in_idx].value,
+			flags         = consensus_flags,
+			spent_outputs = spent_outputs,
+			sighash_cache = &sighash_cache,
+		}
+
+		witness: [][]byte
+		if len(tx.witness) > in_idx {
+			witness = tx.witness[in_idx]
+		}
+
+		serr := verify_script(&verifier, tx.inputs[in_idx].script_sig, spent_outputs[in_idx].script_pubkey, witness)
+		if serr != .None {
+			testing.expect(t, false, fmt.tprintf("script verification failed at input %d: %v", in_idx, serr))
+			return
+		}
+		verified += 1
+	}
+	testing.expect_value(t, verified, 50)
+
+	// Sanity: with the policy-only NULLFAIL flag added (the pre-fix behavior),
+	// the same input must fail — documenting why it must stay out of consensus.
+	policy_verifier := Script_Verifier {
+		tx            = &tx,
+		input_idx     = 0,
+		amount        = spent_outputs[0].value,
+		flags         = consensus_flags + {.Null_Fail},
+		spent_outputs = spent_outputs,
+		sighash_cache = &sighash_cache,
+	}
+	perr := verify_script(&policy_verifier, tx.inputs[0].script_sig, spent_outputs[0].script_pubkey, nil)
+	testing.expect(t, perr == .Sig_Null_Fail, fmt.tprintf("expected Sig_Null_Fail with policy flags, got %v", perr))
+}

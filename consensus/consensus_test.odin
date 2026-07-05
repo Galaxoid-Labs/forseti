@@ -207,7 +207,11 @@ test_get_script_flags :: proc(t: ^testing.T) {
 	testing.expect(t, .Check_Sequence in flags_post, "Check_Sequence should be active")
 	testing.expect(t, .Witness in flags_post, "Witness should be active")
 	testing.expect(t, .Null_Dummy in flags_post, "Null_Dummy should be active")
-	testing.expect(t, .Low_S in flags_post, "Low_S should be active")
+	// Policy-only rules must never be part of consensus flags (see signet 297396).
+	testing.expect(t, .Low_S not_in flags_post, "Low_S is policy, not consensus")
+	testing.expect(t, .Null_Fail not_in flags_post, "Null_Fail is policy, not consensus")
+	testing.expect(t, .Strict_Enc not_in flags_post, "Strict_Enc is policy, not consensus")
+	testing.expect(t, .Witness_Pub_Key_Compressed not_in flags_post, "Witness_Pub_Key_Compressed is policy, not consensus")
 
 	// Regtest: all flags active at height 0
 	regtest := REGTEST_PARAMS

@@ -315,9 +315,10 @@ get_script_flags :: proc(height: int, params: ^Chain_Params) -> script.Verify_Fl
 		flags += {.P2SH}
 	}
 
-	// BIP66 — strict DER + strict encoding
+	// BIP66 — strict DER. Strict_Enc (pubkey encoding) is policy-only in
+	// Bitcoin Core (STRICTENC): hybrid/malformed pubkeys were mined historically.
 	if height >= params.bip66_height {
-		flags += {.DER_Sig, .Strict_Enc}
+		flags += {.DER_Sig}
 	}
 
 	// BIP65 — CHECKLOCKTIMEVERIFY
@@ -330,9 +331,12 @@ get_script_flags :: proc(height: int, params: ^Chain_Params) -> script.Verify_Fl
 		flags += {.Check_Sequence}
 	}
 
-	// SegWit
+	// SegWit (BIP141) + NULLDUMMY (BIP147). Low_S, Null_Fail, and
+	// Witness_Pub_Key_Compressed are policy-only in Bitcoin Core — enforcing
+	// them here rejects valid blocks (e.g. signet 297396: P2SH script that
+	// drops failed CHECKSIG results, tripping Null_Fail).
 	if height >= params.segwit_height {
-		flags += {.Witness, .Null_Dummy, .Low_S, .Null_Fail, .Witness_Pub_Key_Compressed}
+		flags += {.Witness, .Null_Dummy}
 	}
 
 	return flags
