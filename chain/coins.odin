@@ -201,7 +201,12 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 	defer storage.ldb_batch_destroy(batch)
 
 	written, deleted := 0, 0
+	processed := 0
 	for outpoint, entry in cc.cache {
+		processed += 1
+		if cache_size >= 10_000_000 && processed % 10_000_000 == 0 {
+			log.infof("UTXO flush: scanned %d / %d cache entries...", processed, cache_size)
+		}
 		if .Dirty not_in entry.flags {
 			continue
 		}
@@ -218,7 +223,9 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 	// Add chain tip metadata to the same batch
 	write_meta_tip(cc.db.store, batch, tip_hash, tip_height)
 
-	// ATOMIC: UTXOs + metadata committed together
+	// ATOMIC: UTXOs + metadata committed together. On large caches this is a
+	// single multi-GB synchronous LevelDB write that can take minutes.
+	log.infof("UTXO flush: committing %d writes + %d deletes to LevelDB...", written, deleted)
 	berr := storage.ldb_batch_write(cc.db.store.chainstate_db, cc.db.store.sync_opts, batch)
 	if berr != .None {
 		log.errorf("UTXO flush: batch write failed")

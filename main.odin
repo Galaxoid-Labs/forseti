@@ -739,6 +739,9 @@ main :: proc() {
 	// Apply debug log level if requested.
 	log_level: log.Level = cfg.debug ? .Debug : .Info
 	context.logger = log.create_console_logger(log_level, {.Level, .Time, .Terminal_Color})
+	// Registered before all other defers so it runs last, after every
+	// deferred destroy/flush has finished.
+	defer log.info("Shutdown complete.")
 
 
 	// Load config file (CLI flags take precedence).
