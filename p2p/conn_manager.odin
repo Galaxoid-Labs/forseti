@@ -64,6 +64,10 @@ Conn_Manager :: struct {
 	log_level: log.Level,
 	// BIP111: enable bloom filter support (also gates BIP35 mempool message).
 	peer_bloom_filters: bool,
+	// Addresses recently evicted as useless (stale height / no agent) —
+	// skipped by replacement selection so we don't redial known crawlers.
+	// Keys are heap-cloned; value = unix eviction time.
+	useless_addrs: map[string]i64,
 	// Node status snapshot for the GUI (populated only when status_enabled).
 	status_enabled: bool,
 	status:         Node_Status,
@@ -110,6 +114,11 @@ conn_manager_destroy :: proc(cm: ^Conn_Manager) {
 		_peer_free(peer)
 	}
 	delete(cm.zombie_peers)
+
+	for addr in cm.useless_addrs {
+		delete(addr)
+	}
+	delete(cm.useless_addrs)
 
 	// Free all peers. If conn_manager_run was called, peers were already
 	// peer_destroy'd on the P2P thread; otherwise destroy them now.
@@ -716,13 +725,17 @@ _conn_manager_handle_verack :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 
 	if peer.state == .Handshake_Complete {
 		// Outbound slots are scarce (8): drop peers that cannot serve blocks
-		// or meaningful tx relay. Crawlers/monitors advertise start_height 0;
-		// deeply stale nodes are equally useless. Inbound peers are exempt —
-		// they cost us nothing. Replacement machinery refills the slot.
+		// or meaningful tx relay. Crawlers/monitors advertise start_height 0
+		// or an empty user agent; deeply stale nodes are equally useless.
+		// Inbound peers are exempt — they cost us nothing. The evicted
+		// address goes on a cooldown so replacement doesn't redial it.
 		_, our_height := chain.chain_tip(cm.chain)
-		if !peer.inbound && our_height - int(peer.start_height) > 10_000 {
-			log.infof("Peer %d advertises height %d, we are at %d — dropping stale outbound peer",
-				peer_id, peer.start_height, our_height)
+		stale := our_height - int(peer.start_height) > 10_000
+		no_agent := len(peer.user_agent) == 0
+		if !peer.inbound && (stale || no_agent) {
+			log.infof("Peer %d useless for outbound (height=%d ours=%d agent=%q) — dropping",
+				peer_id, peer.start_height, our_height, peer.user_agent)
+			_mark_addr_useless(cm, peer.address)
 			sync_handle_disconnect(&cm.sync_mgr, peer_id, &cm.peers)
 			return
 		}
@@ -1231,11 +1244,15 @@ _conn_manager_replace_peer :: proc(cm: ^Conn_Manager) {
 		return
 	}
 
-	// Try addresses from the addr manager.
-	for attempt in 0 ..< 5 {
+	// Try addresses from the addr manager, skipping recently-evicted ones.
+	for attempt in 0 ..< 8 {
 		addr_str, port, ok := addr_manager_get_connectable(&cm.addr_mgr)
 		if !ok {
 			break
+		}
+		if _addr_is_useless(cm, addr_str) {
+			delete(addr_str)
+			continue
 		}
 		err := conn_manager_add_peer(cm, addr_str, port)
 		if err == .None {
@@ -1809,4 +1826,30 @@ conn_manager_get_status :: proc(cm: ^Conn_Manager) -> Node_Status {
 	st := cm.status
 	sync.mutex_unlock(&cm.status_mutex)
 	return st
+}
+
+// --- Useless-address cooldown (evicted crawlers/stale peers) ---
+
+USELESS_ADDR_COOLDOWN_SECS :: 4 * 3600
+
+_mark_addr_useless :: proc(cm: ^Conn_Manager, address: string) {
+	if address in cm.useless_addrs {
+		cm.useless_addrs[address] = time.to_unix_seconds(time.now())
+		return
+	}
+	cm.useless_addrs[strings.clone(address)] = time.to_unix_seconds(time.now())
+}
+
+_addr_is_useless :: proc(cm: ^Conn_Manager, address: string) -> bool {
+	evicted_at, found := cm.useless_addrs[address]
+	if !found {
+		return false
+	}
+	if time.to_unix_seconds(time.now()) - evicted_at > USELESS_ADDR_COOLDOWN_SECS {
+		// Cooldown expired — forget and allow a retry.
+		key, _ := delete_key(&cm.useless_addrs, address)
+		delete(key)
+		return false
+	}
+	return true
 }
