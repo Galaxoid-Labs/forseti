@@ -147,18 +147,36 @@ _fetch_status :: proc(c: ^Client) -> (st: p2p.Node_Status, ok: bool) {
 		sent += n
 	}
 
-	// Read until connection close.
+	// Read by Content-Length — a keep-alive server (btcnode is one now)
+	// never closes the socket, so reading until EOF hangs forever.
 	resp := make([dynamic]byte, 0, 8192, context.temp_allocator)
 	buf: [8192]byte
+	sep := -1
+	body_need := -1
 	for {
+		if sep >= 0 && body_need >= 0 && len(resp) >= sep + 4 + body_need {
+			break // full response received
+		}
 		n, rerr := net.recv_tcp(sock, buf[:])
 		if n > 0 { append(&resp, ..buf[:n]) }
 		if rerr != nil || n == 0 { break }
+		if sep < 0 {
+			sep = strings.index(string(resp[:]), "\r\n\r\n")
+			if sep >= 0 {
+				hdr := strings.to_lower(string(resp[:sep]), context.temp_allocator)
+				if ci := strings.index(hdr, "content-length:"); ci >= 0 {
+					v := hdr[ci + len("content-length:"):]
+					if nl := strings.index(v, "\r\n"); nl >= 0 { v = v[:nl] }
+					if parsed_len, pok := strconv.parse_int(strings.trim_space(v)); pok {
+						body_need = parsed_len
+					}
+				}
+			}
+		}
 	}
 
 	// Split HTTP header from body.
 	text := string(resp[:])
-	sep := strings.index(text, "\r\n\r\n")
 	if sep < 0 { return {}, false }
 	if !strings.contains(text[:sep], "200") { return {}, false }
 	payload := text[sep + 4:]

@@ -163,7 +163,7 @@ _serve_connection :: proc(data: rawptr) {
 		// (JSON parse + response build) live entirely in it.
 		free_all(context.temp_allocator)
 
-		body, auth_header, ok := _read_http_request(client)
+		body, auth_header, want_close, ok := _read_http_request(client)
 		if !ok {
 			return // client closed (normal keep-alive end) or read error
 		}
@@ -172,8 +172,11 @@ _serve_connection :: proc(data: rawptr) {
 			return
 		}
 		resp_bytes := _handle_body(&local, body)
-		if !_send_http_response(client, resp_bytes) {
+		if !_send_http_response(client, resp_bytes, want_close) {
 			return
+		}
+		if want_close {
+			return // client asked for Connection: close — honor it
 		}
 	}
 }
@@ -220,7 +223,7 @@ _handle_body :: proc(srv: ^RPC_Server, body: []byte) -> []byte {
 }
 
 // Read an HTTP POST request body. Parses Content-Length and Authorization header.
-_read_http_request :: proc(socket: tcp.TCP_Socket) -> (body: []byte, auth_header: string, ok: bool) {
+_read_http_request :: proc(socket: tcp.TCP_Socket) -> (body: []byte, auth_header: string, want_close: bool, ok: bool) {
 	buf := make([dynamic]byte, 0, 4096, context.temp_allocator)
 	recv_buf: [4096]byte
 
@@ -229,7 +232,7 @@ _read_http_request :: proc(socket: tcp.TCP_Socket) -> (body: []byte, auth_header
 	for {
 		n, err := tcp.recv_tcp(socket, recv_buf[:])
 		if err != nil || n == 0 {
-			return nil, "", false
+			return nil, "", want_close, false
 		}
 		append(&buf, ..recv_buf[:n])
 
@@ -248,15 +251,16 @@ _read_http_request :: proc(socket: tcp.TCP_Socket) -> (body: []byte, auth_header
 	}
 
 	if header_end < 0 {
-		return nil, "", false
+		return nil, "", want_close, false
 	}
 
 	// Parse Content-Length and Authorization from headers
 	header_str := string(buf[:header_end])
 	content_length := _parse_content_length(header_str)
 	auth_header = _parse_authorization(header_str)
+	want_close = _parse_connection_close(header_str)
 	if content_length < 0 {
-		return nil, "", false
+		return nil, "", want_close, false
 	}
 
 	// Body starts after \r\n\r\n
@@ -267,13 +271,26 @@ _read_http_request :: proc(socket: tcp.TCP_Socket) -> (body: []byte, auth_header
 	for body_have < content_length {
 		n, err := tcp.recv_tcp(socket, recv_buf[:])
 		if err != nil || n == 0 {
-			return nil, "", false
+			return nil, "", want_close, false
 		}
 		append(&buf, ..recv_buf[:n])
 		body_have = len(buf) - body_start
 	}
 
-	return buf[body_start:body_start + content_length], auth_header, true
+	return buf[body_start:body_start + content_length], auth_header, want_close, true
+}
+
+// Did the client request Connection: close? (until-EOF readers and one-shot
+// clients depend on it being honored — a keep-alive-only server hangs them.)
+_parse_connection_close :: proc(headers: string) -> bool {
+	lines := strings.split(headers, "\r\n", context.temp_allocator)
+	for line in lines {
+		lower := strings.to_lower(line, context.temp_allocator)
+		if strings.has_prefix(lower, "connection:") {
+			return strings.contains(lower, "close")
+		}
+	}
+	return false
 }
 
 // Extract Content-Length value from HTTP headers.
@@ -341,8 +358,9 @@ _send_http_401 :: proc(socket: tcp.TCP_Socket) {
 
 // Send an HTTP 200 response with JSON body. Connection stays open
 // (keep-alive) — the per-connection loop serves the next request.
-_send_http_response :: proc(socket: tcp.TCP_Socket, body: []byte) -> bool {
-	header := fmt.tprintf("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n", len(body))
+_send_http_response :: proc(socket: tcp.TCP_Socket, body: []byte, want_close := false) -> bool {
+	conn := want_close ? "close" : "keep-alive"
+	header := fmt.tprintf("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: %s\r\n\r\n", len(body), conn)
 	if _, err := tcp.send_tcp(socket, transmute([]byte)header); err != nil {
 		return false
 	}
