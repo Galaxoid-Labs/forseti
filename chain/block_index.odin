@@ -1,5 +1,6 @@
 package chain
 
+import "../consensus"
 import "core:mem"
 import "../storage"
 import "../wire"
@@ -22,6 +23,7 @@ Block_Index_Entry :: struct {
 	undo_offset:   u32,
 	undo_size:     u32,
 	num_tx:     u32,      // Number of transactions in this block (0 if not yet populated)
+	chain_work: [32]byte, // Cumulative PoW from genesis (big-endian u256); derived from headers, not persisted
 	chain_tx:   i64,      // Cumulative tx count from genesis to this block (computed at runtime)
 	prev:       ^Block_Index_Entry,
 	skip:       [SKIP_LIST_MAX]^Block_Index_Entry,
@@ -89,10 +91,37 @@ block_index_load :: proc(idx: ^Block_Index, db: ^storage.Index_DB) {
 		_build_skip_list(entry)
 	}
 
-	// Fourth pass: find best header
+	// Fourth pass: cumulative chainwork, ascending height so parents are
+	// done before children (forks included — a child is always taller than
+	// its parent). Derived from headers; nothing persisted.
+	{
+		max_h := 0
+		for _, entry in idx.entries {
+			if entry.height > max_h { max_h = entry.height }
+		}
+		by_height := make([][dynamic]^Block_Index_Entry, max_h + 1, context.temp_allocator)
+		for _, entry in idx.entries {
+			if by_height[entry.height] == nil {
+				by_height[entry.height] = make([dynamic]^Block_Index_Entry, 0, 1, context.temp_allocator)
+			}
+			append(&by_height[entry.height], entry)
+		}
+		for h in 0 ..= max_h {
+			for entry in by_height[h] {
+				own := consensus.work_from_bits(entry.bits)
+				if entry.prev != nil {
+					entry.chain_work = consensus.u256_add(entry.prev.chain_work, own)
+				} else {
+					entry.chain_work = own
+				}
+			}
+		}
+	}
+
+	// Fifth pass: best header by cumulative work (first-seen wins ties).
 	for _, entry in idx.entries {
 		if .Valid_Header in entry.status {
-			if idx.best_header == nil || entry.height > idx.best_header.height {
+			if idx.best_header == nil || consensus.u256_compare(entry.chain_work, idx.best_header.chain_work) > 0 {
 				idx.best_header = entry
 			}
 		}
@@ -125,6 +154,14 @@ block_index_add :: proc(idx: ^Block_Index, header: ^wire.Block_Header, height: i
 		entry.prev = parent
 	}
 
+	// Cumulative chainwork: parent's plus this header's contribution.
+	own_work := consensus.work_from_bits(header.bits)
+	if parent_found {
+		entry.chain_work = consensus.u256_add(parent.chain_work, own_work)
+	} else {
+		entry.chain_work = own_work
+	}
+
 	idx.entries[hash] = entry
 	idx.by_prev[header.prev_hash] = entry
 
@@ -135,9 +172,11 @@ block_index_add :: proc(idx: ^Block_Index, header: ^wire.Block_Header, height: i
 
 	_build_skip_list(entry)
 
-	// Update best header tracking
+	// Update best header tracking — most cumulative WORK, not height: fork
+	// choice by height follows the wrong branch when a heavier competing
+	// chain exists. Ties keep first-seen (Core parity).
 	if .Valid_Header in status {
-		if idx.best_header == nil || height > idx.best_header.height {
+		if idx.best_header == nil || consensus.u256_compare(entry.chain_work, idx.best_header.chain_work) > 0 {
 			idx.best_header = entry
 		}
 	}

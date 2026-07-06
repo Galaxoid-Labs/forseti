@@ -23,7 +23,7 @@ hash_to_hex :: proc(h: Hash256) -> string {
 }
 
 // Build a minimal coinbase transaction.
-make_coinbase :: proc(height: int, allocator := context.temp_allocator, value: i64 = 50 * 100_000_000) -> wire.Tx {
+make_coinbase :: proc(height: int, allocator := context.temp_allocator, value: i64 = 50 * 100_000_000, extra_nonce: u32 = 0) -> wire.Tx {
 	// Coinbase script: push height as script number
 	height_bytes: [4]byte
 	height_bytes[0] = byte(height & 0xff)
@@ -31,12 +31,20 @@ make_coinbase :: proc(height: int, allocator := context.temp_allocator, value: i
 	height_bytes[2] = byte((height >> 16) & 0xff)
 	height_bytes[3] = byte((height >> 24) & 0xff)
 
-	// Build script_sig: OP_PUSH3 <height_le_3bytes> (BIP34 style)
-	script_sig := make([]byte, 4, allocator)
+	// Build script_sig: OP_PUSH3 <height_le_3bytes> (BIP34 style), plus an
+	// optional extra-nonce push so fork-test branches get distinct txids.
+	script_sig := make([]byte, extra_nonce == 0 ? 4 : 9, allocator)
 	script_sig[0] = 0x03 // push 3 bytes
 	script_sig[1] = height_bytes[0]
 	script_sig[2] = height_bytes[1]
 	script_sig[3] = height_bytes[2]
+	if extra_nonce != 0 {
+		script_sig[4] = 0x04 // push 4 bytes
+		script_sig[5] = byte(extra_nonce)
+		script_sig[6] = byte(extra_nonce >> 8)
+		script_sig[7] = byte(extra_nonce >> 16)
+		script_sig[8] = byte(extra_nonce >> 24)
+	}
 
 	inputs := make([]wire.Tx_In, 1, allocator)
 	inputs[0] = wire.Tx_In {
@@ -697,4 +705,40 @@ test_check_block_header :: proc(t: ^testing.T) {
 	bad_header.nonce = 99999999
 	err2 := check_block_header(&bad_header, &params)
 	testing.expect_value(t, err2, Consensus_Error.Bad_Pow)
+}
+
+@(test)
+test_work_from_bits :: proc(t: ^testing.T) {
+	// Genesis difficulty 0x1d00ffff: work = 2^32 / (2^32/(2^224)) — the known
+	// value is 0x0000...000100010001 (4295032833).
+	w := work_from_bits(0x1d00ffff)
+	// Expected: 0x...000100010001
+	testing.expect_value(t, w[31], 0x01)
+	testing.expect_value(t, w[30], 0x00)
+	testing.expect_value(t, w[29], 0x01)
+	testing.expect_value(t, w[28], 0x00)
+	testing.expect_value(t, w[27], 0x01)
+	for i in 0 ..< 27 {
+		testing.expect_value(t, w[i], 0x00)
+	}
+
+	// u256 division sanity: 100 / 7 = 14
+	a, b: [32]byte
+	a[31] = 100
+	b[31] = 7
+	q := u256_div(a, b)
+	testing.expect_value(t, q[31], 14)
+
+	// Addition with carry across bytes: 0xff + 0x01 = 0x100
+	c, d: [32]byte
+	c[31] = 0xff
+	d[31] = 0x01
+	e := u256_add(c, d)
+	testing.expect_value(t, e[31], 0x00)
+	testing.expect_value(t, e[30], 0x01)
+
+	// Work is monotone in difficulty: lower target (harder) = more work.
+	hard := work_from_bits(0x1b0404cb)
+	easy := work_from_bits(0x1d00ffff)
+	testing.expect(t, u256_compare(hard, easy) > 0, "harder target must carry more work")
 }

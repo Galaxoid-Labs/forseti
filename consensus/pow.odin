@@ -236,3 +236,79 @@ _u256_multiply_ratio :: proc(value: [32]byte, num, den: u64) -> [32]byte {
 
 	return result
 }
+
+// --- Chainwork (cumulative proof of work) ---
+//
+// work(header) = 2^256 / (target + 1), computed per Bitcoin Core's
+// arith_uint256 trick: since 2^256 is not representable,
+//   2^256 / (t+1)  ==  (~t / (t+1)) + 1   (all mod 2^256)
+// Big-endian [32]byte, matching bits_to_target's convention.
+
+// Add two u256 values (big-endian), wrapping.
+u256_add :: proc(a, b: [32]byte) -> [32]byte {
+	result: [32]byte
+	carry: u16 = 0
+	for i := 31; i >= 0; i -= 1 {
+		sum := u16(a[i]) + u16(b[i]) + carry
+		result[i] = byte(sum & 0xff)
+		carry = sum >> 8
+	}
+	return result
+}
+
+// Divide a u256 by a u256 (big-endian), simple long division.
+u256_div :: proc(num, den: [32]byte) -> [32]byte {
+	result: [32]byte
+	if u256_is_zero(den) {
+		return result
+	}
+	remainder: [32]byte
+	for bit in 0 ..< 256 {
+		// remainder <<= 1; remainder |= next bit of num
+		carry: byte = 0
+		for i := 31; i >= 0; i -= 1 {
+			next_carry := (remainder[i] & 0x80) >> 7
+			remainder[i] = (remainder[i] << 1) | carry
+			carry = next_carry
+		}
+		byte_idx := bit / 8
+		bit_idx := uint(7 - bit % 8)
+		if (num[byte_idx] >> bit_idx) & 1 == 1 {
+			remainder[31] |= 1
+		}
+		if u256_compare(remainder, den) >= 0 {
+			// remainder -= den; result bit = 1
+			borrow: i16 = 0
+			for i := 31; i >= 0; i -= 1 {
+				diff := i16(remainder[i]) - i16(den[i]) - borrow
+				if diff < 0 {
+					diff += 256
+					borrow = 1
+				} else {
+					borrow = 0
+				}
+				remainder[i] = byte(diff)
+			}
+			result[byte_idx] |= 1 << bit_idx
+		}
+	}
+	return result
+}
+
+// Proof-of-work contributed by a header with the given nBits.
+work_from_bits :: proc(bits: u32) -> [32]byte {
+	target := bits_to_target(bits)
+	if u256_is_zero(target) {
+		return {}
+	}
+	// (~target) / (target + 1) + 1
+	inv: [32]byte
+	for i in 0 ..< 32 {
+		inv[i] = ~target[i]
+	}
+	one: [32]byte
+	one[31] = 1
+	t_plus_1 := u256_add(target, one)
+	q := u256_div(inv, t_plus_1)
+	return u256_add(q, one)
+}

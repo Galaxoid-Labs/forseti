@@ -48,10 +48,14 @@ _remove_dir_contents :: proc(dir: string) {
 }
 
 // Build a regtest block at a given height with prev_hash linkage.
-make_chain_block :: proc(height: int, prev_hash: Hash256, params: ^consensus.Chain_Params) -> wire.Block {
+make_chain_block :: proc(height: int, prev_hash: Hash256, params: ^consensus.Chain_Params, t_off: u32 = 0, cb_value: i64 = -1) -> wire.Block {
 	// Pay the real subsidy — regtest halves every 150 blocks, and long test
 	// chains (e.g. pruning needs 288+) hit Bad_Coinbase_Value otherwise.
-	cb := consensus.make_coinbase(height, value = consensus.get_block_subsidy(height, params))
+	// t_off perturbs the timestamp so competing fork branches at the same
+	// height produce distinct blocks; cb_value >= 0 overrides the coinbase
+	// amount (for invalid-branch tests).
+	value := cb_value >= 0 ? cb_value : consensus.get_block_subsidy(height, params)
+	cb := consensus.make_coinbase(height, value = value, extra_nonce = t_off)
 	txs := make([]wire.Tx, 1, context.temp_allocator)
 	txs[0] = cb
 
@@ -63,7 +67,7 @@ make_chain_block :: proc(height: int, prev_hash: Hash256, params: ^consensus.Cha
 			version     = 0x20000000,
 			prev_hash   = prev_hash,
 			merkle_root = merkle,
-			timestamp   = u32(1231006505 + height),
+			timestamp   = u32(1231006505 + height) + t_off,
 			bits        = params.pow_limit_bits,
 		},
 		txs = txs,
@@ -1060,4 +1064,148 @@ test_prune_block_files :: proc(t: ^testing.T) {
 	// Second call: nothing left to prune (file 1 is active).
 	fd2, _ := prune_block_files(&cs, NUM - 1)
 	testing.expect_value(t, fd2, 0)
+}
+
+// Build a linear branch of blocks on top of prev_hash, storing (not
+// connecting) each. Returns the branch tip hash.
+_store_branch :: proc(t: ^testing.T, cs: ^Chain_State, params: ^consensus.Chain_Params, start_height: int, prev: Hash256, count: int, t_off: u32, bad_at := -1) -> Hash256 {
+	prev_hash := prev
+	for i in 0 ..< count {
+		h := start_height + i
+		cb_value: i64 = -1
+		if h == bad_at {
+			cb_value = consensus.get_block_subsidy(h, params) + 1_000_000 // invalid: overpays
+		}
+		block := make_chain_block(h, prev_hash, params, t_off = t_off, cb_value = cb_value)
+		serr := store_block(cs, &block)
+		testing.expect(t, serr == .None, fmt.tprintf("store branch block %d: %v", h, serr))
+		prev_hash = wire.block_header_hash(&block.header)
+	}
+	return prev_hash
+}
+
+@(test)
+test_reorg_heavier_branch_wins :: proc(t: ^testing.T) {
+	dir := make_test_dir("reorg_basic")
+	defer remove_test_dir(dir)
+	params := consensus.REGTEST_PARAMS
+	cs: Chain_State
+	err := chain_state_init(&cs, dir, &params)
+	testing.expect_value(t, err, Chain_Error.None)
+	defer chain_state_destroy(&cs)
+
+	// Active chain A: 3 blocks.
+	prev := HASH_ZERO
+	a_cb_txids: [3]Hash256
+	for i in 0 ..< 3 {
+		block := make_chain_block(i, prev, &params)
+		a_cb_txids[i] = wire.tx_id(&block.txs[0])
+		aerr := accept_block(&cs, &block)
+		testing.expect(t, aerr == .None, fmt.tprintf("accept A%d: %v", i, aerr))
+		prev = wire.block_header_hash(&block.header)
+	}
+	_, tip_h := chain_tip(&cs)
+	testing.expect_value(t, tip_h, 2)
+
+	// Competing branch B: 4 blocks from genesis's parent line (heights 1..4
+	// forking after height 0 — both share the height-0 block).
+	fork_hash := cs.active_chain[0]
+	b_tip := _store_branch(t, &cs, &params, 1, fork_hash, 4, t_off = 7777)
+
+	// Nothing reorged yet by store alone; activate switches to B (more work).
+	rerr := activate_best_chain(&cs)
+	testing.expect_value(t, rerr, Chain_Error.None)
+
+	new_tip, new_h := chain_tip(&cs)
+	testing.expect_value(t, new_h, 4)
+	testing.expect(t, new_tip == b_tip, "tip should be branch B's tip")
+
+	// A's non-shared coinbases are gone from the UTXO set; B's exist.
+	for i in 1 ..< 3 {
+		op := wire.Outpoint{hash = a_cb_txids[i], index = 0}
+		_, found := coins_cache_get(&cs.coins, op)
+		testing.expect(t, !found, fmt.tprintf("A coinbase at height %d should be disconnected", i))
+	}
+}
+
+@(test)
+test_reorg_equal_work_keeps_first_seen :: proc(t: ^testing.T) {
+	dir := make_test_dir("reorg_tie")
+	defer remove_test_dir(dir)
+	params := consensus.REGTEST_PARAMS
+	cs: Chain_State
+	err := chain_state_init(&cs, dir, &params)
+	testing.expect_value(t, err, Chain_Error.None)
+	defer chain_state_destroy(&cs)
+
+	prev := HASH_ZERO
+	for i in 0 ..< 3 {
+		block := make_chain_block(i, prev, &params)
+		testing.expect_value(t, accept_block(&cs, &block), Chain_Error.None)
+		prev = wire.block_header_hash(&block.header)
+	}
+	a_tip, _ := chain_tip(&cs)
+
+	// Equal-length (equal-work on regtest) branch from the same fork point.
+	fork_hash := cs.active_chain[0]
+	_store_branch(t, &cs, &params, 1, fork_hash, 2, t_off = 9999)
+
+	testing.expect_value(t, activate_best_chain(&cs), Chain_Error.None)
+	tip_after, h_after := chain_tip(&cs)
+	testing.expect_value(t, h_after, 2)
+	testing.expect(t, tip_after == a_tip, "equal work must keep the first-seen chain")
+}
+
+@(test)
+test_reorg_invalid_branch_rolls_back :: proc(t: ^testing.T) {
+	dir := make_test_dir("reorg_invalid")
+	defer remove_test_dir(dir)
+	params := consensus.REGTEST_PARAMS
+	cs: Chain_State
+	err := chain_state_init(&cs, dir, &params)
+	testing.expect_value(t, err, Chain_Error.None)
+	defer chain_state_destroy(&cs)
+
+	prev := HASH_ZERO
+	a_cb_txids: [3]Hash256
+	for i in 0 ..< 3 {
+		block := make_chain_block(i, prev, &params)
+		a_cb_txids[i] = wire.tx_id(&block.txs[0])
+		testing.expect_value(t, accept_block(&cs, &block), Chain_Error.None)
+		prev = wire.block_header_hash(&block.header)
+	}
+	a_tip, _ := chain_tip(&cs)
+
+	// Heavier branch B whose 3rd block overpays its coinbase (invalid).
+	fork_hash := cs.active_chain[0]
+	_store_branch(t, &cs, &params, 1, fork_hash, 4, t_off = 4242, bad_at = 3)
+
+	rerr := activate_best_chain(&cs)
+	testing.expect(t, rerr != .None, "reorg onto an invalid branch must fail")
+
+	// Original chain restored, branch marked Failed, best_header off the branch.
+	tip_after, h_after := chain_tip(&cs)
+	testing.expect_value(t, h_after, 2)
+	testing.expect(t, tip_after == a_tip, "original chain must be restored")
+	// B1/B2 connected fine before the failure, so they remain valid headers
+	// with work equal to A's tip — best_header may be either side of the tie.
+	// What matters: it must NOT be on the failed sub-branch, and its work
+	// must not exceed the restored tip's (ties never trigger a switch).
+	bh := cs.block_index.best_header
+	tip_entry := cs.block_index.entries[a_tip]
+	testing.expect(t, bh != nil && .Failed not_in bh.status, "best_header must not be a failed block")
+	testing.expect(t, consensus.u256_compare(bh.chain_work, tip_entry.chain_work) <= 0,
+		"no remaining header may outweigh the restored chain")
+
+	// A's coinbases are all live again.
+	for i in 0 ..< 3 {
+		op := wire.Outpoint{hash = a_cb_txids[i], index = 0}
+		_, found := coins_cache_get(&cs.coins, op)
+		testing.expect(t, found, fmt.tprintf("A coinbase at height %d should be restored", i))
+	}
+
+	// A second activate is a clean no-op (Failed branch never re-attempted).
+	testing.expect_value(t, activate_best_chain(&cs), Chain_Error.None)
+	tip_final, _ := chain_tip(&cs)
+	testing.expect(t, tip_final == a_tip, "failed branch must not be retried")
 }

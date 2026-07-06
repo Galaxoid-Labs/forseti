@@ -330,6 +330,11 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 		return
 	}
 
+	// If a competing branch now carries more work than the active chain
+	// (stale tip / reorg), switch to it. Cheap no-op in the common case —
+	// including all of IBD, where the tip is an ancestor of best_header.
+	chain.activate_best_chain(sm.chain)
+
 	// Re-queue blocks that need re-download (storage errors only).
 	for h in redownload {
 		append(&sm.requeue_list, h)
