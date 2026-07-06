@@ -98,7 +98,8 @@ Inv_Type :: enum u32 {
 	Block          = 2,
 	Filtered_Block = 3,
 	Compact_Block  = 4,
-	Witness_Tx     = 0x40000001,
+	WTx            = 5,          // BIP339: tx announced/requested by wtxid
+	Witness_Tx     = 0x40000001, // getdata-only: request witness-serialized tx by txid
 	Witness_Block  = 0x40000002,
 }
 

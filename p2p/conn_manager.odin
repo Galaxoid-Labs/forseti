@@ -793,17 +793,20 @@ _conn_manager_handle_inv :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: [
 					append(&wanted, wire.Inv_Vector{type = .Witness_Block, hash = iv.hash})
 				}
 			}
-		case .Tx, .Witness_Tx:
-			// Only process tx inv when in sync (no point during IBD).
+		case .WTx:
+			// BIP339: wtxid-relay peers announce txs as MSG_WTX (5) with the
+			// wtxid, and Core only serves WTx getdata by wtxid. Before this
+			// case existed, every modern peer's tx announcements fell through
+			// the #partial switch — the mempool stayed empty at the tip.
 			if cm.sync_mgr.state == .In_Sync && cm.mp != nil {
-				// BIP339: wtxid_relay peers send Witness_Tx inv with wtxid hash.
-				already_have := false
-				if iv.type == .Witness_Tx && peer.wtxid_relay {
-					already_have = mempool.mempool_has_wtxid(cm.mp, iv.hash)
-				} else {
-					already_have = mempool.mempool_has(cm.mp, iv.hash)
+				if !mempool.mempool_has_wtxid(cm.mp, iv.hash) {
+					append(&wanted, wire.Inv_Vector{type = .WTx, hash = iv.hash})
 				}
-				if !already_have {
+			}
+		case .Tx:
+			// Legacy announcement by txid; request witness serialization.
+			if cm.sync_mgr.state == .In_Sync && cm.mp != nil {
+				if !mempool.mempool_has(cm.mp, iv.hash) {
 					append(&wanted, wire.Inv_Vector{type = .Witness_Tx, hash = iv.hash})
 				}
 			}
@@ -907,14 +910,20 @@ _conn_manager_handle_getdata :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 
 	for iv in gd_msg.inventory {
 		#partial switch iv.type {
-		case .Tx, .Witness_Tx:
+		case .Tx, .Witness_Tx, .WTx:
 			if cm.mp == nil {
 				continue
 			}
-			// Try txid lookup first, then wtxid fallback (BIP339).
-			entry, mp_found := mempool.mempool_get(cm.mp, iv.hash)
-			if !mp_found && iv.type == .Witness_Tx {
+			// .Tx/.Witness_Tx look up by txid; .WTx (BIP339) by wtxid.
+			entry: ^mempool.Mempool_Entry
+			mp_found: bool
+			if iv.type == .WTx {
 				entry, mp_found = mempool.mempool_get_by_wtxid(cm.mp, iv.hash)
+			} else {
+				entry, mp_found = mempool.mempool_get(cm.mp, iv.hash)
+				if !mp_found && iv.type == .Witness_Tx {
+					entry, mp_found = mempool.mempool_get_by_wtxid(cm.mp, iv.hash)
+				}
 			}
 			if !mp_found {
 				continue
@@ -980,9 +989,9 @@ _conn_manager_handle_mempool :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 				continue
 			}
 		}
-		// BIP339: use wtxid if peer negotiated wtxid relay.
+		// BIP339: announce by wtxid (MSG_WTX) if peer negotiated wtxid relay.
 		if peer.wtxid_relay && peer.wtxid_relay_us {
-			inv[idx] = wire.Inv_Vector{type = .Witness_Tx, hash = entry.wtxid}
+			inv[idx] = wire.Inv_Vector{type = .WTx, hash = entry.wtxid}
 		} else {
 			inv[idx] = wire.Inv_Vector{type = .Tx, hash = txid}
 		}
@@ -1016,10 +1025,15 @@ _conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid, wtxid: Hash256, fee_rate
 			continue
 		}
 
-		// BIP339: use wtxid if both sides negotiated wtxid relay.
-		hash := wtxid if (peer.wtxid_relay && peer.wtxid_relay_us) else txid
-
-		inv := [1]wire.Inv_Vector{{type = .Witness_Tx, hash = hash}}
+		// BIP339: announce with MSG_WTX + wtxid when both sides negotiated
+		// wtxid relay, else legacy MSG_TX + txid. (MSG_WITNESS_TX is a
+		// getdata-only type — peers ignore it inside inv messages.)
+		inv: [1]wire.Inv_Vector
+		if peer.wtxid_relay && peer.wtxid_relay_us {
+			inv[0] = wire.Inv_Vector{type = .WTx, hash = wtxid}
+		} else {
+			inv[0] = wire.Inv_Vector{type = .Tx, hash = txid}
+		}
 		w := wire.writer_init(context.temp_allocator)
 		inv_msg := wire.Inv_Message{inventory = inv[:]}
 		wire.serialize_inv(&w, &inv_msg)

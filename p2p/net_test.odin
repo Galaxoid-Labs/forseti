@@ -1079,3 +1079,27 @@ test_headers_up_to_date_ignores_zero_start_height :: proc(t: ^testing.T) {
 	// getheaders race runs instead, which is harmless.
 	testing.expect(t, !_headers_up_to_date(900_000, 0), "zero-height peers never trigger the shortcut")
 }
+
+@(test)
+test_bip339_wtx_inv_type :: proc(t: ^testing.T) {
+	// Regression: Inv_Type lacked WTx (MSG_WTX = 5). BIP339 wtxid-relay peers
+	// announce transactions with inv type 5, so every modern peer's tx
+	// announcements fell through the inv handler's switch — the mempool
+	// stayed permanently empty at the tip and every compact block had to
+	// fetch ~all of its transactions via getblocktxn.
+	testing.expect_value(t, u32(wire.Inv_Type.WTx), 5)
+	// MSG_WITNESS_TX stays a distinct getdata-only value.
+	testing.expect_value(t, u32(wire.Inv_Type.Witness_Tx), 0x40000001)
+
+	// Wire roundtrip preserves the type.
+	inv := [1]wire.Inv_Vector{{type = .WTx, hash = {0 = 0xaa, 31 = 0xbb}}}
+	msg := wire.Inv_Message{inventory = inv[:]}
+	w := wire.writer_init(context.temp_allocator)
+	wire.serialize_inv(&w, &msg)
+	r := wire.reader_init(wire.writer_bytes(&w))
+	decoded, err := wire.deserialize_inv(&r, context.temp_allocator)
+	testing.expect(t, err == .None, "inv roundtrip failed")
+	testing.expect_value(t, len(decoded.inventory), 1)
+	testing.expect_value(t, u32(decoded.inventory[0].type), 5)
+	testing.expect_value(t, decoded.inventory[0].hash[0], 0xaa)
+}
