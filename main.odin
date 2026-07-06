@@ -897,12 +897,17 @@ main :: proc() {
 	}
 	mp := new(mempool.Mempool)
 	mempool.mempool_init(mp, cs, params, mp_config)
+	// Defers run LIFO: destroy must be registered FIRST so it runs AFTER the
+	// save. With the previous order, destroy freed every entry and the save
+	// then serialized dangling tx structs — every shutdown-written
+	// mempool.dat was garbage (empty 10-byte txs) and the loader skipped
+	// 100% of entries on the next start.
+	defer mempool.mempool_destroy(mp)
 	defer {
 		if mp.config.persist_mempool {
 			mempool.mempool_save(mp, cfg.data_dir)
 		}
 	}
-	defer mempool.mempool_destroy(mp)
 
 	if mp.config.persist_mempool {
 		mempool.mempool_load(mp, cfg.data_dir)

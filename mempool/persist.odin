@@ -238,5 +238,15 @@ _load_one :: proc(mp: ^Mempool, tx_data: []byte, orig_time: i64, err_counts: ^[M
 		return false
 	}
 	err_counts[mp_err] += 1
+	// Forensics for the first few failures: enough detail to identify the
+	// rejecting rule without a debugger.
+	@(static) logged := 0
+	if logged < 5 {
+		logged += 1
+		txid := wire.tx_id(&tx)
+		log.infof("mempool.dat reject #%d: err=%v version=%d vin=%d vout=%d witness=%v locktime=%d txid=%02x%02x%02x%02x...",
+			logged, mp_err, tx.version, len(tx.inputs), len(tx.outputs), len(tx.witness) > 0, tx.locktime,
+			txid[31], txid[30], txid[29], txid[28])
+	}
 	return false
 }
