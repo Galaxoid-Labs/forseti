@@ -31,6 +31,41 @@ sparkline :: proc(ring: []f32, idx, count, width: int, allocator := context.temp
 	return strings.to_string(b)
 }
 
+// Render a rate ring as a multi-row bar chart. Returns `rows` strings of
+// '#' (filled) and ' ' (empty), top row first — the renderer converts
+// '#' runs to solid reverse-video cells. Pure and unit-testable.
+bar_rows :: proc(ring: []f32, idx, count, width, rows: int, allocator := context.temp_allocator) -> []string {
+	out := make([]string, rows, allocator)
+	n := min(count, width)
+	peak: f32 = 1024
+	for i in 0 ..< count {
+		peak = max(peak, ring[i])
+	}
+	levels := make([]int, width, context.temp_allocator)
+	for i in 0 ..< n {
+		pos := (idx - n + i + 2 * len(ring)) % len(ring)
+		col := width - n + i
+		levels[col] = int((ring[pos] / peak) * f32(rows) + 0.5)
+	}
+	for r in 0 ..< rows {
+		b := strings.builder_make(allocator)
+		need := rows - r // row 0 (top) needs a full-height column
+		for c in 0 ..< width {
+			strings.write_byte(&b, levels[c] >= need ? '#' : ' ')
+		}
+		out[r] = strings.to_string(b)
+	}
+	return out
+}
+
+ring_peak :: proc(ring: []f32) -> f32 {
+	peak: f32 = 1024
+	for v in ring {
+		peak = max(peak, v)
+	}
+	return peak
+}
+
 fmt_bytes :: proc(n: i64, allocator := context.temp_allocator) -> string {
 	if n < 1024 { return fmt.aprintf("%dB", n, allocator = allocator) }
 	if n < 1024 * 1024 { return fmt.aprintf("%.0fK", f64(n) / 1024, allocator = allocator) }

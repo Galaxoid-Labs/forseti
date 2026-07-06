@@ -191,7 +191,7 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 	}
 
 	// Peers panel.
-	rows := min(st.peer_count, max(h - sync_h - 12, 1))
+	rows := min(st.peer_count, max(h - sync_h - clamp(h - 24, 2, 6) - 12, 1))
 	peers_h := rows + 3
 	pp := _panel(1 + sync_h, 0, peers_h, w, fmt.tprintf("Peers (%d)", st.peer_count))
 	if pp != nil {
@@ -202,23 +202,45 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 		_flip(pp)
 	}
 
-	// Network panel.
+	// Network panel: multi-row solid bar chart for IN (download dominates),
+	// compact sparkline strip for OUT. Chart height adapts to the terminal.
+	chart_rows := clamp(h - 24, 2, 6)
+	net_h := chart_rows + 4
 	net_y := 1 + sync_h + peers_h
-	np := _panel(net_y, 0, 4, w, "Network")
+	np := _panel(net_y, 0, net_h, w, "Network")
 	if np != nil {
-		spark_w := max(w - 28, 10)
+		chart_w := max(w - 18, 20)
 		in_rate, out_rate := current_rates()
-		_put(np, 1, 2, "IN ", P_BLUE, nc.A_BOLD)
-		_put(np, 1, 6, sparkline(g_net_in[:], g_net_idx, g_net_count, spark_w), P_BLUE)
-		_put(np, 1, 8 + spark_w, fmt.tprintf("%9s/s", fmt_bytes(i64(in_rate))), P_TEXT)
-		_put(np, 2, 2, "OUT", P_GREEN, nc.A_BOLD)
-		_put(np, 2, 6, sparkline(g_net_out[:], g_net_idx, g_net_count, spark_w), P_GREEN)
-		_put(np, 2, 8 + spark_w, fmt.tprintf("%9s/s", fmt_bytes(i64(out_rate))), P_TEXT)
+		_put(np, 1, 2, "IN", P_BLUE, nc.A_BOLD)
+		_put(np, 1, 5, fmt.tprintf("%9s/s", fmt_bytes(i64(in_rate))), P_TEXT, nc.A_BOLD)
+		_put(np, 1, 17, fmt.tprintf("(peak %s/s over 2 min)", fmt_bytes(i64(ring_peak(g_net_in[:])))), P_DIM)
+		rows := bar_rows(g_net_in[:], g_net_idx, g_net_count, chart_w, chart_rows)
+		for row, r in rows {
+			// Solid columns: '#' runs render as reverse-video spaces.
+			run_start := -1
+			for ci in 0 ..= len(row) {
+				filled := ci < len(row) && row[ci] == '#'
+				if filled && run_start < 0 {
+					run_start = ci
+				} else if !filled && run_start >= 0 {
+					nc.wattron(np, nc.color_pair(P_BLUE) | nc.A_REVERSE)
+					blanks := strings.repeat(" ", ci - run_start, context.temp_allocator)
+					cs := strings.clone_to_cstring(blanks, context.temp_allocator)
+					nc.mvwaddnstr(np, i32(2 + r), i32(2 + run_start), cs, i32(ci - run_start))
+					nc.wattroff(np, nc.color_pair(P_BLUE) | nc.A_REVERSE)
+					run_start = -1
+				}
+			}
+		}
+		out_y := 2 + chart_rows
+		_put(np, out_y, 2, "OUT", P_GREEN, nc.A_BOLD)
+		_put(np, out_y, 6, sparkline(g_net_out[:], g_net_idx, g_net_count, chart_w - 4), P_GREEN)
+		_put(np, out_y, 4 + chart_w, fmt.tprintf("%9s/s", fmt_bytes(i64(out_rate))), P_TEXT)
 		_flip(np)
 	}
 
 	// Node stats panel.
-	xp := _panel(net_y + 4, 0, 4, w, "Node")
+	xp := _panel(net_y + net_h, 0, 4, w, "Node")
 	if xp != nil {
 		_put(xp, 1, 2, stats_line(st), P_TEXT)
 		_put(xp, 2, 2, profile_line(st), P_DIM)

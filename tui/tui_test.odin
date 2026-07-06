@@ -83,3 +83,23 @@ test_blocks_line_eta_gate :: proc(t: ^testing.T) {
 	st.verification_pct = 0.5
 	testing.expect(t, strings.contains(blocks_line(&st), "ETA ~1h"), "ETA shown past gate")
 }
+
+@(test)
+test_bar_rows :: proc(t: ^testing.T) {
+	ring: [4]f32
+	ring[0] = 0     // empty column
+	ring[1] = 4096  // half of peak
+	ring[2] = 8192  // peak
+	rows := bar_rows(ring[:], 3, 3, 3, 4)
+	testing.expect_value(t, len(rows), 4)
+	// Peak column (last) filled in every row; zero column never filled.
+	for r in 0 ..< 4 {
+		testing.expect_value(t, rows[r][2], '#')
+		testing.expect_value(t, rows[r][0], ' ')
+	}
+	// Half column fills the bottom two of four rows only.
+	testing.expect_value(t, rows[0][1], ' ')
+	testing.expect_value(t, rows[1][1], ' ')
+	testing.expect_value(t, rows[2][1], '#')
+	testing.expect_value(t, rows[3][1], '#')
+}
