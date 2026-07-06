@@ -158,4 +158,5 @@ Node_Status :: struct {
 
 	// System
 	uptime_secs:       i64,
+	disk_usage:        i64, // blk+rev+chainstate bytes on disk (refreshed ~1/min)
 }

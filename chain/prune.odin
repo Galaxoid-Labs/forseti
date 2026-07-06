@@ -30,6 +30,9 @@ prune_block_files :: proc(cs: ^Chain_State, last_flushed_height: int) -> (files_
 	}
 	_, tip_height := chain_tip(cs)
 	prune_height := min(tip_height - MIN_BLOCKS_TO_KEEP, last_flushed_height)
+	log.infof("Prune check: tip=%d flushed=%d prune_height=%d target=%d MB blk_cur=%d rev_cur=%d",
+		tip_height, last_flushed_height, prune_height, cs.prune_target / 1_048_576,
+		cs.block_db.files.current_file, cs.undo_files.current_file)
 	if prune_height <= 0 {
 		return 0, 0
 	}
@@ -70,10 +73,14 @@ prune_block_files :: proc(cs: ^Chain_State, last_flushed_height: int) -> (files_
 	for fn in u32(0) ..= cs.undo_files.current_file {
 		total += storage.flat_file_size(&cs.undo_files, fn)
 	}
+	log.infof("Prune check: total on disk = %d MB", total / 1_048_576)
 	if total <= i64(cs.prune_target) {
 		return 0, 0
 	}
 
+	log.infof("Prune: tip=%d prune_height=%d total=%d MB target=%d MB blk_files=%d(cur %d) rev_files=%d(cur %d)",
+		tip_height, prune_height, total / 1_048_576, cs.prune_target / 1_048_576,
+		len(blk_stats), cs.block_db.files.current_file, len(rev_stats), cs.undo_files.current_file)
 	fd_blk, freed_blk := _prune_pass(cs, &cs.block_db.files, blk_stats, {.Has_Data}, prune_height, &total)
 	fd_rev, freed_rev := _prune_pass(cs, &cs.undo_files, rev_stats, {.Has_Undo}, prune_height, &total)
 	files_deleted = fd_blk + fd_rev

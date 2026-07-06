@@ -1260,3 +1260,17 @@ chain_tx_at_tip :: proc(cs: ^Chain_State) -> i64 {
 	if entry, found := cs.block_index.entries[tip_hash]; found { return entry.chain_tx }
 	return 0
 }
+
+// Total bytes of block/undo flat files plus the chainstate DB on disk.
+// Walks file sizes (a few thousand stat calls) — call sparingly.
+disk_usage :: proc(cs: ^Chain_State) -> i64 {
+	total: i64 = 0
+	for fn in u32(0) ..= cs.block_db.files.current_file {
+		total += storage.flat_file_size(&cs.block_db.files, fn)
+	}
+	for fn in u32(0) ..= cs.undo_files.current_file {
+		total += storage.flat_file_size(&cs.undo_files, fn)
+	}
+	total += storage.ldb_dir_size(&cs.store)
+	return total
+}

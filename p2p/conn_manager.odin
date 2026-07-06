@@ -78,6 +78,8 @@ Conn_Manager :: struct {
 	txput_ring:     [120]struct{ chain_tx: i64, t: i64 },
 	txput_idx:      int,
 	txput_count:    int,
+	disk_usage:     i64, // cached datadir usage (walking files is too heavy per tick)
+	disk_check_at:  i64,
 }
 
 conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) -> Net_Error {
@@ -1821,6 +1823,13 @@ _update_node_status :: proc(cm: ^Conn_Manager, now: i64) {
 		st.mempool_count = len(cm.mp.entries)
 		st.mempool_vbytes = cm.mp.usage
 	}
+
+	// Disk usage: a few thousand stat calls — refresh once a minute.
+	if now - cm.disk_check_at >= 60 {
+		cm.disk_usage = chain.disk_usage(cm.chain)
+		cm.disk_check_at = now
+	}
+	st.disk_usage = cm.disk_usage
 
 	// UTXO cache
 	st.utxo_cache_count = len(cm.chain.coins.cache)

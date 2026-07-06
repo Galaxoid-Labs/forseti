@@ -11,7 +11,8 @@ Static_Info :: struct {
 	network:    string,
 	rpc_port:   int,
 	dbcache_mb: int,
-	prune_mb:   int, // 0 = unpruned
+	prune_mb:   int,    // 0 = unpruned
+	data_dir:   string,
 }
 
 WIN_W :: 900
@@ -264,11 +265,11 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	}
 
 	// --- Status bar ---
+	prune_part := info.prune_mb > 0 ? fmt.tprintf("prune=%d MB   |   ", info.prune_mb) : ""
 	rl.GuiStatusBar(
 		rl.Rectangle{0, WIN_H - 28, WIN_W, 28},
-		info.prune_mb > 0 \
-			? fmt.ctprintf("  RPC on :%d   |   dbcache=%d MB   |   prune=%d MB   |   %s", info.rpc_port, info.dbcache_mb, info.prune_mb, info.network) \
-			: fmt.ctprintf("  RPC on :%d   |   dbcache=%d MB   |   %s", info.rpc_port, info.dbcache_mb, info.network))
+		fmt.ctprintf("  :%d   |   dbcache=%d MB   |   %sdisk %s   |   %s",
+			info.rpc_port, info.dbcache_mb, prune_part, _fmt_bytes(st.disk_usage), info.data_dir))
 }
 
 // Minimal view when P2P is disabled (--no-p2p): chain height only, read

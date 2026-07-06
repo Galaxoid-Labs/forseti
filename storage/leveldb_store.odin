@@ -1,6 +1,7 @@
 package storage
 
 import "core:c"
+import "core:fmt"
 import "core:log"
 import "core:os"
 
@@ -14,6 +15,8 @@ LDB_Store :: struct {
 	write_opts:         LDB_WriteOptions,  // non-sync (normal writes)
 	sync_opts:          LDB_WriteOptions,  // sync (flush/critical)
 	coins_cache_budget: int,               // bytes available for in-memory coins cache
+	chainstate_path:    string,            // heap-owned, for disk usage reporting
+	index_path:         string,
 }
 
 ldb_open :: proc(data_dir: string, db_cache_mb: int = 450) -> (store: LDB_Store, err: Storage_Error) {
@@ -67,6 +70,7 @@ ldb_open :: proc(data_dir: string, db_cache_mb: int = 450) -> (store: LDB_Store,
 		return store, .IO_Error
 	}
 	leveldb_options_destroy(cs_opts)
+	store.chainstate_path = fmt.aprintf("%s/chainstate", data_dir)
 	log.infof("Chainstate LevelDB opened")
 
 	// --- Open block index DB: <datadir>/blocks/index/ ---
@@ -87,6 +91,7 @@ ldb_open :: proc(data_dir: string, db_cache_mb: int = 450) -> (store: LDB_Store,
 	idx_path_len := _bprint_path(idx_path_buf[:], data_dir, "/blocks/index")
 	idx_path_buf[idx_path_len] = 0
 	os.make_directory(string(idx_path_buf[:idx_path_len]))
+	store.index_path = fmt.aprintf("%s/blocks/index", data_dir)
 
 	errptr = nil
 	store.index_db = leveldb_open(idx_opts, cstring(&idx_path_buf[0]), &errptr)
@@ -249,4 +254,21 @@ _ldb_cleanup_options :: proc(store: ^LDB_Store, opts: LDB_Options) {
 		leveldb_cache_destroy(store.coins_db_cache)
 		store.coins_db_cache = nil
 	}
+}
+
+// Approximate on-disk size of both LevelDB instances.
+ldb_dir_size :: proc(store: ^LDB_Store) -> i64 {
+	return _ldb_dir_size(store.chainstate_path) + _ldb_dir_size(store.index_path)
+}
+
+_ldb_dir_size :: proc(dir: string) -> i64 {
+	dh, derr := os.open(dir)
+	if derr != nil { return 0 }
+	defer os.close(dh)
+	entries, _ := os.read_dir(dh, -1, context.temp_allocator)
+	total: i64 = 0
+	for entry in entries {
+		total += entry.size
+	}
+	return total
 }

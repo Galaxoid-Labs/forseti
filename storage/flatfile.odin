@@ -38,11 +38,11 @@ flat_file_open :: proc(data_dir: string, prefix: string) -> (mgr: Flat_File_Mana
 	mgr.fd = nil
 
 	// Flat files live in <data_dir>/blocks/ (Core-compatible). Datadirs from
-	// before this layout have them at the datadir root — keep using that
-	// location if file 0 exists there (no migration).
-	legacy_buf: [512]byte
-	legacy := fmt.bprintf(legacy_buf[:], "%s/%s00000.dat", data_dir, prefix)
-	if os.exists(legacy) {
+	// before this layout have them at the datadir root — keep using the root
+	// if ANY prefix file lives there. Checking only for file 0 broke the
+	// moment pruning deleted it: the manager flipped to an empty blocks/ dir
+	// and went blind to thousands of surviving root files.
+	if _dir_has_flat_files(data_dir, prefix) {
 		mgr.dir = data_dir
 	} else {
 		blocks_buf: [512]byte
@@ -223,4 +223,21 @@ flat_file_size :: proc(mgr: ^Flat_File_Manager, file_num: u32) -> i64 {
 	sz, serr := os.file_size(fd)
 	if serr != nil { return 0 }
 	return sz
+}
+
+// Whether a directory contains any "<prefix>NNNNN.dat" flat file.
+_dir_has_flat_files :: proc(dir: string, prefix: string) -> bool {
+	dh, derr := os.open(dir)
+	if derr != nil { return false }
+	defer os.close(dh)
+	entries, _ := os.read_dir(dh, -1, context.temp_allocator)
+	for entry in entries {
+		name := entry.name
+		if len(name) != len(prefix) + 9 { continue }
+		if !strings.has_prefix(name, prefix) || !strings.has_suffix(name, ".dat") { continue }
+		if _, ok := strconv.parse_uint(name[len(prefix):len(name) - 4]); ok {
+			return true
+		}
+	}
+	return false
 }

@@ -1087,7 +1087,7 @@ main :: proc() {
 	// graceful shutdown path as SIGINT. Without --gui nothing here runs and
 	// the node stays fully headless.
 	if cfg.gui {
-		if gui.run(cm, cs, gui.Static_Info{network = cfg.network, rpc_port = rpc_port, dbcache_mb = cfg.db_cache_mb, prune_mb = cfg.prune_mb}) {
+		if gui.run(cm, cs, gui.Static_Info{network = cfg.network, rpc_port = rpc_port, dbcache_mb = cfg.db_cache_mb, prune_mb = cfg.prune_mb, data_dir = cfg.data_dir}) {
 			// Window was closed (or node stopped) — same path as SIGINT.
 			if srv != nil {
 				rpc.rpc_server_stop(srv)
