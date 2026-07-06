@@ -75,6 +75,23 @@ RPC credentials or cookie, v2transport/GUI defaults — writes btcnode.conf
 and offers to start syncing immediately. Runs on the same bindings + a small
 hand-rolled field/focus widget layer.
 
+**Aesthetic: kernel-menuconfig (lxdialog) style.** lxdialog is a dialog
+toolkit the kernel builds on plain ncurses — everything it does is
+reproducible with our bindings plus a few additions:
+
+- full-screen blue backdrop (`wbkgd` on stdscr with a blue color pair)
+- centered light dialog box with a drop shadow (a black-filled window
+  offset +1,+2 rendered beneath the dialog window)
+- menu list with an `A_REVERSE` selection bar and contrast-colored hotkey
+  letters; arrow-key navigation (bind `KEY_UP/KEY_DOWN/KEY_ENTER`)
+- `<Select> / <Exit> / <Help>` button row, reverse-video focus, left/right
+  to move between buttons
+- instruction paragraph at the top of the dialog (like menuconfig's header)
+
+Bindings to add for the wizard: `wbkgd`, `KEY_*` constants, `mvwhline`,
+and echo-controlled text input for fields (`wgetnstr` or hand-rolled from
+`getch` for cursor control).
+
 ## Testing
 
 - Bindings smoke test behind a TTY check (skip in CI/non-tty test runs).
