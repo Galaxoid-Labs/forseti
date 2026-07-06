@@ -237,7 +237,7 @@ v2_transport_receive :: proc(t: ^V2_Transport, data: []byte, allocator := contex
 				return messages, decrypt_err
 			}
 			t.state = .Active
-			log.debugf("V2 handshake complete (session_id=%02x%02x%02x%02x...)",
+			log.infof("V2 handshake complete (session_id=%02x%02x%02x%02x...)",
 				t.keys.session_id[0], t.keys.session_id[1],
 				t.keys.session_id[2], t.keys.session_id[3])
 
