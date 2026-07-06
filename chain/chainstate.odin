@@ -1168,6 +1168,20 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 		log.infof("Crash recovery: index tip %d > meta tip %d, rolling back %d blocks via undo data",
 			best_valid.height, meta_height, best_valid.height - meta_height)
 
+		// Records written before format v3 lack undo locations — rebuild
+		// them from the rev files before rolling back.
+		needs_rebuild := false
+		for entry := best_valid; entry != nil && entry.height > meta_height; entry = entry.prev {
+			if .Has_Undo in entry.status && entry.undo_size == 0 {
+				needs_rebuild = true
+				break
+			}
+		}
+		if needs_rebuild && !_rebuild_undo_locations(cs, meta_height, best_valid) {
+			log.errorf("Crash recovery: could not rebuild undo locations — leaving state untouched")
+			return
+		}
+
 		for entry := best_valid; entry != nil && entry.height > meta_height; entry = entry.prev {
 			if rerr := _rollback_block_for_recovery(cs, entry); rerr != .None {
 				log.errorf("Crash recovery: rollback failed at height %d (%v) — UTXO set may be inconsistent",
@@ -1184,6 +1198,130 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 	}
 }
 
+// Rebuild in-memory undo locations for (meta_height, tip] by scanning the
+// rev files. Undo records carry no block hash, but they are appended in
+// connect order — which equals height order on a node that has never
+// reorged mid-range — so the stream tail aligns with the index tip. Every
+// assignment is content-verified against its block (spent-coin count and
+// first spent outpoint must match the block's non-coinbase inputs) before
+// anything is rolled back; any mismatch aborts untouched. Rebuilt locations
+// are persisted so the next startup doesn't rescan.
+_rebuild_undo_locations :: proc(cs: ^Chain_State, meta_height: int, tip: ^Block_Index_Entry) -> bool {
+	Undo_Pos :: struct {
+		file_num: u32,
+		offset:   u32,
+		size:     u32,
+	}
+	// Heap, NOT temp: _verify_undo_matches_block free_all()s the temp
+	// allocator per block (blocks+undo would otherwise pile up ~2.5MB ×
+	// thousands of blocks).
+	positions := make([dynamic]Undo_Pos, 0, 16384)
+	defer delete(positions)
+
+	// Forward-parse every remaining rev file in ascending order:
+	// records are [size:4 LE][payload].
+	for fn in 0 ..= cs.undo_files.current_file {
+		fsize := storage.flat_file_size(&cs.undo_files, fn)
+		if fsize <= 0 {
+			continue // pruned or absent
+		}
+		off: u32 = 0
+		for i64(off) + 4 <= fsize {
+			hdr, herr := storage.flat_file_read(&cs.undo_files, storage.File_Pos{file_num = fn, offset = off}, 4, context.temp_allocator)
+			if herr != .None {
+				break
+			}
+			rec_size := u32(hdr[0]) | u32(hdr[1]) << 8 | u32(hdr[2]) << 16 | u32(hdr[3]) << 24
+			if rec_size == 0 || i64(off) + 4 + i64(rec_size) > fsize {
+				break // truncated tail (interrupted final write)
+			}
+			append(&positions, Undo_Pos{file_num = fn, offset = off + 4, size = rec_size})
+			off += 4 + rec_size
+			if len(positions) % 4096 == 0 {
+				free_all(context.temp_allocator) // header reads
+			}
+		}
+	}
+
+	// Tail-align: last record ↔ index tip, walking both backward.
+	idx := len(positions) - 1
+	for entry := tip; entry != nil && entry.height > meta_height; entry = entry.prev {
+		if idx < 0 {
+			log.errorf("Undo rebuild: rev stream exhausted at height %d", entry.height)
+			return false
+		}
+		pos := positions[idx]
+		idx -= 1
+		entry.undo_file_num = pos.file_num
+		entry.undo_offset = pos.offset
+		entry.undo_size = pos.size
+
+		if !_verify_undo_matches_block(cs, entry) {
+			log.errorf("Undo rebuild: content mismatch at height %d (rev file %d off %d) — aborting",
+				entry.height, pos.file_num, pos.offset)
+			return false
+		}
+	}
+
+	// Persist the verified locations (format v3) so restarts skip the scan.
+	for entry := tip; entry != nil && entry.height > meta_height; entry = entry.prev {
+		rec := block_index_to_record(entry)
+		storage.index_db_put(&cs.index_db, rec)
+	}
+
+	log.infof("Undo rebuild: verified and persisted %d undo locations", tip.height - meta_height)
+	return true
+}
+
+// Content check: the undo record's spent coins must correspond 1:1 (count
+// and first outpoint) with the block's non-coinbase inputs.
+_verify_undo_matches_block :: proc(cs: ^Chain_State, entry: ^Block_Index_Entry) -> bool {
+	if .Has_Data not_in entry.status {
+		return false
+	}
+	loc := storage.Block_Location{
+		file_num    = entry.file_num,
+		data_offset = entry.data_offset,
+		data_size   = entry.data_size,
+	}
+	raw, rerr := storage.block_db_read_raw(&cs.block_db, loc, context.temp_allocator)
+	if rerr != .None {
+		return false
+	}
+	r := wire.reader_init(raw)
+	block, derr := wire.deserialize_block(&r, context.temp_allocator)
+	if derr != nil {
+		return false
+	}
+
+	undo, uerr := read_block_undo(&cs.undo_files, entry, context.temp_allocator)
+	if uerr != .None {
+		return false
+	}
+
+	input_count := 0
+	first_prevout: wire.Outpoint
+	have_first := false
+	for tx_idx in 1 ..< len(block.txs) { // skip coinbase
+		for in_idx in 0 ..< len(block.txs[tx_idx].inputs) {
+			if !have_first {
+				first_prevout = block.txs[tx_idx].inputs[in_idx].previous_output
+				have_first = true
+			}
+			input_count += 1
+		}
+	}
+
+	if len(undo.spent_coins) != input_count {
+		return false
+	}
+	if input_count > 0 && undo.spent_coins[0].outpoint != first_prevout {
+		return false
+	}
+	free_all(context.temp_allocator)
+	return true
+}
+
 // Force-undo one block into the coins cache, tolerant of partially-applied
 // on-disk state: created outputs are deleted whether or not they exist;
 // spent inputs are restored unconditionally from the undo record. Purely
@@ -1191,6 +1329,9 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 // before the active chain is rebuilt).
 _rollback_block_for_recovery :: proc(cs: ^Chain_State, entry: ^Block_Index_Entry) -> Chain_Error {
 	if .Has_Data not_in entry.status || .Has_Undo not_in entry.status {
+		log.errorf("recovery rollback %d: status=%v file=%d off=%d size=%d undo_file=%d undo_off=%d undo_size=%d",
+			entry.height, entry.status, entry.file_num, entry.data_offset, entry.data_size,
+			entry.undo_file_num, entry.undo_offset, entry.undo_size)
 		return .Storage_Error
 	}
 
@@ -1201,16 +1342,21 @@ _rollback_block_for_recovery :: proc(cs: ^Chain_State, entry: ^Block_Index_Entry
 	}
 	raw, rerr := storage.block_db_read_raw(&cs.block_db, loc, context.temp_allocator)
 	if rerr != .None {
+		log.errorf("recovery rollback %d: block read failed (%v) file=%d off=%d size=%d",
+			entry.height, rerr, entry.file_num, entry.data_offset, entry.data_size)
 		return .Storage_Error
 	}
 	r := wire.reader_init(raw)
 	block, derr := wire.deserialize_block(&r, context.temp_allocator)
 	if derr != nil {
+		log.errorf("recovery rollback %d: block deserialize failed (%v)", entry.height, derr)
 		return .Storage_Error
 	}
 
 	undo, uerr := read_block_undo(&cs.undo_files, entry, context.temp_allocator)
 	if uerr != .None {
+		log.errorf("recovery rollback %d: undo read failed (%v) undo_file=%d undo_off=%d undo_size=%d",
+			entry.height, uerr, entry.undo_file_num, entry.undo_offset, entry.undo_size)
 		return uerr
 	}
 

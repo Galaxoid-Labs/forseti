@@ -27,12 +27,16 @@ Block_Index_Record :: struct {
 	nonce:       u32,
 	status:      Block_Status,
 	num_tx:      u32,
+	undo_file_num: u32,
+	undo_offset:   u32,
+	undo_size:     u32,
 }
 
 // Fixed size of a record on disk:
 // length(4) + hash(32) + prev_hash(32) + height(4) + file_num(4) + data_offset(4) + data_size(4) +
 // version(4) + timestamp(4) + bits(4) + nonce(4) + status(1) + num_tx(4) = 105 bytes
-BLOCK_INDEX_RECORD_SIZE :: 105
+BLOCK_INDEX_RECORD_SIZE :: 117 // v3: + undo location (3×u32)
+BLOCK_INDEX_RECORD_SIZE_V2 :: 105 // num_tx, no undo location
 
 // Legacy record size (before num_tx was added). Used for backward-compatible deserialization.
 BLOCK_INDEX_RECORD_SIZE_LEGACY :: 101
@@ -237,6 +241,15 @@ _serialize_index_record :: proc(buf: ^[BLOCK_INDEX_RECORD_SIZE]byte, rec: Block_
 	buf[off] = byte(rec.num_tx >> 8); off += 1
 	buf[off] = byte(rec.num_tx >> 16); off += 1
 	buf[off] = byte(rec.num_tx >> 24); off += 1
+
+	// undo location (3×4 LE) — v3. Memory-only before this: any undo use
+	// across a restart (crash-recovery rollback, deep reorg) was impossible.
+	for v in ([3]u32{rec.undo_file_num, rec.undo_offset, rec.undo_size}) {
+		buf[off] = byte(v); off += 1
+		buf[off] = byte(v >> 8); off += 1
+		buf[off] = byte(v >> 16); off += 1
+		buf[off] = byte(v >> 24); off += 1
+	}
 }
 
 _deserialize_index_record :: proc(data: []byte) -> (rec: Block_Index_Record, ok: bool) {
@@ -297,9 +310,19 @@ _deserialize_index_record :: proc(data: []byte) -> (rec: Block_Index_Record, ok:
 	rec.status = transmute(Block_Status)data[off]
 	off += 1
 
-	// num_tx (4 LE) — only present in new format (105+ bytes)
-	if len(data) >= BLOCK_INDEX_RECORD_SIZE {
+	// num_tx (4 LE) — v2+
+	if len(data) >= BLOCK_INDEX_RECORD_SIZE_V2 {
 		rec.num_tx = u32(data[off]) | u32(data[off + 1]) << 8 | u32(data[off + 2]) << 16 | u32(data[off + 3]) << 24
+		off += 4
+	}
+
+	// undo location — v3+ (older records read as zeros = unknown)
+	if len(data) >= BLOCK_INDEX_RECORD_SIZE {
+		rec.undo_file_num = u32(data[off]) | u32(data[off + 1]) << 8 | u32(data[off + 2]) << 16 | u32(data[off + 3]) << 24
+		off += 4
+		rec.undo_offset = u32(data[off]) | u32(data[off + 1]) << 8 | u32(data[off + 2]) << 16 | u32(data[off + 3]) << 24
+		off += 4
+		rec.undo_size = u32(data[off]) | u32(data[off + 1]) << 8 | u32(data[off + 2]) << 16 | u32(data[off + 3]) << 24
 	}
 
 	return rec, true

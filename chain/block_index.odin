@@ -89,6 +89,9 @@ block_index_load :: proc(idx: ^Block_Index, db: ^storage.Index_DB) {
 		entry.data_offset = rec.data_offset
 		entry.data_size = rec.data_size
 		entry.num_tx = rec.num_tx
+		entry.undo_file_num = rec.undo_file_num
+		entry.undo_offset = rec.undo_offset
+		entry.undo_size = rec.undo_size
 		idx.entries[hash] = entry
 	}
 
@@ -246,6 +249,9 @@ block_index_to_record :: proc(entry: ^Block_Index_Entry) -> storage.Block_Index_
 		data_offset = entry.data_offset,
 		data_size   = entry.data_size,
 		num_tx      = entry.num_tx,
+		undo_file_num = entry.undo_file_num,
+		undo_offset   = entry.undo_offset,
+		undo_size     = entry.undo_size,
 	}
 }
 
