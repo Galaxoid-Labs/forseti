@@ -2,6 +2,7 @@ package chain
 
 import "core:log"
 import "core:mem"
+import "core:mem/virtual"
 import "core:os"
 import "core:sync"
 import "core:thread"
@@ -22,18 +23,19 @@ Chain_State :: struct {
 	active_chain:   [dynamic]Hash256,
 	undo_files:     storage.Flat_File_Manager,
 	params:         ^consensus.Chain_Params,
-	// Per-input verification arena: heap-allocated once, reset between inputs (serial path).
-	verify_buf:     []byte,
-	verify_arena:   mem.Arena,
+	// Per-input verification arena (growing, serial path). BIP342 tapscripts have
+	// no script size cap, so a fixed arena can be exhausted by a single input
+	// (mainnet 899747: 3.95MB single-input tx) — silent alloc failures then panic.
+	verify_arena:   virtual.Arena,
 	verify_alloc:   mem.Allocator,
 	// Parallel script verification
 	verify_pool:    thread.Pool,
 	verify_wg:      sync.Wait_Group,
 	script_threads: int, // >= 2 = parallel (pool active), < 2 = serial (no pool)
-	// Arena buffer pool for parallel workers (avoids alloc/free per check)
-	arena_pool_bufs:  [][]byte,    // pre-allocated 8MB buffers, one per worker thread
-	arena_pool_stack: [dynamic]int, // indices of available buffers (protected by mutex)
-	arena_pool_mu:    sync.Mutex,
+	// Growing-arena pool for parallel workers (avoids alloc/free per check)
+	arena_pool_arenas: []virtual.Arena, // one growing arena per worker thread
+	arena_pool_stack:  [dynamic]int,    // indices of available arenas (protected by mutex)
+	arena_pool_mu:     sync.Mutex,
 	// BIP 158 compact block filter index (nil when disabled)
 	filter_db: ^storage.Filter_DB,
 	// Performance profiling counters (cumulative, logged every 1000 blocks)
@@ -131,10 +133,12 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	// Compute cumulative chain_tx for the active chain
 	_compute_chain_tx(cs)
 
-	// Allocate persistent per-input verification arena (4 MB, reused across blocks)
-	cs.verify_buf = make([]byte, 4 * 1024 * 1024)
-	mem.arena_init(&cs.verify_arena, cs.verify_buf)
-	cs.verify_alloc = mem.arena_allocator(&cs.verify_arena)
+	// Persistent per-input verification arena (growing; starts at 8 MB, grows for
+	// oversized tapscripts, overflow blocks released on each free_all)
+	if verr := virtual.arena_init_growing(&cs.verify_arena, 8 * 1024 * 1024); verr != nil {
+		return .Storage_Error
+	}
+	cs.verify_alloc = virtual.arena_allocator(&cs.verify_arena)
 
 	// Initialize parallel script verification thread pool
 	cs.script_threads = script_threads
@@ -142,11 +146,13 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 		thread.pool_init(&cs.verify_pool, context.allocator, script_threads)
 		thread.pool_start(&cs.verify_pool)
 
-		// Pre-allocate arena buffers for workers (avoids alloc/free per check).
-		cs.arena_pool_bufs = make([][]byte, script_threads)
+		// Pre-initialize growing arenas for workers (avoids alloc/free per check).
+		cs.arena_pool_arenas = make([]virtual.Arena, script_threads)
 		cs.arena_pool_stack = make([dynamic]int, 0, script_threads)
 		for i in 0 ..< script_threads {
-			cs.arena_pool_bufs[i] = make([]byte, 8 * 1024 * 1024)
+			if verr := virtual.arena_init_growing(&cs.arena_pool_arenas[i], 8 * 1024 * 1024); verr != nil {
+				return .Storage_Error
+			}
 			append(&cs.arena_pool_stack, i)
 		}
 	}
@@ -168,10 +174,10 @@ chain_state_destroy :: proc(cs: ^Chain_State) {
 	if cs.script_threads >= 2 {
 		thread.pool_join(&cs.verify_pool)
 		thread.pool_destroy(&cs.verify_pool)
-		for buf in cs.arena_pool_bufs {
-			delete(buf)
+		for &arena in cs.arena_pool_arenas {
+			virtual.arena_destroy(&arena)
 		}
-		delete(cs.arena_pool_bufs)
+		delete(cs.arena_pool_arenas)
 		delete(cs.arena_pool_stack)
 	}
 
@@ -193,9 +199,7 @@ chain_state_destroy :: proc(cs: ^Chain_State) {
 	storage.flat_file_close(&cs.undo_files)
 	block_index_destroy(&cs.block_index)
 	delete(cs.active_chain)
-	if cs.verify_buf != nil {
-		delete(cs.verify_buf)
-	}
+	virtual.arena_destroy(&cs.verify_arena)
 }
 
 // Get current tip hash and height.
@@ -224,6 +228,7 @@ chain_header_height :: proc(cs: ^Chain_State) -> int {
 connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_Entry, precomputed_txids: []Hash256 = nil) -> Chain_Error {
 	height := entry.height
 	t_start := time.tick_now()
+
 
 	// Use pre-computed txids (from raw-byte hashing during deserialization) when available.
 	// Otherwise, compute by re-serializing each tx (slower fallback for accept_block path).

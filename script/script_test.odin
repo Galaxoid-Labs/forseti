@@ -5,6 +5,7 @@ import "../wire"
 import "core:encoding/hex"
 import "core:fmt"
 import "core:mem"
+import "core:mem/virtual"
 import "core:os"
 import "core:strconv"
 import "core:strings"
@@ -1667,4 +1668,89 @@ test_signet_297396_tx1_policy_flags_not_consensus :: proc(t: ^testing.T) {
 	}
 	perr := verify_script(&policy_verifier, tx.inputs[0].script_sig, spent_outputs[0].script_pubkey, nil)
 	testing.expect(t, perr == .Sig_Null_Fail, fmt.tprintf("expected Sig_Null_Fail with policy flags, got %v", perr))
+}
+
+@(test)
+test_mainnet_899747_big_tapscript_growing_arena :: proc(t: ^testing.T) {
+	// Real-world regression test: mainnet block 899747, tx index 1
+	// (8ecfefd438a229c7cea10f6973f49d8bbe3a620fd557f7f2cb3658ac59510249).
+	// A 3.95MB single-input taproot script-path spend with 859 witness items.
+	// BIP342 tapscripts have no size cap, so this single input exhausted the
+	// old fixed 4MB serial-path verification arena: temp allocations failed
+	// silently and script_num_encode paniced on an empty dynamic array
+	// ("Index -1 is out of range"), killing the node at 93.9% of mainnet IBD.
+	// connect_block now verifies on growing virtual arenas; this test runs the
+	// same tx under one, proving verification completes and the spend is valid.
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	src_dir := #location().file_path
+	base_dir := src_dir[:strings.last_index(src_dir, "/")]
+	tx_hex_raw, tx_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/mainnet_899747_tx_big.hex", base_dir), context.allocator)
+	if tx_read_err != nil {
+		testing.expect(t, false, "failed to read testdata/mainnet_899747_tx_big.hex")
+		return
+	}
+	defer delete(tx_hex_raw)
+
+	prevout_raw, prev_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/mainnet_899747_tx_big_prevouts.txt", base_dir), context.allocator)
+	if prev_read_err != nil {
+		testing.expect(t, false, "failed to read prevouts file")
+		return
+	}
+	defer delete(prevout_raw)
+
+	// Same allocator setup as the fixed serial verification path: growing
+	// virtual arena with an 8MB initial block.
+	arena: virtual.Arena
+	verr := virtual.arena_init_growing(&arena, 8 * 1024 * 1024)
+	if verr != nil {
+		testing.expect(t, false, "failed to init growing arena")
+		return
+	}
+	defer virtual.arena_destroy(&arena)
+	prev_temp := context.temp_allocator
+	context.temp_allocator = virtual.arena_allocator(&arena)
+	defer { context.temp_allocator = prev_temp }
+
+	tx_hex_str := strings.trim_space(string(tx_hex_raw))
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str, context.temp_allocator)
+	if !hex_ok {
+		testing.expect(t, false, "failed to hex-decode tx")
+		return
+	}
+
+	r := wire.reader_init(tx_bytes)
+	tx, tx_err := wire.deserialize_tx(&r, context.temp_allocator)
+	if tx_err != nil {
+		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
+		return
+	}
+
+	testing.expect_value(t, len(tx.inputs), 1)
+	testing.expect_value(t, len(tx.witness), 1)
+	testing.expect_value(t, len(tx.witness[0]), 859)
+
+	parts := strings.split(strings.trim_space(string(prevout_raw)), " ", context.temp_allocator)
+	value, val_ok := strconv.parse_i64(parts[0])
+	testing.expect(t, val_ok, "bad prevout value")
+	spk, spk_ok := hex.decode(transmute([]u8)parts[1], context.temp_allocator)
+	testing.expect(t, spk_ok, "bad prevout script hex")
+
+	spent_outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
+	spent_outputs[0] = wire.Tx_Out{value = value, script_pubkey = spk}
+
+	flags := Verify_Flags{.P2SH, .DER_Sig, .Check_Locktime, .Check_Sequence, .Witness, .Null_Dummy}
+	sighash_cache: Sighash_Cache
+	verifier := Script_Verifier {
+		tx            = &tx,
+		input_idx     = 0,
+		amount        = value,
+		flags         = flags,
+		spent_outputs = spent_outputs,
+		sighash_cache = &sighash_cache,
+	}
+
+	serr := verify_script(&verifier, tx.inputs[0].script_sig, spk, tx.witness[0])
+	testing.expect(t, serr == .None, fmt.tprintf("big tapscript should verify: got %v", serr))
 }

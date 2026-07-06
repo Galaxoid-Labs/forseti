@@ -1,7 +1,7 @@
 package chain
 
 import "core:log"
-import "core:mem"
+import "core:mem/virtual"
 import "core:sync"
 import "core:thread"
 import "../script"
@@ -46,14 +46,14 @@ Script_Check_Batch :: struct {
 script_check_worker :: proc(task: thread.Task) {
 	check := cast(^Script_Check)task.data
 
-	// Acquire a pre-allocated 4 MB arena buffer from the pool.
-	arena_buf := _arena_pool_acquire(check.control.cs)
-	defer _arena_pool_release(check.control.cs, arena_buf)
-
-	arena: mem.Arena
-	mem.arena_init(&arena, arena_buf)
-	alloc := mem.arena_allocator(&arena)
-	context.temp_allocator = alloc
+	// Acquire a growing arena from the pool (grows past its 8 MB initial block
+	// for oversized tapscripts; free_all releases the overflow blocks).
+	arena := _arena_pool_acquire(check.control.cs)
+	defer {
+		virtual.arena_free_all(arena)
+		_arena_pool_release(check.control.cs, arena)
+	}
+	context.temp_allocator = virtual.arena_allocator(arena)
 
 	verifier := script.Script_Verifier {
 		tx            = check.tx,
@@ -77,27 +77,27 @@ script_check_worker :: proc(task: thread.Task) {
 	sync.wait_group_done(check.control.wg)
 }
 
-// Acquire a pre-allocated arena buffer from the pool. Spins if none available.
-_arena_pool_acquire :: proc(cs: ^Chain_State) -> []byte {
+// Acquire a growing arena from the pool. Spins if none available.
+_arena_pool_acquire :: proc(cs: ^Chain_State) -> ^virtual.Arena {
 	for {
 		sync.mutex_lock(&cs.arena_pool_mu)
 		if len(cs.arena_pool_stack) > 0 {
 			idx := pop(&cs.arena_pool_stack)
 			sync.mutex_unlock(&cs.arena_pool_mu)
-			return cs.arena_pool_bufs[idx]
+			return &cs.arena_pool_arenas[idx]
 		}
 		sync.mutex_unlock(&cs.arena_pool_mu)
-		// All buffers in use — brief yield and retry.
+		// All arenas in use — brief yield and retry.
 		thread.yield()
 	}
 }
 
-// Return an arena buffer to the pool.
-_arena_pool_release :: proc(cs: ^Chain_State, buf: []byte) {
+// Return an arena to the pool.
+_arena_pool_release :: proc(cs: ^Chain_State, arena: ^virtual.Arena) {
 	sync.mutex_lock(&cs.arena_pool_mu)
 	// Find the index by pointer identity.
-	for i in 0 ..< len(cs.arena_pool_bufs) {
-		if raw_data(cs.arena_pool_bufs[i]) == raw_data(buf) {
+	for i in 0 ..< len(cs.arena_pool_arenas) {
+		if &cs.arena_pool_arenas[i] == arena {
 			append(&cs.arena_pool_stack, i)
 			break
 		}
@@ -183,14 +183,13 @@ Prefetch_Task :: struct {
 prefetch_worker :: proc(task: thread.Task) {
 	pt := cast(^Prefetch_Task)task.data
 
-	// Acquire a pre-allocated arena buffer for temp allocations (ldb_get internals).
-	arena_buf := _arena_pool_acquire(pt.cs)
-	defer _arena_pool_release(pt.cs, arena_buf)
-
-	arena: mem.Arena
-	mem.arena_init(&arena, arena_buf)
-	alloc := mem.arena_allocator(&arena)
-	context.temp_allocator = alloc
+	// Acquire a growing arena for temp allocations (ldb_get internals).
+	arena := _arena_pool_acquire(pt.cs)
+	defer {
+		virtual.arena_free_all(arena)
+		_arena_pool_release(pt.cs, arena)
+	}
+	context.temp_allocator = virtual.arena_allocator(arena)
 
 	for i in 0 ..< len(pt.items) {
 		// Scripts go to heap (context.allocator) since they'll be owned by coins_cache.
@@ -198,9 +197,9 @@ prefetch_worker :: proc(task: thread.Task) {
 		pt.items[i].coin = coin
 		pt.items[i].found = found
 
-		// Reset arena periodically to avoid exhaustion on large batches.
+		// Reset arena periodically to keep the working set small on large batches.
 		if (i + 1) % 256 == 0 {
-			mem.arena_free_all(&arena)
+			virtual.arena_free_all(arena)
 		}
 	}
 
@@ -263,7 +262,7 @@ verify_checks_serial :: proc(cs: ^Chain_State, checks: []Script_Check, height: i
 	for i in 0 ..< len(checks) {
 		check := &checks[i]
 
-		mem.arena_free_all(&cs.verify_arena)
+		virtual.arena_free_all(&cs.verify_arena)
 		context.temp_allocator = cs.verify_alloc
 
 		verifier := script.Script_Verifier {
