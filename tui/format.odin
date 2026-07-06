@@ -34,18 +34,29 @@ sparkline :: proc(ring: []f32, idx, count, width: int, allocator := context.temp
 // Render a rate ring as a multi-row bar chart. Returns `rows` strings of
 // '#' (filled) and ' ' (empty), top row first — the renderer converts
 // '#' runs to solid reverse-video cells. Pure and unit-testable.
-bar_rows :: proc(ring: []f32, idx, count, width, rows: int, allocator := context.temp_allocator) -> []string {
+//
+// scale_peak > 0 pins the scale externally — the mirrored IN/OUT chart
+// passes one shared peak so bar heights are comparable across halves
+// (each half auto-scaled made a 2K/s trickle look as busy as a 40M/s
+// firehose). Nonzero samples always fill at least one cell so the quiet
+// direction stays visible instead of flatlining.
+bar_rows :: proc(ring: []f32, idx, count, width, rows: int, scale_peak: f32 = 0, allocator := context.temp_allocator) -> []string {
 	out := make([]string, rows, allocator)
 	n := min(count, width)
-	peak: f32 = 1024
-	for i in 0 ..< count {
-		peak = max(peak, ring[i])
+	peak := max(scale_peak, 1024)
+	if scale_peak <= 0 {
+		for i in 0 ..< count {
+			peak = max(peak, ring[i])
+		}
 	}
 	levels := make([]int, width, context.temp_allocator)
 	for i in 0 ..< n {
 		pos := (idx - n + i + 2 * len(ring)) % len(ring)
 		col := width - n + i
 		levels[col] = int((ring[pos] / peak) * f32(rows) + 0.5)
+		if levels[col] == 0 && ring[pos] > 0 {
+			levels[col] = 1
+		}
 	}
 	for r in 0 ..< rows {
 		b := strings.builder_make(allocator)

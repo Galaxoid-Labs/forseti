@@ -191,51 +191,56 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 	}
 
 	// Peers panel.
-	rows := min(st.peer_count, max(h - sync_h - clamp(h - 24, 2, 6) - 12, 1))
+	// Panel height is pinned (8-row floor), NOT tracked to the live peer
+	// count — peers churning during IBD made every panel below jump around.
+	budget := max(h - sync_h - (clamp((h - 26) / 2, 2, 5) * 2 + 5) - 9, 1)
+	rows := clamp(st.peer_count, 8, budget)
+	shown := min(st.peer_count, rows)
 	peers_h := rows + 3
 	pp := _panel(1 + sync_h, 0, peers_h, w, fmt.tprintf("Peers (%d)", st.peer_count))
 	if pp != nil {
 		_put(pp, 1, 2, peer_header(w), P_DIM)
-		for i in 0 ..< rows {
+		for i in 0 ..< shown {
 			_put(pp, 2 + i, 2, peer_line(&st.peers[i], st.sync_state, w), P_TEXT)
 		}
 		_flip(pp)
 	}
 
-	// Network panel: multi-row solid bar chart for IN (download dominates),
-	// compact sparkline strip for OUT. Chart height adapts to the terminal.
-	chart_rows := clamp(h - 24, 2, 6)
-	net_h := chart_rows + 4
+	// Network panel: mirrored traffic chart — IN bars rise above the center
+	// baseline, OUT bars hang below it. One shared scale so the halves are
+	// honestly comparable; bar_rows' 1-cell floor keeps the quiet direction
+	// from flatlining.
+	half_rows := clamp((h - 26) / 2, 2, 5)
+	net_h := half_rows * 2 + 5
 	net_y := 1 + sync_h + peers_h
 	np := _panel(net_y, 0, net_h, w, "Network")
 	if np != nil {
 		chart_w := max(w - 18, 20)
 		in_rate, out_rate := current_rates()
+		shared_peak := max(ring_peak(g_net_in[:]), ring_peak(g_net_out[:]))
+
+		// Top label, IN chart rising to the baseline.
 		_put(np, 1, 2, "IN", P_BLUE, nc.A_BOLD)
 		_put(np, 1, 5, fmt.tprintf("%9s/s", fmt_bytes(i64(in_rate))), P_TEXT, nc.A_BOLD)
-		_put(np, 1, 17, fmt.tprintf("(peak %s/s over 2 min)", fmt_bytes(i64(ring_peak(g_net_in[:])))), P_DIM)
-		rows := bar_rows(g_net_in[:], g_net_idx, g_net_count, chart_w, chart_rows)
-		for row, r in rows {
-			// Solid columns: '#' runs render as reverse-video spaces.
-			run_start := -1
-			for ci in 0 ..= len(row) {
-				filled := ci < len(row) && row[ci] == '#'
-				if filled && run_start < 0 {
-					run_start = ci
-				} else if !filled && run_start >= 0 {
-					nc.wattron(np, nc.color_pair(P_BLUE) | nc.A_REVERSE)
-					blanks := strings.repeat(" ", ci - run_start, context.temp_allocator)
-					cs := strings.clone_to_cstring(blanks, context.temp_allocator)
-					nc.mvwaddnstr(np, i32(2 + r), i32(2 + run_start), cs, i32(ci - run_start))
-					nc.wattroff(np, nc.color_pair(P_BLUE) | nc.A_REVERSE)
-					run_start = -1
-				}
-			}
+		_put(np, 1, 17, fmt.tprintf("(peak %s/s)", fmt_bytes(i64(ring_peak(g_net_in[:])))), P_DIM)
+		in_rows := bar_rows(g_net_in[:], g_net_idx, g_net_count, chart_w, half_rows, shared_peak)
+		for row, r in in_rows {
+			_draw_bar_row(np, 2 + r, 2, row, P_BLUE)
 		}
-		out_y := 2 + chart_rows
-		_put(np, out_y, 2, "OUT", P_GREEN, nc.A_BOLD)
-		_put(np, out_y, 6, sparkline(g_net_out[:], g_net_idx, g_net_count, chart_w - 4), P_GREEN)
-		_put(np, out_y, 4 + chart_w, fmt.tprintf("%9s/s", fmt_bytes(i64(out_rate))), P_TEXT)
+
+		// Center baseline.
+		baseline_y := 2 + half_rows
+		_put(np, baseline_y, 2, strings.repeat("-", chart_w, context.temp_allocator), P_DIM)
+
+		// OUT chart hanging below the baseline (rows mirrored), bottom label.
+		out_rows := bar_rows(g_net_out[:], g_net_idx, g_net_count, chart_w, half_rows, shared_peak)
+		for r in 0 ..< half_rows {
+			_draw_bar_row(np, baseline_y + 1 + r, 2, out_rows[half_rows - 1 - r], P_GREEN)
+		}
+		oy := baseline_y + half_rows + 1
+		_put(np, oy, 2, "OUT", P_GREEN, nc.A_BOLD)
+		_put(np, oy, 6, fmt.tprintf("%9s/s", fmt_bytes(i64(out_rate))), P_TEXT, nc.A_BOLD)
+		_put(np, oy, 18, fmt.tprintf("(peak %s/s)", fmt_bytes(i64(ring_peak(g_net_out[:])))), P_DIM)
 		_flip(np)
 	}
 
@@ -256,6 +261,23 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 	nc.wnoutrefresh(nc.stdscr)
 
 	nc.doupdate()
+}
+
+_draw_bar_row :: proc(win: ^nc.WINDOW, y, x: int, row: string, pair: int) {
+	run_start := -1
+	for ci in 0 ..= len(row) {
+		filled := ci < len(row) && row[ci] == '#'
+		if filled && run_start < 0 {
+			run_start = ci
+		} else if !filled && run_start >= 0 {
+			nc.wattron(win, nc.color_pair(i32(pair)) | nc.A_REVERSE)
+			blanks := strings.repeat(" ", ci - run_start, context.temp_allocator)
+			cs := strings.clone_to_cstring(blanks, context.temp_allocator)
+			nc.mvwaddnstr(win, i32(y), i32(x + run_start), cs, i32(ci - run_start))
+			nc.wattroff(win, nc.color_pair(i32(pair)) | nc.A_REVERSE)
+			run_start = -1
+		}
+	}
 }
 
 current_rates :: proc() -> (in_rate, out_rate: f32) {

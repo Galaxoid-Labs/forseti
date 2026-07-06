@@ -103,3 +103,20 @@ test_bar_rows :: proc(t: ^testing.T) {
 	testing.expect_value(t, rows[2][1], '#')
 	testing.expect_value(t, rows[3][1], '#')
 }
+
+@(test)
+test_bar_rows_shared_scale :: proc(t: ^testing.T) {
+	// OUT-style ring: tiny values against a huge external peak. Without the
+	// floor these would all round to level 0; with it, nonzero samples fill
+	// exactly the bottom row and zero samples fill nothing.
+	ring: [4]f32
+	ring[0] = 2048 // 2K/s
+	ring[1] = 0
+	ring[2] = 2048
+	ring[3] = 2048
+	rows := bar_rows(ring[:], 0, 4, 4, 4, 40_000_000) // shared peak 40M/s
+	testing.expect_value(t, rows[0], "    ") // top rows empty
+	testing.expect_value(t, rows[1], "    ")
+	testing.expect_value(t, rows[2], "    ")
+	testing.expect_value(t, rows[3], "# ##") // 1-cell floor, zero stays empty
+}
