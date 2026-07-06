@@ -1,6 +1,7 @@
 .claude/
 .DS_Store
 btcnode
+btcnode-gui
 deps/lib/
 deps/libsecp256k1/.libs/
 deps/libsecp256k1/*.o
