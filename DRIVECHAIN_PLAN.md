@@ -2,11 +2,12 @@
 
 ## Goal
 
-Add opt-in enforcement of BIP300 (Hashrate Escrows) and BIP301 (Blind Merged Mining)
-behind a `--drivechain=0|1` CLI flag (default **0** = off). With the flag off, node
-behavior is byte-for-byte identical to today. With it on, btcnode validates the six
-BIP300 messages, maintains the sidechain/withdrawal databases, and enforces
-OP_DRIVECHAIN semantics — natively, with no sidecar process.
+Add opt-in BIP300 (Hashrate Escrows) and BIP301 (Blind Merged Mining) support
+behind a `--drivechain=off|track|enforce` CLI flag (default **off**). `off` is
+byte-for-byte today's behavior. `track` parses the six BIP300 messages and
+maintains the sidechain/withdrawal databases without rejecting anything —
+zero-risk observation mode. `enforce` additionally applies OP_DRIVECHAIN
+semantics and rejects violating blocks — natively, with no sidecar process.
 
 ## Background / Status (as of July 2026)
 
@@ -72,7 +73,7 @@ Redefines `OP_NOP5` (0xb4). Valid only when the entire scriptPubKey is exactly:
 0xb4 <1-byte push: sidechain number> OP_TRUE     (4 bytes total)
 ```
 
-Legacy nodes see anyone-can-spend → soft-fork compatible. With `--drivechain=1`,
+Legacy nodes see anyone-can-spend → soft-fork compatible. In `enforce` mode,
 spends of OP_DRIVECHAIN outputs must be valid M5 or M6.
 
 ### BIP301 — Blind Merged Mining
@@ -134,8 +135,11 @@ Keeps BIP300/301 logic out of `consensus/` core. Contents:
 
 ### Main / config
 
-- `--drivechain=0|1` CLI flag + `drivechain=` config file key, default 0.
-- `--help` text carries the CUSF warning (see caveat above).
+- `--drivechain=off|track|enforce` CLI flag + `drivechain=` config file key,
+  default `off`. Internally an enum `Drivechain_Mode :: enum {Off, Track, Enforce}`
+  on the config; `track` gates state tracking, `enforce` additionally gates the
+  script flag and block rejection.
+- `--help` text carries the CUSF warning (see caveat above) on the `enforce` mode.
 
 ### RPC (optional, phase 2)
 
@@ -154,8 +158,8 @@ Keeps BIP300/301 logic out of `consensus/` core. Contents:
    nothing is rejected. This is the "watch mode" that proves state tracking
    against real chain data.
 2. **Phase 2 — full enforcement.** M5/M6 validation, OP_DRIVECHAIN script flag,
-   block rejection on rule violations. Flag graduates from "track" to "enforce"
-   (or split into `--drivechain=track|enforce` if we want both long-term).
+   block rejection on rule violations — everything behind `enforce` mode. `track`
+   remains available long-term as the safe observation mode.
 3. **Phase 3 (only if wanted) — sidechain-facing service.** Serve BMM/deposit
    queries to sidechain nodes (equivalent of enforcer's gRPC surface) via our
    JSON-RPC.
@@ -174,8 +178,8 @@ Keeps BIP300/301 logic out of `consensus/` core. Contents:
 
 ## Open Questions
 
-1. Track-vs-enforce as one flag or two (`--drivechain=1` vs `=track|enforce`)?
-   Leaning two-mode: track mode is genuinely useful and zero-risk.
+1. ~~Track-vs-enforce as one flag or two?~~ **Decided: `--drivechain=off|track|enforce`.**
+   Track mode is genuinely useful and zero-risk.
 2. If the August block-964,000 fork happens and btcnode should *follow* that
    chain, enforcement flag alone is not enough — that fork reportedly changes
    more than BIP300 (coin split). Out of scope until the fork ships something
