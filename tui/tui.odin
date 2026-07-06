@@ -215,7 +215,7 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 	net_y := 1 + sync_h + peers_h
 	np := _panel(net_y, 0, net_h, w, "Network")
 	if np != nil {
-		chart_w := max(w - 18, 20)
+		chart_w := max(w - 4, 20)
 		in_rate, out_rate := current_rates()
 		shared_peak := max(ring_peak(g_net_in[:]), ring_peak(g_net_out[:]))
 
