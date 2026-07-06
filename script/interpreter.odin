@@ -179,6 +179,7 @@ Script_Verifier :: struct {
 	flags:          Verify_Flags,
 	spent_outputs:  []wire.Tx_Out, // all spent outputs (for Taproot sighash)
 	sighash_cache:  ^Sighash_Cache, // optional, shared across inputs of same tx
+	annex:          []byte,        // BIP341 annex for this input (set by verify_taproot; committed in taproot sighash)
 }
 
 // Top-level script verification: 4-phase evaluation.
@@ -1101,6 +1102,7 @@ _tapscript_checksig :: proc(
 
 		sighash := compute_sighash_taproot(
 			verifier, hash_type,
+			annex = verifier.annex,
 			tapleaf_hash = tapleaf_hash,
 			codesep_pos = csep,
 		)

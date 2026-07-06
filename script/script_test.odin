@@ -1754,3 +1754,77 @@ test_mainnet_899747_big_tapscript_growing_arena :: proc(t: ^testing.T) {
 	serr := verify_script(&verifier, tx.inputs[0].script_sig, spk, tx.witness[0])
 	testing.expect(t, serr == .None, fmt.tprintf("big tapscript should verify: got %v", serr))
 }
+
+@(test)
+test_mainnet_909068_tapscript_annex :: proc(t: ^testing.T) {
+	// Real-world regression test: mainnet block 909068, tx index 1
+	// (f08fd61d48f79eeb0c4bc9e58f2d7ecad0e20e5d6411b588590cb0480c8e7fbe).
+	// Taproot script-path spend WITH AN ANNEX (4th witness item starting 0x50)
+	// and a maximum-depth control block (128 merkle nodes, 4129 bytes).
+	// The tapscript CHECKSIG path computed the sighash without the annex
+	// (spend_type bit unset, annex hash omitted), so the valid signature
+	// failed with Eval_False and halted mainnet sync at height 909068.
+	// Key-path annex spends were unaffected; only script-path dropped it.
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	src_dir := #location().file_path
+	base_dir := src_dir[:strings.last_index(src_dir, "/")]
+	tx_hex_raw, tx_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/mainnet_909068_tx1_annex.hex", base_dir), context.allocator)
+	if tx_read_err != nil {
+		testing.expect(t, false, "failed to read testdata/mainnet_909068_tx1_annex.hex")
+		return
+	}
+	defer delete(tx_hex_raw)
+
+	prevout_raw, prev_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/mainnet_909068_tx1_annex_prevouts.txt", base_dir), context.allocator)
+	if prev_read_err != nil {
+		testing.expect(t, false, "failed to read prevouts file")
+		return
+	}
+	defer delete(prevout_raw)
+
+	tx_hex_str := strings.trim_space(string(tx_hex_raw))
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)tx_hex_str, context.temp_allocator)
+	if !hex_ok {
+		testing.expect(t, false, "failed to hex-decode tx")
+		return
+	}
+
+	r := wire.reader_init(tx_bytes)
+	tx, tx_err := wire.deserialize_tx(&r, context.temp_allocator)
+	if tx_err != nil {
+		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
+		return
+	}
+
+	testing.expect_value(t, len(tx.inputs), 1)
+	testing.expect_value(t, len(tx.outputs), 10023)
+	testing.expect_value(t, len(tx.witness[0]), 4)
+	// Annex: last witness item starts with 0x50.
+	annex_item := tx.witness[0][3]
+	testing.expect(t, len(annex_item) > 0 && annex_item[0] == 0x50, "expected annex as 4th witness item")
+
+	parts := strings.split(strings.trim_space(string(prevout_raw)), " ", context.temp_allocator)
+	value, val_ok := strconv.parse_i64(parts[0])
+	testing.expect(t, val_ok, "bad prevout value")
+	spk, spk_ok := hex.decode(transmute([]u8)parts[1], context.temp_allocator)
+	testing.expect(t, spk_ok, "bad prevout script hex")
+
+	spent_outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
+	spent_outputs[0] = wire.Tx_Out{value = value, script_pubkey = spk}
+
+	flags := Verify_Flags{.P2SH, .DER_Sig, .Check_Locktime, .Check_Sequence, .Witness, .Null_Dummy}
+	sighash_cache: Sighash_Cache
+	verifier := Script_Verifier {
+		tx            = &tx,
+		input_idx     = 0,
+		amount        = value,
+		flags         = flags,
+		spent_outputs = spent_outputs,
+		sighash_cache = &sighash_cache,
+	}
+
+	serr := verify_script(&verifier, tx.inputs[0].script_sig, spk, tx.witness[0])
+	testing.expect(t, serr == .None, fmt.tprintf("annex script-path spend should verify: got %v", serr))
+}

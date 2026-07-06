@@ -22,6 +22,9 @@ verify_taproot :: proc(
 		annex = witness[len(witness) - 1]
 		witness_items = witness[:len(witness) - 1]
 	}
+	// Make the annex visible to tapscript sig checks (CHECKSIG/CHECKSIGADD
+	// inside execute_tapscript compute the sighash via the verifier).
+	verifier.annex = annex
 
 	if len(witness_items) == 1 {
 		// Key path spending
