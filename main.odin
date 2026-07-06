@@ -777,13 +777,6 @@ main :: proc() {
 	// Load config file (CLI flags take precedence).
 	_load_config_file(fmt.tprintf("%s/btcnode.conf", cfg.data_dir), &cfg, flags_set)
 
-	// GUI: open the window with a startup splash BEFORE the long node init
-	// (30-60s of LevelDB open + index load) so launch feels alive. If no
-	// display session exists this quietly fails and we continue headless.
-	if cfg.gui {
-		gui.splash_begin(cfg.network)
-	}
-
 	// Validate rpcuser/rpcpassword: must set both or neither.
 	has_user := len(cfg.rpc_user) > 0
 	has_pass := len(cfg.rpc_password) > 0

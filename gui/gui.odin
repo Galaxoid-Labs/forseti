@@ -173,39 +173,10 @@ run_with_source :: proc(title: cstring, info: Static_Info, fetch: Status_Fetch, 
 	return _run_window(title, info, fetch, ud, nil, local = false)
 }
 
-// Open the window immediately with a static "starting" frame, before node
-// init blocks the main thread for 30-60s (LevelDB compaction + index load).
-// The frame can't animate while init runs, but a visible window beats half a
-// minute of apparent nothing. gui.run reuses the window afterwards.
-splash_begin :: proc(network: string) -> bool {
+_run_window :: proc(title: cstring, info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: ^chain.Chain_State, local: bool) -> bool {
 	rl.SetConfigFlags({.WINDOW_HIGHDPI})
 	rl.SetTraceLogLevel(.WARNING)
-	rl.InitWindow(WIN_W, WIN_H, "bitcoin-node-odin")
-	if !rl.IsWindowReady() {
-		return false
-	}
-	rl.SetTargetFPS(FPS)
-	_apply_theme()
-	// Two frames: some window managers show the first only after a swap.
-	for _ in 0 ..< 2 {
-		rl.BeginDrawing()
-		rl.ClearBackground(COL_BG)
-		rl.DrawText(fmt.ctprintf("bitcoin-node-odin — %s", network), 16, 16, 20, rl.Color{0xc8, 0xd0, 0xd8, 0xff})
-		rl.DrawText("Starting node: opening databases, loading block index...", 16, 52, 16, rl.Color{0x7a, 0x84, 0x8e, 0xff})
-		rl.DrawText("(takes 30-60 seconds after long runs — LevelDB compaction)", 16, 76, 14, rl.Color{0x7a, 0x84, 0x8e, 0xff})
-		rl.EndDrawing()
-	}
-	return true
-}
-
-_run_window :: proc(title: cstring, info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: ^chain.Chain_State, local: bool) -> bool {
-	if !rl.IsWindowReady() {
-		rl.SetConfigFlags({.WINDOW_HIGHDPI})
-		rl.SetTraceLogLevel(.WARNING)
-		rl.InitWindow(WIN_W, WIN_H, title)
-	} else {
-		rl.SetWindowTitle(title)
-	}
+	rl.InitWindow(WIN_W, WIN_H, title)
 	if !rl.IsWindowReady() {
 		// No display session (SSH, daemon context). Log and return — main
 		// falls through to the normal headless thread.join path.
