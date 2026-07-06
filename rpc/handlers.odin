@@ -2781,6 +2781,8 @@ _handle_getnodestatus :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respo
 	obj["prof_undo_pct"] = json.Value(json.Float(st.prof_undo_pct))
 	obj["uptime_secs"] = json.Value(json.Integer(st.uptime_secs))
 	obj["disk_usage"] = json.Value(json.Integer(st.disk_usage))
+	obj["total_bytes_sent"] = json.Value(json.Integer(st.total_bytes_sent))
+	obj["total_bytes_recv"] = json.Value(json.Integer(st.total_bytes_recv))
 
 	peers := make(json.Array, 0, st.peer_count, context.temp_allocator)
 	for i in 0 ..< st.peer_count {

@@ -16,7 +16,7 @@ Static_Info :: struct {
 }
 
 WIN_W :: 900
-WIN_H :: 600
+WIN_H :: 700
 FPS :: 30
 
 // Cascadia Code (variable font; raylib loads the default weight instance),
@@ -109,6 +109,32 @@ _fmt_bytes :: proc(n: i64) -> string {
 	return fmt.tprintf("%.2fG", f64(n) / 1073741824)
 }
 
+// Network rate history for the traffic graph: sampled once per fetch (~1s)
+// from the lifetime counters, so it works for local and remote sources alike.
+NET_HISTORY :: 120
+g_net_in:  [NET_HISTORY]f32
+g_net_out: [NET_HISTORY]f32
+g_net_idx: int
+g_net_count: int
+g_prev_sent, g_prev_recv: i64
+g_prev_sample_t: f64
+
+_net_sample :: proc(st: ^p2p.Node_Status) {
+	now := f64(rl.GetTime())
+	if g_prev_sample_t > 0 {
+		dt := now - g_prev_sample_t
+		if dt > 0.2 {
+			g_net_in[g_net_idx] = f32(f64(st.total_bytes_recv - g_prev_recv) / dt)
+			g_net_out[g_net_idx] = f32(f64(st.total_bytes_sent - g_prev_sent) / dt)
+			g_net_idx = (g_net_idx + 1) % NET_HISTORY
+			if g_net_count < NET_HISTORY { g_net_count += 1 }
+		}
+	}
+	g_prev_sent = st.total_bytes_sent
+	g_prev_recv = st.total_bytes_recv
+	g_prev_sample_t = now
+}
+
 _sync_state_label :: proc(s: p2p.Sync_State) -> (string, rl.Color) {
 	switch s {
 	case .Idle:               return "Idle", COL_DIM
@@ -188,6 +214,7 @@ _run_window :: proc(title: cstring, info: Static_Info, fetch: Status_Fetch, ud: 
 				st = new_st
 				have_status = true
 				connected = true
+				_net_sample(&st)
 			} else {
 				connected = false
 				if local { break } // local node shut down → close the window
@@ -285,8 +312,48 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 		y += 18
 	}
 
+	// --- Network traffic graph (last 2 minutes, in/out bytes per second) ---
+	net_y: f32 = 352
+	_group_box(rl.Rectangle{pad, net_y, WIN_W - 2 * pad, 88}, "Network")
+	{
+		gx := i32(pad) + 12
+		gy := i32(net_y) + 12
+		gw := i32(WIN_W - 2 * pad - 190)
+		gh: i32 = 64
+		// Auto-scale to the window peak.
+		peak: f32 = 1024 // floor: 1 KB/s so an idle line stays flat
+		for i in 0 ..< g_net_count {
+			peak = max(peak, g_net_in[i])
+			peak = max(peak, g_net_out[i])
+		}
+		rl.DrawRectangleLines(gx, gy, gw, gh, COL_LINE)
+		if g_net_count >= 2 {
+			step := f32(gw) / f32(NET_HISTORY - 1)
+			for i in 1 ..< g_net_count {
+				a := (g_net_idx - g_net_count + i - 1 + 2 * NET_HISTORY) % NET_HISTORY
+				b := (a + 1) % NET_HISTORY
+				x0 := f32(gx) + f32(i - 1) * step
+				x1 := f32(gx) + f32(i) * step
+				y_in0 := f32(gy + gh) - (g_net_in[a] / peak) * f32(gh - 2)
+				y_in1 := f32(gy + gh) - (g_net_in[b] / peak) * f32(gh - 2)
+				y_out0 := f32(gy + gh) - (g_net_out[a] / peak) * f32(gh - 2)
+				y_out1 := f32(gy + gh) - (g_net_out[b] / peak) * f32(gh - 2)
+				rl.DrawLineEx(rl.Vector2{x0, y_in0}, rl.Vector2{x1, y_in1}, 1.5, COL_ACCENT)
+				rl.DrawLineEx(rl.Vector2{x0, y_out0}, rl.Vector2{x1, y_out1}, 1.5, COL_GREEN)
+			}
+		}
+		// Current rates + peak label.
+		cur := (g_net_idx - 1 + NET_HISTORY) % NET_HISTORY
+		lx := gx + gw + 14
+		_text("IN", lx, gy + 2, 13, COL_ACCENT)
+		_text(fmt.ctprintf("%s/s", _fmt_bytes(i64(g_net_in[cur]))), lx + 40, gy + 2, 13, COL_TEXT)
+		_text("OUT", lx, gy + 22, 13, COL_GREEN)
+		_text(fmt.ctprintf("%s/s", _fmt_bytes(i64(g_net_out[cur]))), lx + 40, gy + 22, 13, COL_TEXT)
+		_text(fmt.ctprintf("peak %s/s", _fmt_bytes(i64(peak))), lx, gy + 46, 13, COL_DIM)
+	}
+
 	// --- Mempool + UTXO cache ---
-	row2_y: f32 = 358
+	row2_y: f32 = 458
 	_group_box(rl.Rectangle{pad, row2_y, 280, 84}, "Mempool")
 	_text(fmt.ctprintf("Txs:  %s", _commas(st.mempool_count)), pad + 12, i32(row2_y) + 16, 14, COL_TEXT)
 	_text(fmt.ctprintf("Size: %s vB", _commas(st.mempool_vbytes)), pad + 12, i32(row2_y) + 40, 14, COL_TEXT)
@@ -303,7 +370,7 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	rl.GuiProgressBar(rl.Rectangle{pad + 308, row2_y + 62, WIN_W - 2 * pad - 296 - 24, 12}, nil, nil, &cache_fill, 0, 1)
 
 	// --- Block profile ---
-	prof_y: f32 = 460
+	prof_y: f32 = 554
 	_group_box(rl.Rectangle{pad, prof_y, WIN_W - 2 * pad, 84}, fmt.ctprintf("Block Profile (last %d blocks)", st.prof_blocks))
 	if st.prof_blocks > 0 && st.prof_ms_per_block >= 0.5 {
 		// Sub-millisecond blocks (empty early chain / single blocks at tip)

@@ -142,6 +142,7 @@ _on_recv :: proc(op: ^nbio.Operation, peer: ^Peer) {
 	}
 
 	peer.bytes_recv += i64(op.recv.received)
+	peer.cm.total_bytes_recv += i64(op.recv.received)
 	peer.last_recv = time.to_unix_seconds(time.now())
 
 	// Accumulate into recv_buf.
@@ -422,6 +423,7 @@ _on_send :: proc(op: ^nbio.Operation, peer: ^Peer) {
 	}
 
 	peer.bytes_sent += i64(op.send.sent)
+	peer.cm.total_bytes_sent += i64(op.send.sent)
 	peer.last_send = time.to_unix_seconds(time.now())
 
 	// Send next queued message.

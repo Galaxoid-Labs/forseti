@@ -80,6 +80,10 @@ Conn_Manager :: struct {
 	txput_count:    int,
 	disk_usage:     i64, // cached datadir usage (walking files is too heavy per tick)
 	disk_check_at:  i64,
+	// Lifetime traffic counters (P2P thread only) — the GUI derives per-second
+	// rates client-side so the graph works identically for remote dashboards.
+	total_bytes_sent: i64,
+	total_bytes_recv: i64,
 }
 
 conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) -> Net_Error {
@@ -1833,6 +1837,8 @@ _update_node_status :: proc(cm: ^Conn_Manager, now: i64) {
 		cm.disk_check_at = now
 	}
 	st.disk_usage = cm.disk_usage
+	st.total_bytes_sent = cm.total_bytes_sent
+	st.total_bytes_recv = cm.total_bytes_recv
 
 	// UTXO cache
 	st.utxo_cache_count = len(cm.chain.coins.cache)

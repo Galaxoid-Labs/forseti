@@ -180,6 +180,8 @@ _fetch_status :: proc(c: ^Client) -> (st: p2p.Node_Status, ok: bool) {
 	st.prof_undo_pct = _jfloat(result, "prof_undo_pct")
 	st.uptime_secs = _jint(result, "uptime_secs")
 	st.disk_usage = _jint(result, "disk_usage")
+	st.total_bytes_sent = _jint(result, "total_bytes_sent")
+	st.total_bytes_recv = _jint(result, "total_bytes_recv")
 
 	if peers, peers_ok := result["peers"].(json.Array); peers_ok {
 		for pv, i in peers {
