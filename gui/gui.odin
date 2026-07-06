@@ -14,7 +14,7 @@ Static_Info :: struct {
 }
 
 WIN_W :: 900
-WIN_H :: 560
+WIN_H :: 600
 FPS :: 30
 
 // Cascadia Code (variable font; raylib loads the default weight instance),
@@ -194,20 +194,20 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 
 	// --- Peers table ---
 	peers_h: f32 = 200
-	_group_box(rl.Rectangle{pad, 130, WIN_W - 2 * pad, peers_h}, fmt.ctprintf("Peers (%d)", st.peer_count))
+	_group_box(rl.Rectangle{pad, 140, WIN_W - 2 * pad, peers_h}, fmt.ctprintf("Peers (%d)", st.peer_count))
 	col_x := [?]i32{pad + 12, pad + 52, pad + 96, pad + 296, pad + 500, pad + 580, pad + 640, pad + 710, pad + 786}
 	// RATE (blocks/s) only means something during bulk download; at the tip
 	// show LAST — seconds since the peer's last message (liveness).
 	downloading := st.sync_state == .Downloading_Blocks
 	headers := [?]cstring{"ID", "DIR", "ADDRESS", "AGENT", "HEIGHT", "BLKS", downloading ? "RATE" : "LAST", "SENT", "RECV"}
 	for h, i in headers {
-		_text(h, col_x[i], 142, 13, COL_DIM)
+		_text(h, col_x[i], 152, 13, COL_DIM)
 	}
-	rl.DrawLine(pad + 8, 158, WIN_W - pad - 8, 158, COL_LINE)
-	y: i32 = 166
+	rl.DrawLine(pad + 8, 168, WIN_W - pad - 8, 168, COL_LINE)
+	y: i32 = 176
 	for i in 0 ..< st.peer_count {
 		p := &st.peers[i]
-		if y > 130 + i32(peers_h) - 18 { break }
+		if y > 140 + i32(peers_h) - 18 { break }
 		addr := string(p.address[:p.addr_len])
 		agent := string(p.user_agent[:p.agent_len])
 		if len(agent) > 22 { agent = agent[:22] }
@@ -229,7 +229,7 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	}
 
 	// --- Mempool + UTXO cache ---
-	row2_y: f32 = 338
+	row2_y: f32 = 358
 	_group_box(rl.Rectangle{pad, row2_y, 280, 84}, "Mempool")
 	_text(fmt.ctprintf("Txs:  %s", _commas(st.mempool_count)), pad + 12, i32(row2_y) + 16, 14, COL_TEXT)
 	_text(fmt.ctprintf("Size: %s vB", _commas(st.mempool_vbytes)), pad + 12, i32(row2_y) + 40, 14, COL_TEXT)
@@ -246,7 +246,7 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	rl.GuiProgressBar(rl.Rectangle{pad + 308, row2_y + 62, WIN_W - 2 * pad - 296 - 24, 12}, nil, nil, &cache_fill, 0, 1)
 
 	// --- Block profile ---
-	prof_y: f32 = 434
+	prof_y: f32 = 460
 	_group_box(rl.Rectangle{pad, prof_y, WIN_W - 2 * pad, 84}, fmt.ctprintf("Block Profile (last %d blocks)", st.prof_blocks))
 	if st.prof_blocks > 0 {
 		_text(fmt.ctprintf("Total: %.1f ms/block", st.prof_ms_per_block), pad + 12, i32(prof_y) + 18, 15, COL_ACCENT)
