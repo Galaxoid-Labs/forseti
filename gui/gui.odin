@@ -56,6 +56,13 @@ _fmt_uptime :: proc(secs: i64) -> string {
 	return fmt.tprintf("%dd %02dh", secs / 86400, (secs % 86400) / 3600)
 }
 
+_fmt_bytes :: proc(n: i64) -> string {
+	if n < 1024 { return fmt.tprintf("%dB", n) }
+	if n < 1024 * 1024 { return fmt.tprintf("%.0fK", f64(n) / 1024) }
+	if n < 1024 * 1024 * 1024 { return fmt.tprintf("%.1fM", f64(n) / 1048576) }
+	return fmt.tprintf("%.2fG", f64(n) / 1073741824)
+}
+
 _sync_state_label :: proc(s: p2p.Sync_State) -> (string, rl.Color) {
 	switch s {
 	case .Idle:               return "Idle", COL_DIM
@@ -130,8 +137,8 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	// --- Peers table ---
 	peers_h: f32 = 258
 	rl.GuiGroupBox(rl.Rectangle{pad, 150, WIN_W - 2 * pad, peers_h}, fmt.ctprintf("Peers (%d)", st.peer_count))
-	col_x := [?]i32{pad + 12, pad + 52, pad + 96, pad + 310, pad + 550, pad + 640, pad + 710, pad + 790}
-	headers := [?]cstring{"ID", "DIR", "ADDRESS", "AGENT", "HEIGHT", "BLKS", "RATE", "INFLT"}
+	col_x := [?]i32{pad + 12, pad + 52, pad + 96, pad + 296, pad + 500, pad + 580, pad + 640, pad + 710, pad + 786}
+	headers := [?]cstring{"ID", "DIR", "ADDRESS", "AGENT", "HEIGHT", "BLKS", "RATE", "SENT", "RECV"}
 	for h, i in headers {
 		rl.DrawText(h, col_x[i], 162, 13, COL_DIM)
 	}
@@ -142,7 +149,7 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 		if y > 150 + i32(peers_h) - 20 { break }
 		addr := string(p.address[:p.addr_len])
 		agent := string(p.user_agent[:p.agent_len])
-		if len(agent) > 26 { agent = agent[:26] }
+		if len(agent) > 22 { agent = agent[:22] }
 		dir: cstring = p.inbound ? "in" : "out"
 		rl.DrawText(fmt.ctprintf("%d", p.id), col_x[0], y, 13, COL_TEXT)
 		rl.DrawText(dir, col_x[1], y, 13, p.inbound ? COL_ACCENT : COL_DIM)
@@ -151,7 +158,8 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 		rl.DrawText(fmt.ctprintf("%d", p.start_height), col_x[4], y, 13, COL_TEXT)
 		rl.DrawText(fmt.ctprintf("%d", p.blocks_delivered), col_x[5], y, 13, COL_TEXT)
 		rl.DrawText(fmt.ctprintf("%.1f/s", p.throughput), col_x[6], y, 13, COL_TEXT)
-		rl.DrawText(fmt.ctprintf("%d", p.blocks_in_flight), col_x[7], y, 13, COL_TEXT)
+		rl.DrawText(fmt.ctprintf("%s", _fmt_bytes(p.bytes_sent)), col_x[7], y, 13, COL_TEXT)
+		rl.DrawText(fmt.ctprintf("%s", _fmt_bytes(p.bytes_recv)), col_x[8], y, 13, COL_TEXT)
 		y += 18
 	}
 

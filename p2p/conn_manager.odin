@@ -27,8 +27,12 @@ Conn_Manager :: struct {
 	shutdown:           bool,
 	// Address manager for peer discovery and addr relay (BIP155).
 	addr_mgr:           Addr_Manager,
-	// nbio event loop reference for cross-thread operations.
+	// nbio event loop reference for cross-thread operations. Guarded by
+	// event_loop_mu: cross-thread wake_up must not race the P2P thread
+	// clearing the pointer and releasing the loop at shutdown (kevent on a
+	// closed kqueue fails an assert in core:nbio).
 	event_loop:         ^nbio.Event_Loop,
+	event_loop_mu:      sync.Mutex,
 	// Pre-configured peer address (from --connect), connected during conn_manager_run.
 	connect_address:    string,
 	connect_port:       int,
@@ -224,10 +228,13 @@ conn_manager_discover_peers :: proc(cm: ^Conn_Manager) {
 // Cleanly shut down the connection manager. Safe to call from any thread.
 conn_manager_shutdown :: proc(cm: ^Conn_Manager) {
 	cm.shutdown = true
-	// Wake up the event loop so run_until exits.
+	// Wake up the event loop so run_until exits. Under event_loop_mu so we
+	// never poke a loop the P2P thread has already torn down.
+	sync.mutex_lock(&cm.event_loop_mu)
 	if cm.event_loop != nil {
 		nbio.wake_up(cm.event_loop)
 	}
+	sync.mutex_unlock(&cm.event_loop_mu)
 }
 
 // Periodic timer callback — handles ping, header refresh, stall checks.
@@ -508,6 +515,9 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 
 		if connected == 0 && !cm.listening {
 			log.warn("No peers available. Exiting.")
+			sync.mutex_lock(&cm.event_loop_mu)
+			cm.event_loop = nil
+			sync.mutex_unlock(&cm.event_loop_mu)
 			nbio.release_thread_event_loop()
 			return
 		}
@@ -531,6 +541,11 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 	}
 	clear(&cm.zombie_peers)
 
+	// Clear the loop pointer before releasing so cross-thread wake_up can
+	// never target a dead kqueue.
+	sync.mutex_lock(&cm.event_loop_mu)
+	cm.event_loop = nil
+	sync.mutex_unlock(&cm.event_loop_mu)
 	nbio.release_thread_event_loop()
 	log.info("Connection manager shutting down.")
 }
@@ -700,6 +715,18 @@ _conn_manager_handle_verack :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 	}
 
 	if peer.state == .Handshake_Complete {
+		// Outbound slots are scarce (8): drop peers that cannot serve blocks
+		// or meaningful tx relay. Crawlers/monitors advertise start_height 0;
+		// deeply stale nodes are equally useless. Inbound peers are exempt —
+		// they cost us nothing. Replacement machinery refills the slot.
+		_, our_height := chain.chain_tip(cm.chain)
+		if !peer.inbound && our_height - int(peer.start_height) > 10_000 {
+			log.infof("Peer %d advertises height %d, we are at %d — dropping stale outbound peer",
+				peer_id, peer.start_height, our_height)
+			sync_handle_disconnect(&cm.sync_mgr, peer_id, &cm.peers)
+			return
+		}
+
 		peer.state = .Active
 		log.debugf("Peer %d handshake complete, now active", peer_id)
 
@@ -1046,9 +1073,11 @@ conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid, wtxid: Hash256, fee_rate_
 	sync.mutex_lock(&cm.relay_mutex)
 	append(&cm.relay_queue, Relay_Item{txid = txid, wtxid = wtxid, fee_rate_kvb = fee_rate_kvb})
 	sync.mutex_unlock(&cm.relay_mutex)
+	sync.mutex_lock(&cm.event_loop_mu)
 	if cm.event_loop != nil {
 		nbio.wake_up(cm.event_loop)
 	}
+	sync.mutex_unlock(&cm.event_loop_mu)
 }
 
 
