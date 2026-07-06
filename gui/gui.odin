@@ -234,8 +234,15 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	progress := f32(st.verification_pct)
 	rl.GuiProgressBar(rl.Rectangle{pad + 12, 76, WIN_W - 2 * pad - 90, 18}, nil, fmt.ctprintf("%.2f%%", progress * 100), &progress, 0, 1)
 	eta: string = ""
-	if st.eta_secs > 0 && st.sync_state != .In_Sync {
-		eta = fmt.tprintf("    |    ETA ~%s", _fmt_uptime(st.eta_secs))
+	if st.sync_state == .Downloading_Blocks {
+		// The tx-throughput estimator is meaningless in the empty-block era
+		// (network-bound on ~1-tx blocks): don't show an ETA until enough
+		// real transaction volume has flowed to measure against.
+		if st.verification_pct >= 0.01 && st.eta_secs > 0 {
+			eta = fmt.tprintf("    |    ETA ~%s", _fmt_uptime(st.eta_secs))
+		} else {
+			eta = "    |    ETA estimating..."
+		}
 	}
 	_text(
 		fmt.ctprintf("%s / %s blocks    |    %d in-flight    |    %s remaining%s",
@@ -298,7 +305,9 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	// --- Block profile ---
 	prof_y: f32 = 460
 	_group_box(rl.Rectangle{pad, prof_y, WIN_W - 2 * pad, 84}, fmt.ctprintf("Block Profile (last %d blocks)", st.prof_blocks))
-	if st.prof_blocks > 0 {
+	if st.prof_blocks > 0 && st.prof_ms_per_block >= 0.5 {
+		// Sub-millisecond blocks (empty early chain / single blocks at tip)
+		// make the percentage breakdown a divide-by-nothing.
 		_text(fmt.ctprintf("Total: %.1f ms/block", st.prof_ms_per_block), pad + 12, i32(prof_y) + 18, 15, COL_ACCENT)
 		_text(
 			fmt.ctprintf("Read: %.0f%%   Prefetch: %.0f%%   Validate: %.0f%%   UTXO: %.0f%%   Scripts: %.0f%%   Undo: %.0f%%",
