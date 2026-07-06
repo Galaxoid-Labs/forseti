@@ -59,6 +59,16 @@ test_peer_line_widths :: proc(t: ^testing.T) {
 	narrow := peer_line(&ps, .In_Sync, 80)
 	testing.expect(t, !strings.contains(narrow, "/Satoshi"), "narrow layout drops agent")
 	testing.expect(t, strings.contains(narrow, "203.0.113.9"), "narrow layout keeps address")
+
+	// Alignment invariant: every column starts at the same offset in the
+	// header and in a data row (both widths).
+	for w in ([2]int{80, 120}) {
+		hdr := peer_header(w)
+		row := peer_line(&ps, .In_Sync, w)
+		testing.expect_value(t, strings.index(hdr, "HEIGHT") >= 0, true)
+		testing.expect_value(t, strings.index(row, "956945"), strings.index(hdr, "HEIGHT"))
+		testing.expect_value(t, strings.index(row, "203.0.113.9"), strings.index(hdr, "ADDRESS"))
+	}
 }
 
 @(test)

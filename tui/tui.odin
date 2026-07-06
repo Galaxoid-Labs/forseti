@@ -150,8 +150,9 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 
 	// Peers
 	y := 4
-	_put(y, 1, "PEERS", P_DIM, true)
-	_put(y, 8, peer_header(w), P_DIM, false)
+	_put(y, 1, fmt.tprintf("PEERS (%d)", st.peer_count), P_DIM, true)
+	y += 1
+	_put(y, 1, peer_header(w), P_DIM, false)
 	y += 1
 	max_rows := max(h - 13, 1)
 	for i in 0 ..< min(st.peer_count, max_rows) {

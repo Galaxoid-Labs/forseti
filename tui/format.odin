@@ -83,29 +83,49 @@ blocks_line :: proc(st: ^p2p.Node_Status, allocator := context.temp_allocator) -
 		fmt_uptime(st.uptime_secs), eta, allocator = allocator)
 }
 
-peer_header :: proc(width: int) -> string {
-	return width >= 100 \
-		? "ID    DIR ADDRESS              AGENT                  HEIGHT   BLKS   LAST     SENT     RECV" \
-		: "ID    DIR ADDRESS              HEIGHT   BLKS   LAST     SENT     RECV"
+// Left-justified fixed-width cell. Odin's fmt does not implement C's "%-Nd"
+// left-justify flag (widths garble into the digits) — pad explicitly.
+_cell :: proc(b: ^strings.Builder, s: string, w: int) {
+	n := min(len(s), w)
+	strings.write_string(b, s[:n])
+	for _ in n ..< w + 1 { // +1 = column gap
+		strings.write_byte(b, ' ')
+	}
+}
+
+peer_header :: proc(width: int, allocator := context.temp_allocator) -> string {
+	return peer_row(width, "ID", "DIR", "ADDRESS", "AGENT", "HEIGHT", "BLKS", "LAST", "SENT", "RECV", allocator)
+}
+
+peer_row :: proc(width: int, id, dir, addr, agent, height, blks, last, sent, recv: string, allocator := context.temp_allocator) -> string {
+	b := strings.builder_make(allocator)
+	_cell(&b, id, 5)
+	_cell(&b, dir, 3)
+	_cell(&b, addr, 20)
+	if width >= 100 {
+		_cell(&b, agent, 22)
+	}
+	_cell(&b, height, 8)
+	_cell(&b, blks, 6)
+	_cell(&b, last, 8)
+	_cell(&b, sent, 8)
+	_cell(&b, recv, 8)
+	return strings.to_string(b)
 }
 
 peer_line :: proc(p: ^p2p.Peer_Status, state: p2p.Sync_State, width: int, allocator := context.temp_allocator) -> string {
 	addr := string(p.address[:p.addr_len])
-	if len(addr) > 20 { addr = addr[:20] }
 	agent := string(p.user_agent[:p.agent_len])
-	if len(agent) > 22 { agent = agent[:22] }
-	dir := p.inbound ? "in " : "out"
 	activity := state == .Downloading_Blocks \
 		? fmt.tprintf("%.1f/s", p.throughput) \
 		: fmt.tprintf("%ds", p.last_recv_secs)
-	if width >= 100 {
-		return fmt.aprintf("%-5d %s %-20s %-22s %-8d %-6d %-8s %-8s %-8s",
-			int(p.id), dir, addr, agent, p.start_height, p.blocks_delivered,
-			activity, fmt_bytes(p.bytes_sent), fmt_bytes(p.bytes_recv), allocator = allocator)
-	}
-	return fmt.aprintf("%-5d %s %-20s %-8d %-6d %-8s %-8s %-8s",
-		int(p.id), dir, addr, p.start_height, p.blocks_delivered,
-		activity, fmt_bytes(p.bytes_sent), fmt_bytes(p.bytes_recv), allocator = allocator)
+	return peer_row(width,
+		fmt.tprintf("%d", int(p.id)),
+		p.inbound ? "in" : "out",
+		addr, agent,
+		fmt.tprintf("%d", p.start_height),
+		fmt.tprintf("%d", p.blocks_delivered),
+		activity, fmt_bytes(p.bytes_sent), fmt_bytes(p.bytes_recv), allocator)
 }
 
 stats_line :: proc(st: ^p2p.Node_Status, allocator := context.temp_allocator) -> string {
