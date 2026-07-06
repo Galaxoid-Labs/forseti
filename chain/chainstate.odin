@@ -792,6 +792,7 @@ accept_block_headers_batch :: proc(cs: ^Chain_State, headers: []wire.Block_Heade
 		// Validate PoW.
 		cerr := consensus.check_block_header(&hdr, cs.params)
 		if cerr != .None {
+			log.warnf("Header PoW reject at batch idx %d: %v", i, cerr)
 			continue
 		}
 
@@ -801,6 +802,7 @@ accept_block_headers_batch :: proc(cs: ^Chain_State, headers: []wire.Block_Heade
 		if hdr.prev_hash != HASH_ZERO {
 			parent, parent_found := cs.block_index.entries[hdr.prev_hash]
 			if !parent_found {
+				log.warnf("Header orphan reject at batch idx %d (parent unknown)", i)
 				continue
 			}
 			batch_parent = parent
