@@ -34,88 +34,103 @@ prune_block_files :: proc(cs: ^Chain_State, last_flushed_height: int) -> (files_
 		return 0, 0
 	}
 
-	current_file := cs.block_db.files.current_file
-
-	// One pass over the index: per-file max height + entry lists (a per-file
-	// rescan would be O(entries x files) — billions of iterations when mass-
-	// pruning a full unpruned datadir).
-	stats := make(map[u32]_Prune_File_Stat, 64, context.temp_allocator)
+	// Block (blk) and undo (rev) files roll over independently — undo data is
+	// much smaller, so rev file numbers lag far behind blk numbers. Each side
+	// gets its own stats keyed on its own file sequence.
+	blk_stats := make(map[u32]_Prune_File_Stat, 64, context.temp_allocator)
+	rev_stats := make(map[u32]_Prune_File_Stat, 64, context.temp_allocator)
 	for _, entry in cs.block_index.entries {
-		if .Has_Data not_in entry.status {
-			continue
+		if .Has_Data in entry.status {
+			st := blk_stats[entry.file_num]
+			if !st.has_blocks {
+				st.entries = make([dynamic]^Block_Index_Entry, 0, 1024, context.temp_allocator)
+			}
+			st.has_blocks = true
+			if entry.height > st.max_height { st.max_height = entry.height }
+			append(&st.entries, entry)
+			blk_stats[entry.file_num] = st
 		}
-		st := stats[entry.file_num]
-		if !st.has_blocks {
-			st.entries = make([dynamic]^Block_Index_Entry, 0, 1024, context.temp_allocator)
+		if .Has_Undo in entry.status {
+			st := rev_stats[entry.undo_file_num]
+			if !st.has_blocks {
+				st.entries = make([dynamic]^Block_Index_Entry, 0, 1024, context.temp_allocator)
+			}
+			st.has_blocks = true
+			if entry.height > st.max_height { st.max_height = entry.height }
+			append(&st.entries, entry)
+			rev_stats[entry.undo_file_num] = st
 		}
-		st.has_blocks = true
-		if entry.height > st.max_height {
-			st.max_height = entry.height
-		}
-		append(&st.entries, entry)
-		stats[entry.file_num] = st
 	}
 
-	// Total on-disk usage across blk + rev files.
+	// Total on-disk usage across both file sets.
 	total: i64 = 0
-	for fn in u32(0) ..= current_file {
+	for fn in u32(0) ..= cs.block_db.files.current_file {
 		total += storage.flat_file_size(&cs.block_db.files, fn)
+	}
+	for fn in u32(0) ..= cs.undo_files.current_file {
 		total += storage.flat_file_size(&cs.undo_files, fn)
 	}
-	for fn, st in stats {
-		}
 	if total <= i64(cs.prune_target) {
 		return 0, 0
 	}
 
-	// Delete oldest-first until under target.
-	for fn in u32(0) ..= current_file {
-		if total <= i64(cs.prune_target) {
+	fd_blk, freed_blk := _prune_pass(cs, &cs.block_db.files, blk_stats, {.Has_Data}, prune_height, &total)
+	fd_rev, freed_rev := _prune_pass(cs, &cs.undo_files, rev_stats, {.Has_Undo}, prune_height, &total)
+	files_deleted = fd_blk + fd_rev
+	bytes_freed = freed_blk + freed_rev
+
+	if files_deleted > 0 {
+		log.infof("Pruned %d block files (%d MB freed), lowest stored height now %d",
+			files_deleted, bytes_freed / (1024 * 1024), cs.prune_height)
+	}
+	return files_deleted, bytes_freed
+}
+
+// One prune pass over a flat-file manager: delete files whose every tracked
+// block is below prune_height, oldest-first, until total fits the target.
+// Index status is batch-persisted BEFORE deletion.
+_prune_pass :: proc(
+	cs: ^Chain_State,
+	mgr: ^storage.Flat_File_Manager,
+	stats: map[u32]_Prune_File_Stat,
+	clear_flags: storage.Block_Status,
+	prune_height: int,
+	total: ^i64,
+) -> (files_deleted: int, bytes_freed: i64) {
+	for fn in u32(0) ..< mgr.current_file { // strictly below the active write file
+		if total^ <= i64(cs.prune_target) {
 			break
-		}
-		if fn == current_file || fn == cs.undo_files.current_file {
-			break // never touch the active write files
 		}
 		st, has := stats[fn]
 		if !has || !st.has_blocks {
-			continue // already pruned or empty
+			continue
 		}
 		if st.max_height >= prune_height {
-			// Stall-requeued stragglers can land in later files, so max heights
-			// aren't strictly monotonic — keep scanning.
+			// Stragglers make per-file max heights non-monotonic — keep scanning.
 			continue
 		}
 
-		// 1. Persist status changes for every block in this file.
 		batch := storage.ldb_batch_create()
 		for entry in st.entries {
-			entry.status -= {.Has_Data, .Has_Undo}
+			entry.status -= clear_flags
 			rec := block_index_to_record(entry)
 			storage.index_db_batch_put(&cs.index_db, batch, rec)
 		}
 		werr := storage.ldb_batch_write(cs.store.index_db, cs.store.sync_opts, batch)
 		storage.ldb_batch_destroy(batch)
 		if werr != .None {
-			log.errorf("Prune: index batch write failed for file %d — stopping", fn)
+			log.errorf("Prune: index batch write failed for %s file %d — stopping", mgr.prefix, fn)
 			break
 		}
 
-		// 2. Delete the files.
-		blk_sz := storage.flat_file_size(&cs.block_db.files, fn)
-		rev_sz := storage.flat_file_size(&cs.undo_files, fn)
-		storage.flat_file_delete(&cs.block_db.files, fn)
-		storage.flat_file_delete(&cs.undo_files, fn)
-		total -= blk_sz + rev_sz
-		bytes_freed += blk_sz + rev_sz
+		sz := storage.flat_file_size(mgr, fn)
+		storage.flat_file_delete(mgr, fn)
+		total^ -= sz
+		bytes_freed += sz
 		files_deleted += 1
 		if st.max_height + 1 > cs.prune_height {
 			cs.prune_height = st.max_height + 1
 		}
-	}
-
-	if files_deleted > 0 {
-		log.infof("Pruned %d block files (%d MB freed), lowest stored height now %d",
-			files_deleted, bytes_freed / (1024 * 1024), cs.prune_height)
 	}
 	return files_deleted, bytes_freed
 }
