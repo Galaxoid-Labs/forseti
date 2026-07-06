@@ -62,6 +62,18 @@ foreign ncurses {
 	getch :: proc() -> c.int ---
 	getmaxx :: proc(win: ^WINDOW) -> c.int ---
 	getmaxy :: proc(win: ^WINDOW) -> c.int ---
+
+	// Windows + borders (box uses the terminal's alternate charset — proper
+	// line drawing that survives non-wide curses, unlike UTF-8 glyphs).
+	newwin :: proc(nlines, ncols, begin_y, begin_x: c.int) -> ^WINDOW ---
+	delwin :: proc(win: ^WINDOW) -> c.int ---
+	box :: proc(win: ^WINDOW, verch, horch: c.uint) -> c.int ---
+	werase :: proc(win: ^WINDOW) -> c.int ---
+	mvwaddnstr :: proc(win: ^WINDOW, y, x: c.int, str: cstring, n: c.int) -> c.int ---
+	wattron :: proc(win: ^WINDOW, attrs: c.int) -> c.int ---
+	wattroff :: proc(win: ^WINDOW, attrs: c.int) -> c.int ---
+	wnoutrefresh :: proc(win: ^WINDOW) -> c.int ---
+	doupdate :: proc() -> c.int ---
 }
 
 // setlocale so UTF-8 box/sparkline glyphs render (must precede initscr).

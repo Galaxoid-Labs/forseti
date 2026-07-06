@@ -104,80 +104,136 @@ run_with_source :: proc(info: Static_Info, fetch: Status_Fetch, ud: rawptr, loca
 			}
 		}
 
-		nc.erase()
 		if have {
 			_draw(&st, info, connected)
 		} else {
-			_put(1, 2, "Connecting...", P_DIM, false)
+			nc.erase()
+			_put(nc.stdscr, 1, 2, "Connecting...", P_DIM)
+			nc.refresh()
 		}
-		nc.refresh()
 		free_all(context.temp_allocator)
 		time.sleep(100 * time.Millisecond)
 	}
 }
 
-_put :: proc(y, x: int, s: string, pair: int, bold: bool) {
-	attrs := nc.color_pair(i32(pair))
-	if bold { attrs |= nc.A_BOLD }
-	nc.attron(attrs)
+_put :: proc(win: ^nc.WINDOW, y, x: int, s: string, pair: int, attrs_extra: i32 = 0) {
+	attrs := nc.color_pair(i32(pair)) | attrs_extra
+	nc.wattron(win, attrs)
 	cs := strings.clone_to_cstring(s, context.temp_allocator)
-	nc.mvaddnstr(i32(y), i32(x), cs, i32(len(s)))
-	nc.attroff(attrs)
+	nc.mvwaddnstr(win, i32(y), i32(x), cs, i32(len(s)))
+	nc.wattroff(win, attrs)
+}
+
+// Bordered panel with a title on the top rule — the classic curses look.
+// Created fresh each frame (cheap at dashboard framerates); batched via
+// wnoutrefresh + one doupdate for a flicker-free flip.
+_panel :: proc(y, x, h, w: int, title: string) -> ^nc.WINDOW {
+	win := nc.newwin(i32(h), i32(w), i32(y), i32(x))
+	if win == nil { return nil }
+	nc.werase(win)
+	nc.box(win, 0, 0)
+	if title != "" {
+		_put(win, 0, 2, fmt.tprintf(" %s ", title), P_DIM, nc.A_BOLD)
+	}
+	return win
+}
+
+_flip :: proc(win: ^nc.WINDOW) {
+	if win == nil { return }
+	nc.wnoutrefresh(win)
+	nc.delwin(win)
+}
+
+// Solid progress bar via reverse-video spaces (the traditional widget).
+_bar :: proc(win: ^nc.WINDOW, y, x, w: int, frac: f64, pair: int) {
+	filled := clamp(int(frac * f64(w)), 0, w)
+	nc.wattron(win, nc.color_pair(i32(pair)) | nc.A_REVERSE)
+	spaces := strings.repeat(" ", filled, context.temp_allocator)
+	cs := strings.clone_to_cstring(spaces, context.temp_allocator)
+	nc.mvwaddnstr(win, i32(y), i32(x), cs, i32(filled))
+	nc.wattroff(win, nc.color_pair(i32(pair)) | nc.A_REVERSE)
+	dots := strings.repeat(".", w - filled, context.temp_allocator)
+	_put(win, y, x + filled, dots, P_DIM)
 }
 
 _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 	w := int(nc.getmaxx(nc.stdscr))
 	h := int(nc.getmaxy(nc.stdscr))
-	if w < 40 || h < 10 {
-		_put(0, 0, "terminal too small", P_RED, true)
+	nc.erase()
+	nc.wnoutrefresh(nc.stdscr)
+	if w < 60 || h < 18 {
+		_put(nc.stdscr, 0, 0, "terminal too small (min 60x18)", P_RED, nc.A_BOLD)
+		nc.wnoutrefresh(nc.stdscr)
+		nc.doupdate()
 		return
 	}
 
 	state_label, state_pair := sync_state_label(st.sync_state)
 
-	// Header
-	_put(0, 1, fmt.tprintf("bitcoin-node-odin — %s", info.network), P_TEXT, true)
-	_put(0, max(w - len(state_label) - 2, 40), state_label, state_pair, true)
+	// Header line (no box).
+	_put(nc.stdscr, 0, 1, fmt.tprintf("bitcoin-node-odin — %s", info.network), P_TEXT, nc.A_BOLD)
+	_put(nc.stdscr, 0, w - len(state_label) - 2, state_label, state_pair, nc.A_BOLD)
 	if !connected {
-		_put(0, 30, "[CONNECTION LOST — retrying]", P_RED, true)
+		_put(nc.stdscr, 0, 26, "[ CONNECTION LOST — retrying ]", P_RED, nc.A_BOLD)
 	} else if st.flushing {
-		_put(0, 30, flush_label(st), P_YELLOW, true)
+		_put(nc.stdscr, 0, 26, flush_label(st), P_YELLOW, nc.A_BOLD)
+	}
+	nc.wnoutrefresh(nc.stdscr)
+
+	// Sync panel.
+	sync_h := 4
+	sp := _panel(1, 0, sync_h, w, "Sync")
+	if sp != nil {
+		_bar(sp, 1, 2, w - 14, st.verification_pct, P_GREEN)
+		_put(sp, 1, w - 10, fmt.tprintf("%6.2f%%", st.verification_pct * 100), P_GREEN, nc.A_BOLD)
+		_put(sp, 2, 2, blocks_line(st), P_DIM)
+		_flip(sp)
 	}
 
-	// Progress
-	_put(1, 1, progress_line(st, w - 2), P_GREEN, false)
-	_put(2, 1, blocks_line(st), P_DIM, false)
-
-	// Peers
-	y := 4
-	_put(y, 1, fmt.tprintf("PEERS (%d)", st.peer_count), P_DIM, true)
-	y += 1
-	_put(y, 1, peer_header(w), P_DIM, false)
-	y += 1
-	max_rows := max(h - 13, 1)
-	for i in 0 ..< min(st.peer_count, max_rows) {
-		_put(y, 1, peer_line(&st.peers[i], st.sync_state, w), P_TEXT, false)
-		y += 1
+	// Peers panel.
+	rows := min(st.peer_count, max(h - sync_h - 12, 1))
+	peers_h := rows + 3
+	pp := _panel(1 + sync_h, 0, peers_h, w, fmt.tprintf("Peers (%d)", st.peer_count))
+	if pp != nil {
+		_put(pp, 1, 2, peer_header(w), P_DIM)
+		for i in 0 ..< rows {
+			_put(pp, 2 + i, 2, peer_line(&st.peers[i], st.sync_state, w), P_TEXT)
+		}
+		_flip(pp)
 	}
 
-	// Network sparklines
-	y += 1
-	spark_w := max(w - 30, 10)
-	in_rate, out_rate := current_rates()
-	_put(y, 1, fmt.tprintf("IN  %s %8s/s", sparkline(g_net_in[:], g_net_idx, g_net_count, spark_w), fmt_bytes(i64(in_rate))), P_BLUE, false)
-	_put(y + 1, 1, fmt.tprintf("OUT %s %8s/s", sparkline(g_net_out[:], g_net_idx, g_net_count, spark_w), fmt_bytes(i64(out_rate))), P_GREEN, false)
+	// Network panel.
+	net_y := 1 + sync_h + peers_h
+	np := _panel(net_y, 0, 4, w, "Network")
+	if np != nil {
+		spark_w := max(w - 28, 10)
+		in_rate, out_rate := current_rates()
+		_put(np, 1, 2, "IN ", P_BLUE, nc.A_BOLD)
+		_put(np, 1, 6, sparkline(g_net_in[:], g_net_idx, g_net_count, spark_w), P_BLUE)
+		_put(np, 1, 8 + spark_w, fmt.tprintf("%9s/s", fmt_bytes(i64(in_rate))), P_TEXT)
+		_put(np, 2, 2, "OUT", P_GREEN, nc.A_BOLD)
+		_put(np, 2, 6, sparkline(g_net_out[:], g_net_idx, g_net_count, spark_w), P_GREEN)
+		_put(np, 2, 8 + spark_w, fmt.tprintf("%9s/s", fmt_bytes(i64(out_rate))), P_TEXT)
+		_flip(np)
+	}
 
-	// Stats + profile
-	y += 3
-	_put(y, 1, stats_line(st), P_TEXT, false)
-	_put(y + 1, 1, profile_line(st), P_DIM, false)
+	// Node stats panel.
+	xp := _panel(net_y + 4, 0, 4, w, "Node")
+	if xp != nil {
+		_put(xp, 1, 2, stats_line(st), P_TEXT)
+		_put(xp, 2, 2, profile_line(st), P_DIM)
+		_flip(xp)
+	}
 
-	// Footer
-	footer := fmt.tprintf(":%d | dbcache %d MB%s | disk %s | %s | q=quit",
+	// Footer.
+	footer := fmt.tprintf(" :%d | dbcache %d MB%s | disk %s | %s | q=quit ",
 		info.rpc_port, info.dbcache_mb,
 		info.prune_mb > 0 ? fmt.tprintf(" | prune %d MB", info.prune_mb) : "",
 		fmt_bytes(st.disk_usage), info.data_dir)
-	_put(h - 1, 1, footer, P_DIM, false)
+	_put(nc.stdscr, h - 1, 1, footer, P_DIM)
+	nc.wnoutrefresh(nc.stdscr)
+
+	nc.doupdate()
 }
 
 current_rates :: proc() -> (in_rate, out_rate: f32) {
