@@ -2783,6 +2783,9 @@ _handle_getnodestatus :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respo
 	obj["disk_usage"] = json.Value(json.Integer(st.disk_usage))
 	obj["total_bytes_sent"] = json.Value(json.Integer(st.total_bytes_sent))
 	obj["total_bytes_recv"] = json.Value(json.Integer(st.total_bytes_recv))
+	obj["flushing"] = json.Value(json.Boolean(st.flushing))
+	obj["flush_total"] = json.Value(json.Integer(i64(st.flush_total)))
+	obj["flush_progress"] = json.Value(json.Integer(i64(st.flush_progress)))
 
 	peers := make(json.Array, 0, st.peer_count, context.temp_allocator)
 	for i in 0 ..< st.peer_count {

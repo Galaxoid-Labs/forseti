@@ -229,6 +229,17 @@ _run_window :: proc(title: cstring, info: Static_Info, fetch: Status_Fetch, ud: 
 			_draw_no_p2p(cs, info)
 		} else if have_status {
 			_draw_dashboard(&st, info)
+			if st.flushing {
+				rl.DrawRectangle(0, 0, WIN_W, 26, rl.Color{0x8a, 0x6d, 0x1a, 0xff})
+				if st.flush_progress < st.flush_total {
+					pct := st.flush_total > 0 ? 100 * st.flush_progress / st.flush_total : 0
+					_text(fmt.ctprintf("FLUSHING UTXO CACHE — scanning %d%% (%s / %s entries)",
+						pct, _commas(st.flush_progress), _commas(st.flush_total)), 16, 6, 14, rl.WHITE)
+				} else {
+					_text(fmt.ctprintf("FLUSHING UTXO CACHE — committing %s entries to LevelDB (can take minutes)",
+						_commas(st.flush_total)), 16, 6, 14, rl.WHITE)
+				}
+			}
 			if !connected {
 				rl.DrawRectangle(0, 0, WIN_W, 26, rl.Color{0x8a, 0x2a, 0x2a, 0xff})
 				_text("CONNECTION LOST - retrying...", 16, 6, 14, rl.WHITE)

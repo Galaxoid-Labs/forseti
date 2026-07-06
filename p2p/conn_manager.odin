@@ -1871,6 +1871,11 @@ conn_manager_get_status :: proc(cm: ^Conn_Manager) -> Node_Status {
 	sync.mutex_lock(&cm.status_mutex)
 	st := cm.status
 	sync.mutex_unlock(&cm.status_mutex)
+	// Injected at read time: during a flush the P2P thread is blocked and the
+	// snapshot freezes — these fields keep the GUI honest about why.
+	st.flushing = cm.chain.coins.flushing
+	st.flush_total = cm.chain.coins.flush_total
+	st.flush_progress = cm.chain.coins.flush_progress
 	return st
 }
 

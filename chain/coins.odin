@@ -31,6 +31,11 @@ Coins_Cache :: struct {
 	// heap alloc/free churned tens of GB per fill-evict cycle and the
 	// allocator retained the pages — RSS ratcheted ~14GB per cycle.
 	script_arena: virtual.Arena,
+	// Live flush state for the GUI (written by the flushing thread, read
+	// cross-thread by the status snapshot — plain ints, torn reads harmless).
+	flushing:       bool,
+	flush_total:    int,
+	flush_progress: int,
 }
 
 // Allocator over the cache's script arena. Derived per call — Coins_Cache is
@@ -205,6 +210,13 @@ coins_cache_restore :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: sto
 // committed in a single WriteBatch for crash consistency.
 coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) -> Chain_Error {
 	cache_size := len(cc.cache)
+	cc.flushing = true
+	cc.flush_total = cache_size
+	cc.flush_progress = 0
+	defer {
+		cc.flushing = false
+		cc.flush_progress = 0
+	}
 	log.infof("UTXO flush at height %d: %d entries (%d MB live, %d MB effective / budget %d MB)",
 		tip_height, cache_size,
 		cc.mem_usage / (1024 * 1024),
@@ -218,6 +230,9 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 	processed := 0
 	for outpoint, entry in cc.cache {
 		processed += 1
+		if processed % 100_000 == 0 {
+			cc.flush_progress = processed
+		}
 		if cache_size >= 10_000_000 && processed % 10_000_000 == 0 {
 			log.infof("UTXO flush: scanned %d / %d cache entries...", processed, cache_size)
 		}
@@ -239,6 +254,7 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 
 	// ATOMIC: UTXOs + metadata committed together. On large caches this is a
 	// single multi-GB synchronous LevelDB write that can take minutes.
+	cc.flush_progress = cache_size // scan done; GUI shows "committing"
 	log.infof("UTXO flush: committing %d writes + %d deletes to LevelDB...", written, deleted)
 	berr := storage.ldb_batch_write(cc.db.store.chainstate_db, cc.db.store.sync_opts, batch)
 	if berr != .None {

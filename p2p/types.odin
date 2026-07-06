@@ -161,4 +161,8 @@ Node_Status :: struct {
 	disk_usage:        i64, // blk+rev+chainstate bytes on disk (refreshed ~1/min)
 	total_bytes_sent:  i64, // lifetime P2P traffic (GUI derives rates)
 	total_bytes_recv:  i64,
+	// UTXO flush in progress (snapshot freezes while it runs — see get_status)
+	flushing:          bool,
+	flush_total:       int,
+	flush_progress:    int,
 }

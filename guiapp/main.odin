@@ -182,6 +182,9 @@ _fetch_status :: proc(c: ^Client) -> (st: p2p.Node_Status, ok: bool) {
 	st.disk_usage = _jint(result, "disk_usage")
 	st.total_bytes_sent = _jint(result, "total_bytes_sent")
 	st.total_bytes_recv = _jint(result, "total_bytes_recv")
+	st.flushing = _jbool(result, "flushing")
+	st.flush_total = int(_jint(result, "flush_total"))
+	st.flush_progress = int(_jint(result, "flush_progress"))
 
 	if peers, peers_ok := result["peers"].(json.Array); peers_ok {
 		for pv, i in peers {
