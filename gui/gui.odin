@@ -35,6 +35,23 @@ _font_for :: proc(size: f32) -> ^rl.Font {
 	return &g_fonts[best]
 }
 
+// Group box with a legible title: raygui's GuiGroupBox renders its title in
+// LINE_COLOR (the border color), which is unreadable on a dark theme. Draw
+// the border with an empty title and overlay the text ourselves.
+COL_TITLE :: rl.Color{0x9d, 0xb2, 0xc7, 0xff}
+
+_group_box :: proc(rect: rl.Rectangle, title: cstring) {
+	rl.GuiGroupBox(rect, nil)
+	if title == nil { return }
+	tw: f32 = 8 * f32(len(title)) // monospace approximation
+	if g_fonts_ok {
+		tw = rl.MeasureTextEx(_font_for(13)^, title, 13, 0).x
+	}
+	// Mask the border line behind the title, then draw it.
+	rl.DrawRectangle(i32(rect.x) + 8, i32(rect.y) - 7, i32(tw) + 8, 14, COL_BG)
+	_text(title, i32(rect.x) + 12, i32(rect.y) - 7, 13, COL_TITLE)
+}
+
 // Draw text with the embedded font (falls back to raylib default if load failed).
 _text :: proc(text: cstring, x, y: i32, size: f32, color: rl.Color) {
 	if !g_fonts_ok {
@@ -164,7 +181,7 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	_text(fmt.ctprintf("Uptime: %s", _fmt_uptime(st.uptime_secs)), pad, 38, 14, COL_DIM)
 
 	// --- Sync progress ---
-	rl.GuiGroupBox(rl.Rectangle{pad, 64, WIN_W - 2 * pad, 58}, "Sync Progress")
+	_group_box(rl.Rectangle{pad, 64, WIN_W - 2 * pad, 58}, "Sync Progress")
 	progress: f32 = 1
 	if st.best_header > 0 {
 		progress = f32(st.chain_height) / f32(st.best_header)
@@ -177,7 +194,7 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 
 	// --- Peers table ---
 	peers_h: f32 = 200
-	rl.GuiGroupBox(rl.Rectangle{pad, 130, WIN_W - 2 * pad, peers_h}, fmt.ctprintf("Peers (%d)", st.peer_count))
+	_group_box(rl.Rectangle{pad, 130, WIN_W - 2 * pad, peers_h}, fmt.ctprintf("Peers (%d)", st.peer_count))
 	col_x := [?]i32{pad + 12, pad + 52, pad + 96, pad + 296, pad + 500, pad + 580, pad + 640, pad + 710, pad + 786}
 	// RATE (blocks/s) only means something during bulk download; at the tip
 	// show LAST — seconds since the peer's last message (liveness).
@@ -213,11 +230,11 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 
 	// --- Mempool + UTXO cache ---
 	row2_y: f32 = 338
-	rl.GuiGroupBox(rl.Rectangle{pad, row2_y, 280, 84}, "Mempool")
+	_group_box(rl.Rectangle{pad, row2_y, 280, 84}, "Mempool")
 	_text(fmt.ctprintf("Txs:  %s", _commas(st.mempool_count)), pad + 12, i32(row2_y) + 16, 14, COL_TEXT)
 	_text(fmt.ctprintf("Size: %s vB", _commas(st.mempool_vbytes)), pad + 12, i32(row2_y) + 40, 14, COL_TEXT)
 
-	rl.GuiGroupBox(rl.Rectangle{pad + 296, row2_y, WIN_W - 2 * pad - 296, 84}, "UTXO Cache")
+	_group_box(rl.Rectangle{pad + 296, row2_y, WIN_W - 2 * pad - 296, 84}, "UTXO Cache")
 	_text(fmt.ctprintf("Entries: %s", _commas(st.utxo_cache_count)), pad + 308, i32(row2_y) + 16, 14, COL_TEXT)
 	_text(
 		fmt.ctprintf("Memory:  %s / %s MB", _commas(st.utxo_cache_bytes / 1_048_576), _commas(st.utxo_cache_budget / 1_048_576)),
@@ -230,7 +247,7 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 
 	// --- Block profile ---
 	prof_y: f32 = 434
-	rl.GuiGroupBox(rl.Rectangle{pad, prof_y, WIN_W - 2 * pad, 84}, fmt.ctprintf("Block Profile (last %d blocks)", st.prof_blocks))
+	_group_box(rl.Rectangle{pad, prof_y, WIN_W - 2 * pad, 84}, fmt.ctprintf("Block Profile (last %d blocks)", st.prof_blocks))
 	if st.prof_blocks > 0 {
 		_text(fmt.ctprintf("Total: %.1f ms/block", st.prof_ms_per_block), pad + 12, i32(prof_y) + 18, 15, COL_ACCENT)
 		_text(
