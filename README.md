@@ -479,7 +479,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 ### Correctness
 
 - **Crash consistency on fresh DB** — If node is killed before first UTXO flush, recovery fails due to absent meta tip
-- **V2 transport (BIP324) sync issues** — `--v2transport=1` can cause peer disconnections and sync stalls during IBD. Default is disabled (`0`). Needs investigation: likely related to handshake timing, fallback logic, or encrypted message framing under high throughput
+- **V2 transport (BIP324) under IBD load untested** — steady-state v2 is verified working (encrypted sessions with Core 28–31 on mainnet at tip; full protocol exchange against Core 30 on regtest). The historical IBD disconnections/stalls predate several nbio and stall-detection fixes and need a re-test with a full `--v2transport=1` sync before enabling by default
 
 ### Performance
 
