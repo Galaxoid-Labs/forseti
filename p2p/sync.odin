@@ -1340,7 +1340,10 @@ _build_download_queue :: proc(sm: ^Sync_Manager) {
 
 	for hash, entry in sm.chain.block_index.entries {
 		// Skip genesis (height 0) — peers don't serve it; connect_pending_blocks handles it.
-		if .Valid_Header in entry.status && .Has_Data not_in entry.status && entry.height > 0 {
+		// Skip blocks already connected (Valid_Chain): pruned blocks lose
+		// Has_Data but must never be re-downloaded — without this check a
+		// mass prune queued 616k already-validated blocks for redownload.
+		if .Valid_Header in entry.status && .Has_Data not_in entry.status && .Valid_Chain not_in entry.status && entry.height > 0 {
 			if entry.height <= max_h {
 				by_height[entry.height] = hash
 			}
