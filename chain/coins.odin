@@ -2,6 +2,7 @@ package chain
 
 import "core:log"
 import "core:mem/virtual"
+import "core:thread"
 import "core:mem"
 import "../storage"
 import "../wire"
@@ -31,6 +32,25 @@ Coins_Cache :: struct {
 	// heap alloc/free churned tens of GB per fill-evict cycle and the
 	// allocator retained the pages — RSS ratcheted ~14GB per cycle.
 	script_arena: virtual.Arena,
+	// Background flush ("memtable rotation"): flush_begin swaps cache ->
+	// frozen and script_arena -> frozen_arena, then a worker thread streams
+	// frozen to LevelDB in chunked batches WITHOUT the tip marker. The tip is
+	// written by flush_pump on the owner thread at completion, so a crash
+	// mid-flush recovers from the OLD tip (replay over partial chunks is
+	// idempotent). frozen is immutable once swapped: spends of frozen coins
+	// shadow it with sentinels in the new active map; reads layer
+	// active -> frozen -> DB. Destroying frozen_arena at completion IS the
+	// eviction: all frozen script bytes return to the OS in one shot.
+	frozen:           map[wire.Outpoint]Cache_Entry,
+	frozen_arena:     virtual.Arena,
+	frozen_mem:       int, // effective bytes held by the frozen layer
+	flush_thread:     ^thread.Thread,
+	flush_done:       bool, // set by the worker (plain bool: single writer, polled)
+	flush_tip_hash:   Hash256,
+	flush_tip_height: int,
+	flush_written:    int,
+	flush_deleted:    int,
+	flush_failed:     bool,
 	// Live flush state for the GUI (written by the flushing thread, read
 	// cross-thread by the status snapshot — plain ints, torn reads harmless).
 	flushing:       bool,
@@ -62,10 +82,11 @@ coins_cache_init :: proc(db: ^storage.UTXO_DB, budget: int = 440 * 1024 * 1024, 
 // RSS past the budget.
 _effective_usage :: proc(cc: ^Coins_Cache) -> int {
 	arena_backed := int(cc.script_arena.total_used) + len(cc.cache) * CACHE_ENTRY_OVERHEAD
-	return max(cc.mem_usage, arena_backed)
+	return max(cc.mem_usage, arena_backed) + cc.frozen_mem
 }
 
 coins_cache_destroy :: proc(cc: ^Coins_Cache) {
+	coins_cache_flush_join(cc) // never leave a worker thread running
 	virtual.arena_destroy(&cc.script_arena)
 	delete(cc.cache)
 }
@@ -79,6 +100,19 @@ coins_cache_get :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage.U
 			return {}, false
 		}
 		return entry.coin, true
+	}
+
+	// Frozen layer (mid background flush): authoritative over the DB, which
+	// may not have received this entry's chunk yet. Read-only — no promotion
+	// into active (the coin is already memory-resident here).
+	if cc.frozen != nil {
+		fentry, ffound := cc.frozen[outpoint]
+		if ffound {
+			if _is_spent_sentinel(&fentry) {
+				return {}, false
+			}
+			return fentry.coin, true
+		}
 	}
 
 	// Fall through to DB
@@ -99,7 +133,7 @@ coins_cache_has :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> bool {
 	if found {
 		return !_is_spent_sentinel(&entry)
 	}
-	_, db_found := coins_cache_get(cc, outpoint)
+	_, db_found := coins_cache_get(cc, outpoint) // handles frozen + DB layers
 	return db_found
 }
 
@@ -160,6 +194,28 @@ coins_cache_spend :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage
 		return spent_coin, true
 	}
 
+	// Frozen layer (mid background flush): the entry is immutable there —
+	// spend by shadowing it with a sentinel in the ACTIVE map. Not Fresh:
+	// the coin is (or is about to be) in the DB, so the next flush must
+	// issue a delete for it.
+	if cc.frozen != nil {
+		fentry, ffound := cc.frozen[outpoint]
+		if ffound {
+			if _is_spent_sentinel(&fentry) {
+				return {}, false
+			}
+			spent_coin := fentry.coin
+			if len(spent_coin.script) > 0 {
+				temp_script := make([]byte, len(spent_coin.script), context.temp_allocator)
+				copy(temp_script, spent_coin.script)
+				spent_coin.script = temp_script
+			}
+			cc.cache[outpoint] = Cache_Entry{coin = {}, flags = {.Dirty}}
+			cc.mem_usage += CACHE_ENTRY_OVERHEAD
+			return spent_coin, true
+		}
+	}
+
 	// Not in cache — read from DB straight into the block temp arena (the
 	// caller only uses the script within the current block's lifetime).
 	coin, db_found := storage.utxo_db_get(cc.db, outpoint, context.temp_allocator)
@@ -209,6 +265,9 @@ coins_cache_restore :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: sto
 // Flush dirty entries to DB atomically. All UTXO changes + metadata are
 // committed in a single WriteBatch for crash consistency.
 coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) -> Chain_Error {
+	// A concurrently-running background flush would race this one's tip
+	// marker ahead of its own chunks — reap it fully first.
+	coins_cache_flush_join(cc)
 	cache_size := len(cc.cache)
 	cc.flushing = true
 	cc.flush_total = cache_size
@@ -310,6 +369,14 @@ coins_cache_prefetch_merge :: proc(cc: ^Coins_Cache, items: []Prefetch_Item) -> 
 	merged := 0
 	for &item in items {
 		if !item.found { continue }
+		// Frozen layer holds NEWER state than the DB the workers read from —
+		// merging the stale DB value would shadow it (active wins reads).
+		if cc.frozen != nil && item.outpoint in cc.frozen {
+			if len(item.coin.script) > 0 {
+				delete(item.coin.script)
+			}
+			continue
+		}
 		if item.outpoint in cc.cache {
 			// Already in cache — free the worker's heap-allocated script.
 			if len(item.coin.script) > 0 {

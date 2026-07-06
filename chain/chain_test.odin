@@ -1209,3 +1209,72 @@ test_reorg_invalid_branch_rolls_back :: proc(t: ^testing.T) {
 	tip_final, _ := chain_tip(&cs)
 	testing.expect(t, tip_final == a_tip, "failed branch must not be retried")
 }
+
+@(test)
+test_background_flush_roundtrip :: proc(t: ^testing.T) {
+	dir := make_test_dir("bgflush")
+	defer remove_test_dir(dir)
+	params := consensus.REGTEST_PARAMS
+	cs: Chain_State
+	err := chain_state_init(&cs, dir, &params)
+	testing.expect_value(t, err, Chain_Error.None)
+	defer chain_state_destroy(&cs)
+
+	// 50 blocks -> 50 coinbase UTXOs in the active cache.
+	prev := HASH_ZERO
+	cb_txids: [50]Hash256
+	for i in 0 ..< 50 {
+		block := make_chain_block(i, prev, &params)
+		cb_txids[i] = wire.tx_id(&block.txs[0])
+		testing.expect_value(t, accept_block(&cs, &block), Chain_Error.None)
+		prev = wire.block_header_hash(&block.header)
+	}
+	tip_hash, tip_h := chain_tip(&cs)
+
+	// Start the background flush: cache rotates into the frozen layer.
+	began := coins_cache_flush_begin(&cs.coins, tip_hash, tip_h)
+	testing.expect(t, began, "flush_begin should start")
+	testing.expect(t, cs.coins.frozen != nil, "frozen layer must exist")
+	testing.expect_value(t, len(cs.coins.cache), 0)
+
+	// Layered read: frozen coins remain visible mid-flush.
+	op0 := wire.Outpoint{hash = cb_txids[10], index = 0}
+	_, found := coins_cache_get(&cs.coins, op0)
+	testing.expect(t, found, "frozen coin must be readable during flush")
+
+	// Spend a frozen coin mid-flush: shadows via sentinel in active.
+	op_spent := wire.Outpoint{hash = cb_txids[20], index = 0}
+	spent, sfound := coins_cache_spend(&cs.coins, op_spent)
+	testing.expect(t, sfound, "must be able to spend a frozen coin mid-flush")
+	testing.expect(t, spent.amount > 0, "spent coin should carry its value")
+	_, still := coins_cache_get(&cs.coins, op_spent)
+	testing.expect(t, !still, "spent frozen coin must read as gone")
+
+	// Connect more blocks while the flush runs (writes go to the new active).
+	for i in 50 ..< 55 {
+		block := make_chain_block(i, prev, &params)
+		testing.expect_value(t, accept_block(&cs, &block), Chain_Error.None)
+		prev = wire.block_header_hash(&block.header)
+	}
+
+	// Reap the flush.
+	coins_cache_flush_join(&cs.coins)
+	testing.expect(t, cs.coins.frozen == nil, "frozen layer released after completion")
+	testing.expect(t, !coins_cache_flush_running(&cs.coins), "no worker after join")
+
+	// Flushed coins are durably in LevelDB.
+	db_coin, db_found := storage.utxo_db_get(&cs.utxo_db, op0, context.temp_allocator)
+	testing.expect(t, db_found, "flushed coin must be in the DB")
+	testing.expect(t, db_coin.amount > 0, "DB coin carries value")
+
+	// The mid-flush spend shadowed the frozen entry; a follow-up (sync)
+	// flush must delete it from the DB.
+	terr := coins_cache_flush(&cs.coins, prev, 54)
+	testing.expect_value(t, terr, Chain_Error.None)
+	_, gone_found := storage.utxo_db_get(&cs.utxo_db, op_spent, context.temp_allocator)
+	testing.expect(t, !gone_found, "spent-during-flush coin must be deleted by the next flush")
+
+	// And the post-flush blocks' coinbases survive end to end.
+	_, h := chain_tip(&cs)
+	testing.expect_value(t, h, 54)
+}

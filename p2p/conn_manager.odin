@@ -282,6 +282,15 @@ _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 
 	now := time.to_unix_seconds(time.now())
 
+	// Reap any completed background UTXO flush (blocks are rare at the tip,
+	// so sync_handle_block alone might leave a finished worker unreaped).
+	if completed, _ := chain.coins_cache_flush_pump(&cm.chain.coins); completed {
+		cm.chain.last_flush_height = cm.chain.coins.flush_tip_height
+		prune_block_files_cm: {
+			chain.prune_block_files(cm.chain, cm.chain.last_flush_height)
+		}
+	}
+
 	// Refresh the GUI status snapshot (reads node state on this thread — the
 	// owner of chain/mempool/peers — and publishes under status_mutex).
 	if cm.status_enabled {

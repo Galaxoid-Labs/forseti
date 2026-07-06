@@ -351,12 +351,25 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 		should_flush := chain.coins_cache_should_flush(&sm.chain.coins)
 		safety_flush := height / 5000 > prev_height / 5000 && sm.chain.coins.budget < 1024 * 1024 * 1024
 		if should_flush || safety_flush {
-			tip_hash, tip_h := chain.chain_tip(sm.chain)
-			chain.coins_cache_flush(&sm.chain.coins, tip_hash, tip_h)
-			sm.chain.last_flush_height = tip_h
-			// UTXO state is durable up to tip_h — old block files are now prunable.
-			chain.prune_block_files(sm.chain, tip_h)
-			// Reset tip update time so flush duration doesn't trigger false stall detection.
+			if chain.coins_cache_flush_running(&sm.chain.coins) {
+				// A flush is already in flight. Backpressure safety valve: if
+				// the cache has refilled past 1.5x budget while flushing, fall
+				// back to blocking until the worker finishes (old behavior).
+				if sm.chain.coins.mem_usage > sm.chain.coins.budget * 3 / 2 {
+					log.warn("UTXO cache overfilled during background flush — blocking until it completes")
+					chain.coins_cache_flush_join(&sm.chain.coins)
+				}
+			} else {
+				tip_hash, tip_h := chain.chain_tip(sm.chain)
+				chain.coins_cache_flush_begin(&sm.chain.coins, tip_hash, tip_h)
+			}
+		}
+
+		// Reap a completed background flush: only then is the flushed state
+		// durable — last_flush_height and pruning advance here, not at begin.
+		if completed, _ := chain.coins_cache_flush_pump(&sm.chain.coins); completed {
+			sm.chain.last_flush_height = sm.chain.coins.flush_tip_height
+			chain.prune_block_files(sm.chain, sm.chain.last_flush_height)
 			sm.last_tip_update = time.to_unix_seconds(time.now())
 		}
 
