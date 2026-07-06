@@ -73,6 +73,11 @@ Conn_Manager :: struct {
 	status:         Node_Status,
 	status_mutex:   sync.Mutex,
 	started_at:     i64, // unix timestamp, for uptime display
+	// Ring of (chain_tx, time) samples from the 1 Hz status tick; ETA divides
+	// estimated remaining txs by throughput measured over this window.
+	txput_ring:     [120]struct{ chain_tx: i64, t: i64 },
+	txput_idx:      int,
+	txput_count:    int,
 }
 
 conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) -> Net_Error {
@@ -1759,6 +1764,26 @@ _update_node_status :: proc(cm: ^Conn_Manager, now: i64) {
 
 	st.sync_state = cm.sync_mgr.state
 	st.blocks_remaining = max(cm.sync_mgr.best_header_height - tip_height, 0)
+
+	// Verification progress + ETA, measured in transactions (block counts
+	// misestimate remaining work by ~40x across chain eras).
+	st.verification_pct = chain.verification_progress(cm.chain, now)
+	tip_tx := chain.chain_tx_at_tip(cm.chain)
+	cm.txput_ring[cm.txput_idx] = {tip_tx, now}
+	cm.txput_idx = (cm.txput_idx + 1) % len(cm.txput_ring)
+	if cm.txput_count < len(cm.txput_ring) { cm.txput_count += 1 }
+	if st.sync_state != .In_Sync && cm.txput_count > 10 {
+		oldest := cm.txput_ring[(cm.txput_idx + len(cm.txput_ring) - cm.txput_count) % len(cm.txput_ring)]
+		dt := now - oldest.t
+		dtx := tip_tx - oldest.chain_tx
+		if dt > 0 && dtx > 0 {
+			rate := f64(dtx) / f64(dt)
+			remaining := chain.estimated_total_chain_tx(cm.params, now) - f64(tip_tx)
+			if remaining > 0 && rate > 1 {
+				st.eta_secs = i64(remaining / rate)
+			}
+		}
+	}
 
 	st.uptime_secs = now - cm.started_at
 

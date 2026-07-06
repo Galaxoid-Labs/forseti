@@ -130,6 +130,8 @@ Node_Status :: struct {
 	sync_state:        Sync_State,
 	blocks_remaining:  int,
 	blocks_in_flight:  int,
+	verification_pct:  f64, // txs verified / estimated chain total (0..1)
+	eta_secs:          i64, // estimated seconds to full sync (0 = unknown/at tip)
 
 	// Peers
 	peer_count:        int,

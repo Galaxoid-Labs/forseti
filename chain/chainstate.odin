@@ -1213,3 +1213,33 @@ _compute_chain_tx :: proc(cs: ^Chain_State) {
 		entry.chain_tx = running_total
 	}
 }
+
+// Estimated total transactions in the chain right now, extrapolated from the
+// params anchor (Bitcoin Core's chainTxData approach). Returns 0 when the
+// network has no anchor (regtest).
+estimated_total_chain_tx :: proc(params: ^consensus.Chain_Params, now: i64) -> f64 {
+	if params.assumed_chain_tx <= 0 { return 0 }
+	extra := f64(max(now - params.assumed_chain_tx_time, 0)) * params.assumed_tx_rate
+	return f64(params.assumed_chain_tx) + extra
+}
+
+// Verification progress in [0,1], measured in transactions verified vs the
+// estimated chain total — block counts misestimate work by ~40x across eras.
+verification_progress :: proc(cs: ^Chain_State, now: i64) -> f64 {
+	total := estimated_total_chain_tx(cs.params, now)
+	if total <= 0 { return 1 }
+	tip_hash, tip_height := chain_tip(cs)
+	if tip_height < 0 { return 0 }
+	entry, found := cs.block_index.entries[tip_hash]
+	if !found { return 0 }
+	p := f64(entry.chain_tx) / total
+	return clamp(p, 0, 1)
+}
+
+// Cumulative txs at the current tip (0 if unavailable).
+chain_tx_at_tip :: proc(cs: ^Chain_State) -> i64 {
+	tip_hash, tip_height := chain_tip(cs)
+	if tip_height < 0 { return 0 }
+	if entry, found := cs.block_index.entries[tip_hash]; found { return entry.chain_tx }
+	return 0
+}

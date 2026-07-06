@@ -182,14 +182,17 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 
 	// --- Sync progress ---
 	_group_box(rl.Rectangle{pad, 64, WIN_W - 2 * pad, 58}, "Sync Progress")
-	progress: f32 = 1
-	if st.best_header > 0 {
-		progress = f32(st.chain_height) / f32(st.best_header)
-	}
+	// Bar shows verification progress in transactions — the honest measure of
+	// work — not block count (blocks get ~40x heavier across eras).
+	progress := f32(st.verification_pct)
 	rl.GuiProgressBar(rl.Rectangle{pad + 12, 76, WIN_W - 2 * pad - 90, 18}, nil, fmt.ctprintf("%.2f%%", progress * 100), &progress, 0, 1)
+	eta: string = ""
+	if st.eta_secs > 0 && st.sync_state != .In_Sync {
+		eta = fmt.tprintf("    |    ETA ~%s", _fmt_uptime(st.eta_secs))
+	}
 	_text(
-		fmt.ctprintf("%s / %s blocks    |    %d in-flight    |    %s remaining",
-			_commas(st.chain_height), _commas(st.best_header), st.blocks_in_flight, _commas(st.blocks_remaining)),
+		fmt.ctprintf("%s / %s blocks    |    %d in-flight    |    %s remaining%s",
+			_commas(st.chain_height), _commas(st.best_header), st.blocks_in_flight, _commas(st.blocks_remaining), eta),
 		pad + 12, 100, 14, COL_DIM)
 
 	// --- Peers table ---

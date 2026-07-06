@@ -28,6 +28,13 @@ Chain_Params :: struct {
 	signet_challenge_len:      int,
 	// Assumevalid: skip script verification below this height
 	assumevalid_height:        int,
+	// Sync progress estimation (Bitcoin Core's chainTxData): cumulative tx
+	// count at a known recent time plus the network's recent tx rate, used to
+	// extrapolate total chain txs so progress/ETA are measured in
+	// transactions (block counts wildly misestimate work).
+	assumed_chain_tx:          i64,
+	assumed_chain_tx_time:     i64,
+	assumed_tx_rate:           f64,
 	// Address encoding prefixes
 	p2pkh_prefix:              u8,
 	p2sh_prefix:               u8,
@@ -67,6 +74,10 @@ _init_params :: proc "contextless" () {
 	// Assumevalid: skip script verification below this height.
 	// Height 880,000 is well-established mainnet (mined early 2024).
 	MAINNET_PARAMS.assumevalid_height = 880_000
+	// Anchor from our own validated chain at block 956,927 (2026-07-06).
+	MAINNET_PARAMS.assumed_chain_tx = 1_391_821_549
+	MAINNET_PARAMS.assumed_chain_tx_time = 1_783_348_198
+	MAINNET_PARAMS.assumed_tx_rate = 7.8
 
 	// mainnet pow_limit: 00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 	for i in 4 ..< 32 {
@@ -104,6 +115,9 @@ _init_params :: proc "contextless" () {
 	}
 	TESTNET3_PARAMS.pow_limit = MAINNET_PARAMS.pow_limit
 	TESTNET3_PARAMS.assumevalid_height = 2_100_000
+	TESTNET3_PARAMS.assumed_chain_tx = 480_000_000
+	TESTNET3_PARAMS.assumed_chain_tx_time = 1_783_300_000
+	TESTNET3_PARAMS.assumed_tx_rate = 2.0
 
 	TESTNET4_PARAMS = Chain_Params {
 		name                     = "testnet4",
@@ -129,6 +143,9 @@ _init_params :: proc "contextless" () {
 	}
 	TESTNET4_PARAMS.pow_limit = MAINNET_PARAMS.pow_limit
 	TESTNET4_PARAMS.assumevalid_height = 200_000
+	TESTNET4_PARAMS.assumed_chain_tx = 8_000_000
+	TESTNET4_PARAMS.assumed_chain_tx_time = 1_783_300_000
+	TESTNET4_PARAMS.assumed_tx_rate = 0.5
 
 	SIGNET_PARAMS = Chain_Params {
 		name                     = "signet",
@@ -244,6 +261,9 @@ _init_params :: proc "contextless" () {
 
 	// Assumevalid: skip script verification below this height
 	SIGNET_PARAMS.assumevalid_height = 267_665
+	SIGNET_PARAMS.assumed_chain_tx = 15_000_000
+	SIGNET_PARAMS.assumed_chain_tx_time = 1_783_300_000
+	SIGNET_PARAMS.assumed_tx_rate = 0.2
 
 	REGTEST_PARAMS = Chain_Params {
 		name                     = "regtest",

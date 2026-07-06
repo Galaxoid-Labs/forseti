@@ -85,7 +85,7 @@ _handle_getblockchaininfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_R
 
 	// Verification progress: blocks / headers (0.0 to 1.0)
 	if header_height > 0 {
-		obj["verificationprogress"] = json.Value(json.Float(f64(height) / f64(header_height)))
+		obj["verificationprogress"] = json.Value(json.Float(chain.verification_progress(srv.chain, time.to_unix_seconds(time.now()))))
 	} else {
 		obj["verificationprogress"] = json.Value(json.Float(0.0))
 	}
