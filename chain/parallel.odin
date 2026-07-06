@@ -43,16 +43,21 @@ Script_Check_Batch :: struct {
 }
 
 // Thread pool worker: verifies a single script check.
+//
+// ORDERING: wait_group_done is the linearization point — the moment it fires,
+// the dispatching thread's wait returns and the memory holding the checks,
+// control struct, and task data may be recycled. Everything the worker needs
+// (cs, wg) is captured into locals first, and ALL cleanup (arena free/release)
+// happens before done. Nothing shared may be touched after done. A defer here
+// runs after done and is a use-after-free.
 script_check_worker :: proc(task: thread.Task) {
 	check := cast(^Script_Check)task.data
+	cs := check.control.cs
+	wg := check.control.wg
 
 	// Acquire a growing arena from the pool (grows past its 8 MB initial block
 	// for oversized tapscripts; free_all releases the overflow blocks).
-	arena := _arena_pool_acquire(check.control.cs)
-	defer {
-		virtual.arena_free_all(arena)
-		_arena_pool_release(check.control.cs, arena)
-	}
+	arena := _arena_pool_acquire(cs)
 	context.temp_allocator = virtual.arena_allocator(arena)
 
 	verifier := script.Script_Verifier {
@@ -74,7 +79,9 @@ script_check_worker :: proc(task: thread.Task) {
 		}
 	}
 
-	sync.wait_group_done(check.control.wg)
+	virtual.arena_free_all(arena)
+	_arena_pool_release(cs, arena)
+	sync.wait_group_done(wg)
 }
 
 // Acquire a growing arena from the pool. Spins if none available.
@@ -182,13 +189,14 @@ Prefetch_Task :: struct {
 // Scripts are allocated with the heap allocator (they'll live in coins_cache).
 prefetch_worker :: proc(task: thread.Task) {
 	pt := cast(^Prefetch_Task)task.data
+	// Capture before done — see script_check_worker ordering note. The
+	// Prefetch_Task lives in dispatcher-owned memory that is recycled the
+	// moment wait_group_done fires.
+	cs := pt.cs
+	wg := pt.wg
 
 	// Acquire a growing arena for temp allocations (ldb_get internals).
-	arena := _arena_pool_acquire(pt.cs)
-	defer {
-		virtual.arena_free_all(arena)
-		_arena_pool_release(pt.cs, arena)
-	}
+	arena := _arena_pool_acquire(cs)
 	context.temp_allocator = virtual.arena_allocator(arena)
 
 	for i in 0 ..< len(pt.items) {
@@ -203,7 +211,9 @@ prefetch_worker :: proc(task: thread.Task) {
 		}
 	}
 
-	sync.wait_group_done(pt.wg)
+	virtual.arena_free_all(arena)
+	_arena_pool_release(cs, arena)
+	sync.wait_group_done(wg)
 }
 
 // Dispatch parallel UTXO prefetch across worker threads.
