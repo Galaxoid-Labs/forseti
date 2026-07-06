@@ -106,6 +106,21 @@ sync_state_label :: proc(s: p2p.Sync_State) -> (string, int) {
 	return "Unknown", P_DIM
 }
 
+// Right-aligned percentage, space-padded to 7 chars ("45.45%", " 7.02%").
+// Odin's fmt zero-pads numeric widths ("045.45%"), so pad by hand.
+pct_label :: proc(pct: f64, allocator := context.temp_allocator) -> string {
+	num := fmt.tprintf("%.2f%%", pct * 100)
+	if len(num) >= 7 {
+		return num
+	}
+	b := strings.builder_make(allocator)
+	for _ in 0 ..< 7 - len(num) {
+		strings.write_byte(&b, ' ')
+	}
+	strings.write_string(&b, num)
+	return strings.to_string(b)
+}
+
 progress_line :: proc(st: ^p2p.Node_Status, width: int, allocator := context.temp_allocator) -> string {
 	bar_w := max(width - 10, 10)
 	filled := int(st.verification_pct * f64(bar_w))
@@ -113,7 +128,8 @@ progress_line :: proc(st: ^p2p.Node_Status, width: int, allocator := context.tem
 	for i in 0 ..< bar_w {
 		strings.write_rune(&b, i < filled ? '#' : '.')
 	}
-	fmt.sbprintf(&b, " %6.2f%%", st.verification_pct * 100)
+	strings.write_byte(&b, ' ')
+	strings.write_string(&b, pct_label(st.verification_pct))
 	return strings.to_string(b)
 }
 

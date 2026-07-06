@@ -120,3 +120,11 @@ test_bar_rows_shared_scale :: proc(t: ^testing.T) {
 	testing.expect_value(t, rows[2], "    ")
 	testing.expect_value(t, rows[3], "# ##") // 1-cell floor, zero stays empty
 }
+
+@(test)
+test_pct_label_no_leading_zero :: proc(t: ^testing.T) {
+	testing.expect_value(t, pct_label(0.4545), " 45.45%")
+	testing.expect_value(t, pct_label(0.0702), "  7.02%")
+	testing.expect_value(t, pct_label(1.0), "100.00%")
+	testing.expect_value(t, pct_label(0.0), "  0.00%")
+}

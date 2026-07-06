@@ -185,7 +185,7 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 	sp := _panel(1, 0, sync_h, w, "Sync")
 	if sp != nil {
 		_bar(sp, 1, 2, w - 14, st.verification_pct, P_GREEN)
-		_put(sp, 1, w - 10, fmt.tprintf("%6.2f%%", st.verification_pct * 100), P_GREEN, nc.A_BOLD)
+		_put(sp, 1, w - 10, pct_label(st.verification_pct), P_GREEN, nc.A_BOLD)
 		_put(sp, 2, 2, blocks_line(st), P_DIM)
 		_flip(sp)
 	}
