@@ -94,3 +94,65 @@ NODE_P2P_V2          :: u64(1 << 11)
 
 // Our advertised services (base — compact filters and P2P_V2 added at runtime if enabled).
 LOCAL_SERVICES :: NODE_NETWORK | NODE_NETWORK_LIMITED | NODE_WITNESS
+
+// --- Node status snapshot (for --gui and future getnodestatus RPC) ---
+//
+// The P2P thread fills this under status_mutex once per second in
+// _on_periodic_timer; the GUI thread reads a copy at render time. Fixed-size
+// buffers throughout — populating the snapshot never allocates.
+
+STATUS_MAX_PEERS :: 16
+
+Peer_Status :: struct {
+	id:               Peer_Id,
+	address:          [64]byte,
+	addr_len:         int,
+	user_agent:       [96]byte,
+	agent_len:        int,
+	state:            Peer_State,
+	inbound:          bool,
+	start_height:     i32,
+	bytes_sent:       i64,
+	bytes_recv:       i64,
+	blocks_delivered: int,
+	blocks_in_flight: int,
+	throughput:       f64, // blocks/sec since tracking began
+}
+
+Node_Status :: struct {
+	// Chain
+	chain_height:      int,
+	best_header:       int,
+	tip_hash:          Hash256,
+
+	// Sync
+	sync_state:        Sync_State,
+	blocks_remaining:  int,
+	blocks_in_flight:  int,
+
+	// Peers
+	peer_count:        int,
+	peers:             [STATUS_MAX_PEERS]Peer_Status,
+
+	// Mempool
+	mempool_count:     int,
+	mempool_vbytes:    int,
+
+	// UTXO cache
+	utxo_cache_count:  int,
+	utxo_cache_bytes:  int,
+	utxo_cache_budget: int,
+
+	// Last profile window (cumulative since last 1000-block log)
+	prof_blocks:       int,
+	prof_ms_per_block: f64,
+	prof_read_pct:     f64,
+	prof_prefetch_pct: f64,
+	prof_valid_pct:    f64,
+	prof_utxo_pct:     f64,
+	prof_scripts_pct:  f64,
+	prof_undo_pct:     f64,
+
+	// System
+	uptime_secs:       i64,
+}

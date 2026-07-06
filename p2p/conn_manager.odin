@@ -60,6 +60,11 @@ Conn_Manager :: struct {
 	log_level: log.Level,
 	// BIP111: enable bloom filter support (also gates BIP35 mempool message).
 	peer_bloom_filters: bool,
+	// Node status snapshot for the GUI (populated only when status_enabled).
+	status_enabled: bool,
+	status:         Node_Status,
+	status_mutex:   sync.Mutex,
+	started_at:     i64, // unix timestamp, for uptime display
 }
 
 conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, mp: ^mempool.Mempool = nil) -> Net_Error {
@@ -68,6 +73,7 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 	cm.mp = mp
 	cm.network_magic = params.network_magic
 	cm.next_peer_id = 1
+	cm.started_at = time.to_unix_seconds(time.now())
 	cm.shutdown = false
 	cm.max_outbound = MAX_OUTBOUND_FULL_RELAY
 
@@ -245,6 +251,12 @@ _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 	sync.mutex_unlock(&cm.relay_mutex)
 
 	now := time.to_unix_seconds(time.now())
+
+	// Refresh the GUI status snapshot (reads node state on this thread — the
+	// owner of chain/mempool/peers — and publishes under status_mutex).
+	if cm.status_enabled {
+		_update_node_status(cm, now)
+	}
 
 	// Check for v2 handshake timeouts — fall back to v1 by reconnecting.
 	if cm.v2_transport_enabled {
@@ -1666,4 +1678,92 @@ _conn_manager_handle_getcfcheckpt :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, p
 		filter_headers = checkpoints[:],
 	}
 	peer_send_cfcheckpt(peer, &resp)
+}
+
+// --- Node status snapshot (GUI support) ---
+
+_copy_status_str :: proc(dst: []byte, s: string) -> int {
+	n := min(len(dst), len(s))
+	copy(dst[:n], s[:n])
+	return n
+}
+
+// Populate cm.status from live node state. P2P thread only (owns all state read here).
+_update_node_status :: proc(cm: ^Conn_Manager, now: i64) {
+	st: Node_Status
+
+	tip_hash, tip_height := chain.chain_tip(cm.chain)
+	st.chain_height = tip_height
+	st.tip_hash = tip_hash
+	st.best_header = cm.sync_mgr.best_header_height
+
+	st.sync_state = cm.sync_mgr.state
+	st.blocks_remaining = max(cm.sync_mgr.best_header_height - tip_height, 0)
+
+	st.uptime_secs = now - cm.started_at
+
+	// Peers
+	i := 0
+	for id, peer in cm.peers {
+		if i >= STATUS_MAX_PEERS { break }
+		ps := &st.peers[i]
+		ps.id = id
+		ps.addr_len = _copy_status_str(ps.address[:], peer.address)
+		ps.agent_len = _copy_status_str(ps.user_agent[:], peer.user_agent)
+		ps.state = peer.state
+		ps.inbound = peer.inbound
+		ps.start_height = peer.start_height
+		ps.bytes_sent = peer.bytes_sent
+		ps.bytes_recv = peer.bytes_recv
+		if sync_ps, ok := cm.sync_mgr.peer_sync[id]; ok {
+			ps.blocks_delivered = sync_ps.blocks_delivered
+			ps.blocks_in_flight = sync_ps.blocks_in_flight
+			st.blocks_in_flight += sync_ps.blocks_in_flight
+			elapsed := now - sync_ps.tracking_since
+			if elapsed > 0 {
+				ps.throughput = f64(sync_ps.blocks_delivered) / f64(elapsed)
+			}
+		}
+		i += 1
+	}
+	st.peer_count = i
+
+	// Mempool
+	if cm.mp != nil {
+		st.mempool_count = len(cm.mp.entries)
+		st.mempool_vbytes = cm.mp.usage
+	}
+
+	// UTXO cache
+	st.utxo_cache_count = len(cm.chain.coins.cache)
+	st.utxo_cache_bytes = cm.chain.coins.mem_usage
+	st.utxo_cache_budget = cm.chain.coins.budget
+
+	// Profile window (cumulative counters since the last 1000-block log)
+	prof := cm.chain.prof
+	if prof.blocks > 0 {
+		total_ms := f64(time.duration_milliseconds(prof.t_total))
+		st.prof_blocks = prof.blocks
+		st.prof_ms_per_block = total_ms / f64(prof.blocks)
+		if total_ms > 0 {
+			st.prof_read_pct = 100 * f64(time.duration_milliseconds(prof.t_read)) / total_ms
+			st.prof_prefetch_pct = 100 * f64(time.duration_milliseconds(prof.t_prefetch)) / total_ms
+			st.prof_valid_pct = 100 * f64(time.duration_milliseconds(prof.t_txid)) / total_ms
+			st.prof_utxo_pct = 100 * f64(time.duration_milliseconds(prof.t_utxo)) / total_ms
+			st.prof_scripts_pct = 100 * f64(time.duration_milliseconds(prof.t_scripts)) / total_ms
+			st.prof_undo_pct = 100 * f64(time.duration_milliseconds(prof.t_undo)) / total_ms
+		}
+	}
+
+	sync.mutex_lock(&cm.status_mutex)
+	cm.status = st
+	sync.mutex_unlock(&cm.status_mutex)
+}
+
+// Thread-safe snapshot read for the GUI thread. Returns a value copy.
+conn_manager_get_status :: proc(cm: ^Conn_Manager) -> Node_Status {
+	sync.mutex_lock(&cm.status_mutex)
+	st := cm.status
+	sync.mutex_unlock(&cm.status_mutex)
+	return st
 }

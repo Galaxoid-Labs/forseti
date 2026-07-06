@@ -14,6 +14,7 @@ import "consensus"
 import "crypto"
 import "mempool"
 import "p2p"
+import "gui"
 import "rpc"
 import "storage"
 import "wire"
@@ -72,6 +73,7 @@ CLI_Flag :: enum {
 	Block_Filter_Index,
 	Listen,
 	Peer_Bloom_Filters,
+	Gui,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
 
@@ -109,6 +111,7 @@ CLI_Config :: struct {
 	listen:                 bool,   // accept inbound connections (default: true)
 	debug:                  bool,   // enable debug logging (default: false)
 	peer_bloom_filters:     bool,   // BIP111: bloom filter support (default: false)
+	gui:                    bool,   // show GUI dashboard window (default: false = headless)
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -173,6 +176,9 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 		} else if arg == "--no-p2p" {
 			cfg.no_p2p = true
 			flags_set += {.No_P2P}
+		} else if arg == "--gui" {
+			cfg.gui = true
+			flags_set += {.Gui}
 		} else if strings.has_prefix(arg, "--mempoolfullrbf=") {
 			val := arg[len("--mempoolfullrbf="):]
 			cfg.mempool_fullrbf = val == "1" || val == "true"
@@ -392,6 +398,7 @@ _print_usage :: proc() {
 	fmt.println("  --permitbaremultisig=<0|1> Allow bare multisig outputs (default: 1)")
 	fmt.println("  --blocksonly          Disable tx relay, only sync blocks (default: off)")
 	fmt.println("  --persistmempool=<0|1> Save/load mempool on shutdown/startup (default: 1)")
+	fmt.println("  --gui                  Show GUI dashboard window (default: headless)")
 	fmt.println()
 	fmt.println("  --peerbloomfilters=<0|1> Enable BIP 37 bloom filters + BIP 35 mempool msg (default: 0)")
 	fmt.println("  --debug               Enable debug logging (default: off)")
@@ -758,6 +765,8 @@ main :: proc() {
 	// Generate cookie file if no explicit credentials and server is enabled.
 	cookie_path := ""
 	if !has_user && cfg.server {
+		// Datadir may not exist yet (chain init creates it later).
+		os.make_directory(cfg.data_dir)
 		cookie_path = fmt.aprintf("%s/.cookie", cfg.data_dir)
 
 		// Read 32 random bytes from /dev/urandom → 64 hex chars.
@@ -995,6 +1004,9 @@ main :: proc() {
 			// Set global pointer for signal handler.
 			_g_conn_manager = cm
 
+			// GUI reads a 1 Hz status snapshot; only populate it when needed.
+			cm.status_enabled = cfg.gui
+
 			// Wire connection manager into RPC server.
 			if srv != nil {
 				srv.cm = cm
@@ -1035,6 +1047,23 @@ main :: proc() {
 	}
 	if cfg.server {
 		log.infof("Use bitcoin-cli -rpcport=%d to interact.", rpc_port)
+	}
+
+	// GUI mode: the main thread (which otherwise just blocks in thread.join)
+	// runs the dashboard render loop. Closing the window triggers the same
+	// graceful shutdown path as SIGINT. Without --gui nothing here runs and
+	// the node stays fully headless.
+	if cfg.gui {
+		if gui.run(cm, cs, gui.Static_Info{network = cfg.network, rpc_port = rpc_port, dbcache_mb = cfg.db_cache_mb}) {
+			// Window was closed (or node stopped) — same path as SIGINT.
+			if srv != nil {
+				rpc.rpc_server_stop(srv)
+			}
+			if cm != nil {
+				p2p.conn_manager_shutdown(cm)
+			}
+		}
+		// If the window could not be created, fall through to headless join.
 	}
 
 	// Wait for threads to finish.

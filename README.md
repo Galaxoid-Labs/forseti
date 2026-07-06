@@ -186,6 +186,7 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--network=<name>` | `mainnet`, `testnet3`, `testnet4`, `signet`, `regtest` | `regtest` |
+| `--gui` | Show GUI dashboard window (raylib; node stays headless without it) | headless |
 | `--datadir=<path>` | Data directory for blocks, index, UTXO database | `/tmp/btcnode-data` |
 | `--rpcport=<port>` | JSON-RPC port | Network default |
 | `--rpcuser=<user>` | RPC auth username | Cookie auth |
