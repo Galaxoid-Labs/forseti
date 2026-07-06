@@ -191,8 +191,17 @@ peer_line :: proc(p: ^p2p.Peer_Status, state: p2p.Sync_State, width: int, alloca
 }
 
 stats_line :: proc(st: ^p2p.Node_Status, allocator := context.temp_allocator) -> string {
-	return fmt.aprintf("Mempool %s tx / %s vB | UTXO %s entries, %s / %s budget",
-		commas(st.mempool_count), commas(st.mempool_vbytes),
+	return fmt.aprintf("Mempool %s tx / %s vB",
+		commas(st.mempool_count), commas(st.mempool_vbytes), allocator = allocator)
+}
+
+utxo_line :: proc(st: ^p2p.Node_Status, allocator := context.temp_allocator) -> string {
+	if st.flushing {
+		return fmt.aprintf("%s entries | %s / %s | %s",
+			commas(st.utxo_cache_count), fmt_bytes(i64(st.utxo_cache_bytes)),
+			fmt_bytes(i64(st.utxo_cache_budget)), flush_label(st), allocator = allocator)
+	}
+	return fmt.aprintf("%s entries | %s / %s budget",
 		commas(st.utxo_cache_count), fmt_bytes(i64(st.utxo_cache_bytes)),
 		fmt_bytes(i64(st.utxo_cache_budget)), allocator = allocator)
 }

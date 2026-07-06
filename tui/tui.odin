@@ -193,7 +193,7 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 	// Peers panel.
 	// Panel height is pinned (8-row floor), NOT tracked to the live peer
 	// count — peers churning during IBD made every panel below jump around.
-	budget := max(h - sync_h - (clamp((h - 26) / 2, 2, 5) * 2 + 5) - 9, 1)
+	budget := max(h - sync_h - (clamp((h - 30) / 2, 2, 5) * 2 + 5) - 13, 1)
 	rows := clamp(st.peer_count, 8, budget)
 	shown := min(st.peer_count, rows)
 	peers_h := rows + 3
@@ -210,7 +210,7 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 	// baseline, OUT bars hang below it. One shared scale so the halves are
 	// honestly comparable; bar_rows' 1-cell floor keeps the quiet direction
 	// from flatlining.
-	half_rows := clamp((h - 26) / 2, 2, 5)
+	half_rows := clamp((h - 30) / 2, 2, 5)
 	net_h := half_rows * 2 + 5
 	net_y := 1 + sync_h + peers_h
 	np := _panel(net_y, 0, net_h, w, "Network")
@@ -244,8 +244,18 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 		_flip(np)
 	}
 
+	// UTXO cache panel: entries + memory-vs-budget progress bar (turns
+	// yellow while a flush is running).
+	up := _panel(net_y + net_h, 0, 4, w, "UTXO Cache")
+	if up != nil {
+		_put(up, 1, 2, utxo_line(st), P_TEXT)
+		frac := st.utxo_cache_budget > 0 ? f64(st.utxo_cache_bytes) / f64(st.utxo_cache_budget) : 0
+		_bar(up, 2, 2, w - 4, clamp(frac, 0, 1), st.flushing ? P_YELLOW : P_BLUE)
+		_flip(up)
+	}
+
 	// Node stats panel.
-	xp := _panel(net_y + net_h, 0, 4, w, "Node")
+	xp := _panel(net_y + net_h + 4, 0, 4, w, "Node")
 	if xp != nil {
 		_put(xp, 1, 2, stats_line(st), P_TEXT)
 		_put(xp, 2, 2, profile_line(st), P_DIM)
