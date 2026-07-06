@@ -2,6 +2,8 @@ package storage
 
 import "core:fmt"
 import "core:os"
+import "core:strconv"
+import "core:strings"
 
 MAX_FILE_SIZE :: 128 * 1024 * 1024 // 128 MB
 
@@ -49,26 +51,37 @@ flat_file_open :: proc(data_dir: string, prefix: string) -> (mgr: Flat_File_Mana
 		mgr.dir = fmt.aprintf("%s/blocks", data_dir)
 	}
 
-	// Scan existing files to find the last one
-	path_buf: [512]byte
-	next_buf: [512]byte
-	for {
-		path := flat_file_path(&mgr, mgr.current_file, path_buf[:])
-		if !os.exists(path) {
-			break
-		}
-		// Check next file
-		next_path := flat_file_path(&mgr, mgr.current_file + 1, next_buf[:])
-		if !os.exists(next_path) {
-			// This is the last file — get its size
-			size, size_err := _file_size(path)
-			if size_err != .None {
-				return mgr, size_err
+	// Find the highest-numbered existing file by listing the directory —
+	// pruning deletes old files, so scanning upward from 0 stops at the first
+	// gap and would restart writing at file 0, eventually rolling forward into
+	// (and overwriting) surviving higher-numbered files.
+	{
+		dh, derr := os.open(mgr.dir)
+		if derr == nil {
+			defer os.close(dh)
+			entries, _ := os.read_dir(dh, -1, context.temp_allocator)
+			found_any := false
+			for entry in entries {
+				name := entry.name
+				if len(name) != len(mgr.prefix) + 9 { continue } // "blk" + 5 digits + ".dat"
+				if !strings.has_prefix(name, mgr.prefix) || !strings.has_suffix(name, ".dat") { continue }
+				num, num_ok := strconv.parse_uint(name[len(mgr.prefix):len(name) - 4])
+				if !num_ok { continue }
+				if !found_any || u32(num) > mgr.current_file {
+					mgr.current_file = u32(num)
+					found_any = true
+				}
 			}
-			mgr.current_pos = u32(size)
-			break
+			if found_any {
+				path_buf: [512]byte
+				path := flat_file_path(&mgr, mgr.current_file, path_buf[:])
+				size, size_err := _file_size(path)
+				if size_err != .None {
+					return mgr, size_err
+				}
+				mgr.current_pos = u32(size)
+			}
 		}
-		mgr.current_file += 1
 	}
 
 	// Open the current file for writing (create if needed)
