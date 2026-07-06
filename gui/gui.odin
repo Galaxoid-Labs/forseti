@@ -173,7 +173,93 @@ run_with_source :: proc(title: cstring, info: Static_Info, fetch: Status_Fetch, 
 	return _run_window(title, info, fetch, ud, nil, local = false)
 }
 
-_run_window :: proc(title: cstring, info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: ^chain.Chain_State, local: bool) -> bool {
+// Handoff between the background node-init thread and the GUI main thread.
+// The init thread fills cm/cs then sets ready; the GUI polls. Plain bools —
+// single-byte stores, written by one thread, read by the other.
+Boot :: struct {
+	ready:   bool, // node init complete; cm/cs are valid
+	failed:  bool, // node init failed; GUI shows the error and exits
+	closing: bool, // window closed during init; node shuts down once ready
+	cm:      ^p2p.Conn_Manager,
+	cs:      ^chain.Chain_State,
+	info:    Static_Info,
+}
+
+// GUI-first startup: open the window immediately and animate init progress
+// (stages published by chain.Boot_Stage) while the node boots on a worker
+// thread; switch to the live dashboard when it's ready. Returns false only
+// if no window could be created (headless session).
+run_boot :: proc(boot: ^Boot) -> bool {
+	if !_window_open("bitcoin-node-odin") {
+		return false
+	}
+	defer _window_close()
+
+	frame := 0
+	for !boot.ready && !boot.failed {
+		if rl.WindowShouldClose() {
+			boot.closing = true
+		}
+		rl.BeginDrawing()
+		rl.ClearBackground(COL_BG)
+		_draw_boot(boot, frame)
+		rl.EndDrawing()
+		frame += 1
+	}
+
+	if boot.failed || boot.closing {
+		return true // main handles shutdown/exit
+	}
+
+	if boot.cm == nil {
+		_dashboard_loop(boot.info, nil, nil, boot.cs, local = true)
+		return true
+	}
+	fetch :: proc(ud: rawptr) -> (p2p.Node_Status, bool) {
+		cm := cast(^p2p.Conn_Manager)ud
+		if cm.shutdown { return {}, false }
+		return p2p.conn_manager_get_status(cm), true
+	}
+	_dashboard_loop(boot.info, fetch, boot.cm, nil, local = true)
+	return true
+}
+
+_draw_boot :: proc(boot: ^Boot, frame: int) {
+	cy := i32(WIN_H/2 - 60)
+	_text("bitcoin-node-odin", WIN_W/2 - 110, cy, 26, COL_TEXT)
+	_text(fmt.ctprintf("network: %s", boot.info.network), WIN_W/2 - 110, cy + 34, 15, COL_DIM)
+
+	stage := string(chain.Boot_Stage)
+	if stage == "" {
+		stage = "Starting"
+	}
+	// Animated ellipsis so a long stage (multi-minute WAL replay) still
+	// reads as alive, plus a sweeping progress strip.
+	ellipsis := "..."
+	dots := (frame / (FPS / 2)) % 4
+	_text(fmt.ctprintf("%s%s", stage, ellipsis[:dots]), WIN_W/2 - 110, cy + 66, 17, COL_ORANGE)
+
+	elapsed := frame / FPS
+	_text(fmt.ctprintf("%ds elapsed", elapsed), WIN_W/2 - 110, cy + 92, 14, COL_DIM)
+
+	// Indeterminate sweep bar.
+	bar_w := i32(340)
+	bx := i32(WIN_W/2 - 170)
+	by := cy + 120
+	rl.DrawRectangle(bx, by, bar_w, 8, COL_PANEL)
+	sweep_w := i32(70)
+	span := int(bar_w - sweep_w)
+	pos := frame * 3 % (span * 2)
+	if pos > span { pos = 2*span - pos } // bounce
+	rl.DrawRectangle(bx + i32(pos), by, sweep_w, 8, COL_ORANGE)
+
+	if boot.closing {
+		rl.DrawRectangle(0, 0, WIN_W, 26, rl.Color{0x8a, 0x2a, 0x2a, 0xff})
+		_text("Finishing startup, then shutting down...", 16, 6, 14, rl.WHITE)
+	}
+}
+
+_window_open :: proc(title: cstring) -> bool {
 	rl.SetConfigFlags({.WINDOW_HIGHDPI})
 	rl.SetTraceLogLevel(.WARNING)
 	rl.InitWindow(WIN_W, WIN_H, title)
@@ -183,7 +269,6 @@ _run_window :: proc(title: cstring, info: Static_Info, fetch: Status_Fetch, ud: 
 		fmt.eprintln("GUI: window creation failed (no display session?) — continuing headless")
 		return false
 	}
-	defer rl.CloseWindow()
 	rl.SetTargetFPS(FPS)
 	_apply_theme()
 
@@ -197,10 +282,26 @@ _run_window :: proc(title: cstring, info: Static_Info, fetch: Status_Fetch, ud: 
 		rl.GuiSetFont(g_fonts[2]) // 15px atlas for raygui widget text
 		rl.GuiSetStyle(.DEFAULT, c.int(rl.GuiDefaultProperty.TEXT_SIZE), 15)
 	}
-	defer for &f in g_fonts {
+	return true
+}
+
+_window_close :: proc() {
+	for &f in g_fonts {
 		if f.texture.id != 0 { rl.UnloadFont(f) }
 	}
+	rl.CloseWindow()
+}
 
+_run_window :: proc(title: cstring, info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: ^chain.Chain_State, local: bool) -> bool {
+	if !_window_open(title) {
+		return false
+	}
+	defer _window_close()
+	_dashboard_loop(info, fetch, ud, cs, local)
+	return true
+}
+
+_dashboard_loop :: proc(info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: ^chain.Chain_State, local: bool) {
 	st: p2p.Node_Status
 	have_status := false
 	connected := false
@@ -251,7 +352,6 @@ _run_window :: proc(title: cstring, info: Static_Info, fetch: Status_Fetch, ud: 
 		rl.EndDrawing()
 		free_all(context.temp_allocator)
 	}
-	return true
 }
 
 _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {

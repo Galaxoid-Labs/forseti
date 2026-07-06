@@ -478,18 +478,18 @@ _on_accept :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 
 	log.debugf("Inbound connection from %s:%d (peer %d)", peer.address, peer.port, peer.id)
 
-	// V2 responder or V1 — handled in Phase 3; for now, wait for their version message.
 	if cm.v2_transport_enabled {
-		// BIP324: initiate v2 responder handshake.
+		// BIP324 responder: prepare v2 keys but send NOTHING — the peer's
+		// first bytes decide v1 (magic+"version" prefix) vs v2 (ell64).
+		// See _peer_v2_detect. Eagerly sending our ell64 here corrupted the
+		// stream for every plaintext v1 client (found via electrs).
 		peer.v2 = new(V2_Transport)
 		if !v2_transport_init(peer.v2, false, cm.network_magic) {
 			log.warnf("V2 transport init failed for inbound peer %d, falling back to v1", peer.id)
 			free(peer.v2)
 			peer.v2 = nil
 		} else {
-			// Send our ell64.
-			ell := v2_transport_get_ell64(peer.v2)
-			_peer_send_raw(peer, ell[:])
+			peer.v2_detect = true
 			peer.state = .V2_Handshake
 			_peer_start_recv(peer)
 			return
@@ -712,12 +712,13 @@ _conn_manager_handle_version :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 		_, chain_height := chain.chain_tip(cm.chain)
 		peer_send_version(peer, cm.params, chain_height, cm.local_services)
 
-		// BIP339: Send wtxidrelay before verack.
-		peer_send_wtxidrelay(peer)
-		peer.wtxid_relay_us = true
-
-		// BIP155: Send sendaddrv2 before verack.
-		peer_send_sendaddrv2(peer)
+		// BIP339/BIP155: only for peers new enough to know them (Core gates
+		// both on 70016; older strict clients disconnect on unknown commands).
+		if peer.version >= WTXID_RELAY_VERSION {
+			peer_send_wtxidrelay(peer)
+			peer.wtxid_relay_us = true
+			peer_send_sendaddrv2(peer)
+		}
 
 		// Send verack.
 		peer_send_verack(peer)
@@ -725,12 +726,12 @@ _conn_manager_handle_version :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 		peer.state = .Handshake_Complete
 	} else {
 		// Outbound: we sent version first, they're responding.
-		// BIP339: Send wtxidrelay before verack (must be between version and verack).
-		peer_send_wtxidrelay(peer)
-		peer.wtxid_relay_us = true
-
-		// BIP155: Send sendaddrv2 before verack.
-		peer_send_sendaddrv2(peer)
+		// BIP339/BIP155 (between version and verack), gated on 70016.
+		if peer.version >= WTXID_RELAY_VERSION {
+			peer_send_wtxidrelay(peer)
+			peer.wtxid_relay_us = true
+			peer_send_sendaddrv2(peer)
+		}
 
 		// Send verack in response.
 		peer_send_verack(peer)
@@ -768,20 +769,24 @@ _conn_manager_handle_verack :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 		peer.state = .Active
 		log.debugf("Peer %d handshake complete, now active", peer_id)
 
-		// Send sendheaders (BIP130).
-		peer_send_sendheaders(peer)
-
-		// Send sendcmpct (BIP152): announce=true, version=2 (wtxid-based).
-		peer_send_sendcmpct(peer, true, COMPACT_BLOCK_VERSION)
-
-		// BIP133: Send our feefilter with min relay fee rate.
-		if cm.mp != nil {
+		// Feature messages, each gated on the peer's advertised version
+		// (Core parity — old/strict peers treat unknowns as fatal).
+		if peer.version >= SENDHEADERS_VERSION {
+			peer_send_sendheaders(peer) // BIP130
+		}
+		if peer.version >= COMPACT_BLOCKS_VERSION_GATE {
+			peer_send_sendcmpct(peer, true, COMPACT_BLOCK_VERSION) // BIP152
+		}
+		if cm.mp != nil && peer.version >= FEEFILTER_VERSION {
 			our_fee := max(cm.mp.min_fee, cm.mp.config.min_relay_tx_fee)
-			peer_send_feefilter(peer, our_fee)
+			peer_send_feefilter(peer, our_fee) // BIP133
 		}
 
-		// Request peer's address list.
-		peer_send_getaddr(peer)
+		// Request peer's address list — outbound connections only (Core
+		// never getaddrs inbound peers; they connected to us).
+		if !peer.inbound {
+			peer_send_getaddr(peer)
+		}
 
 		// Register peer for sync tracking.
 		sync_add_peer(&cm.sync_mgr, peer_id)

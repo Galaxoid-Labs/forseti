@@ -62,6 +62,11 @@ Block_Profile :: struct {
 
 // Initialize chain state. Caller allocates Chain_State and passes pointer.
 // script_threads: 0 or 1 = serial verification, >= 2 = parallel with N worker threads.
+// Live startup stage for loading screens. cstring of static literals only —
+// a single aligned pointer store/load is atomic on our targets, so the GUI
+// thread reads it lock-free while init runs.
+Boot_Stage: cstring = ""
+
 chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.Chain_Params, db_cache_mb: int = 450, script_threads: int = 0, prune_target: int = 0) -> Chain_Error {
 	cs.params = params
 	cs.prune_target = prune_target
@@ -70,6 +75,7 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	os.make_directory(data_dir)
 
 	// Open shared LevelDB store (chainstate + block index)
+	Boot_Stage = "Opening databases (replaying write-ahead log if needed)"
 	store, store_err := storage.ldb_open(data_dir, db_cache_mb)
 	if store_err != .None {
 		return .Storage_Error
@@ -111,6 +117,7 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 
 	// Build in-memory block index — pre-allocate maps to avoid rehashing.
 	cs.block_index = block_index_init(capacity = len(cs.index_db.records) * 2)
+	Boot_Stage = "Building block index"
 	log.infof("Building block index (%d records)...", len(cs.index_db.records))
 	block_index_load(&cs.block_index, &cs.index_db)
 	log.infof("Block index loaded: %d entries, best header height %d",
@@ -132,6 +139,7 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	cs.active_chain = make([dynamic]Hash256, 0, 1024)
 
 	// Crash recovery: read meta tip and truncate active chain if needed
+	Boot_Stage = "Rebuilding active chain"
 	_recover_from_meta(cs)
 
 	_rebuild_active_chain(cs)
@@ -172,6 +180,7 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	}
 
 	// Connect any stored-but-not-connected blocks from a previous session.
+	Boot_Stage = "Connecting pending blocks"
 	log.infof("Connecting pending blocks (if any)...")
 	pending_connected, _ := connect_pending_blocks(cs)
 	if pending_connected > 0 {
@@ -180,8 +189,10 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	}
 
 	// Reclaim disk from any files that became prunable before the last shutdown.
+	Boot_Stage = "Pruning old block files"
 	prune_block_files(cs, cs.last_flush_height)
 
+	Boot_Stage = ""
 	return .None
 }
 

@@ -46,6 +46,7 @@ Peer :: struct {
 	send_compact:     bool, // we've sent sendcmpct to this peer
 	// BIP324 v2 transport (nil = v1)
 	v2:             ^V2_Transport,
+	v2_detect:      bool, // inbound responder: sniffing v1-vs-v2 from first bytes; nothing sent yet
 	// nbio fields
 	read_buf:       [65536]byte,  // fixed buffer for async recv
 	recv_op:        ^nbio.Operation, // pending recv operation (for cancel on destroy)
@@ -119,7 +120,11 @@ _peer_start_recv :: proc(peer: ^Peer) {
 		return
 	}
 	bufs := [1][]byte{peer.read_buf[:]}
-	peer.recv_op = nbio.recv_poly(peer.socket, bufs[:], peer, _on_recv, timeout = 120 * time.Second)
+	// Inactivity timeout — Core's TIMEOUT_INTERVAL (20 min), NOT the ping
+	// cadence. With timeout == PING_INTERVAL a peer that never initiates
+	// traffic (electrs only ever replies) races our ping round and gets
+	// dropped the moment the phases misalign.
+	peer.recv_op = nbio.recv_poly(peer.socket, bufs[:], peer, _on_recv, timeout = 1200 * time.Second)
 }
 
 // Callback when async recv completes.
@@ -157,11 +162,56 @@ _on_recv :: proc(op: ^nbio.Operation, peer: ^Peer) {
 
 // Parse complete messages from recv_buf and dispatch inline.
 _peer_process_messages :: proc(peer: ^Peer) {
+	if peer.v2 != nil && peer.v2_detect {
+		if !_peer_v2_detect(peer) {
+			return // not enough bytes to decide yet
+		}
+	}
 	if peer.v2 != nil {
 		_peer_process_messages_v2(peer)
 	} else {
 		_peer_process_messages_v1(peer)
 	}
+}
+
+// BIP324 responder transport detection. The responder must send NOTHING
+// until the initiator's first bytes classify the connection: a v1 peer
+// opens with `magic || "version"` (16 bytes); anything else is a v2
+// initiator's ell64. Eagerly sending our ell64 (the old behavior) corrupts
+// the stream for every plaintext client — Core waits, and so must we.
+// Returns false while undecided (need more bytes).
+_peer_v2_detect :: proc(peer: ^Peer) -> bool {
+	V1_PREFIX_LEN :: 16
+	prefix: [V1_PREFIX_LEN]byte
+	prefix[0] = byte(peer.network_magic)
+	prefix[1] = byte(peer.network_magic >> 8)
+	prefix[2] = byte(peer.network_magic >> 16)
+	prefix[3] = byte(peer.network_magic >> 24)
+	copy(prefix[4:], "version") // remainder stays zero — the padded command field
+
+	n := min(len(peer.recv_buf), V1_PREFIX_LEN)
+	for i in 0 ..< n {
+		if peer.recv_buf[i] != prefix[i] {
+			// v2 initiator — now (and only now) reveal ourselves as v2.
+			peer.v2_detect = false
+			ell := v2_transport_get_ell64(peer.v2)
+			_peer_send_raw(peer, ell[:])
+			return true
+		}
+	}
+	if n < V1_PREFIX_LEN {
+		return false
+	}
+
+	// Full v1 prefix — plaintext peer (e.g. electrs, older Core). Drop the
+	// v2 transport and let the v1 parser consume the buffered bytes.
+	log.debugf("Inbound peer %d speaks v1 — disabling v2 transport", peer.id)
+	v2_transport_destroy(peer.v2)
+	free(peer.v2)
+	peer.v2 = nil
+	peer.v2_detect = false
+	peer.state = .Connecting
+	return true
 }
 
 // V1 message processing (existing logic).
@@ -441,7 +491,7 @@ peer_destroy :: proc(peer: ^Peer) {
 
 	// Cancel pending recv operation BEFORE closing socket.
 	// nbio timeouts are separate kqueue Timer events — closing the socket does NOT
-	// cancel them. Without this, the 120s recv timeout would fire after the peer
+	// cancel them. Without this, the 20-min recv timeout would fire after the peer
 	// is freed from the zombie list, causing a use-after-free.
 	if peer.recv_op != nil {
 		nbio.remove(peer.recv_op)

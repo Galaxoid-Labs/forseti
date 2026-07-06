@@ -84,6 +84,14 @@ COMPACT_BLOCK_VERSION       :: u64(2) // v2 = wtxid-based short IDs (BIP152)
 COMPACT_BLOCK_TIMEOUT       :: 10     // seconds before fallback to full block
 V2_HANDSHAKE_TIMEOUT_SECS   :: 5      // seconds before v2 → v1 fallback
 
+// Protocol version gates for feature messages (Bitcoin Core net_processing
+// parity). Sending these to older peers is a protocol violation — strict
+// clients (electrs parses an 8-command allowlist) disconnect outright.
+SENDHEADERS_VERSION :: 70012 // BIP130
+FEEFILTER_VERSION   :: 70013 // BIP133
+COMPACT_BLOCKS_VERSION_GATE :: 70014 // BIP152
+WTXID_RELAY_VERSION :: 70016 // BIP339 (also gates BIP155 sendaddrv2)
+
 // Services flags.
 NODE_NETWORK         :: u64(1)
 NODE_BLOOM           :: u64(1 << 2)   // BIP111: bloom filter support

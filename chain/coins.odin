@@ -285,8 +285,14 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 	batch := storage.ldb_batch_create()
 	defer storage.ldb_batch_destroy(batch)
 
+	// Chunked 16MB batches (see FLUSH_BATCH_BYTES): a single giant batch is
+	// one atomic WAL record — it bloats the log to batch size and the next
+	// DB open replays all of it. Crash consistency is unchanged: the tip
+	// marker goes in a final synced batch AFTER all chunks are durable, so
+	// a crash mid-flush recovers from the old tip and replays idempotently.
 	written, deleted := 0, 0
 	processed := 0
+	batch_bytes := 0
 	for outpoint, entry in cc.cache {
 		processed += 1
 		if processed % 100_000 == 0 {
@@ -302,20 +308,37 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 		if _is_spent_sentinel_val(entry) {
 			storage.utxo_db_batch_delete(cc.db, batch, outpoint)
 			deleted += 1
+			batch_bytes += 48
 		} else {
 			storage.utxo_db_batch_put(cc.db, batch, outpoint, entry.coin)
 			written += 1
+			batch_bytes += 64 + len(entry.coin.script)
+		}
+
+		if batch_bytes >= FLUSH_BATCH_BYTES {
+			werr := storage.ldb_batch_write(cc.db.store.chainstate_db, cc.db.store.write_opts, batch)
+			if werr != .None {
+				log.errorf("UTXO flush: chunk write failed")
+				return .Storage_Error
+			}
+			storage.ldb_batch_destroy(batch)
+			batch = storage.ldb_batch_create()
+			batch_bytes = 0
 		}
 	}
 
-	// Add chain tip metadata to the same batch
-	write_meta_tip(cc.db.store, batch, tip_hash, tip_height)
-
-	// ATOMIC: UTXOs + metadata committed together. On large caches this is a
-	// single multi-GB synchronous LevelDB write that can take minutes.
 	cc.flush_progress = cache_size // scan done; GUI shows "committing"
 	log.infof("UTXO flush: committing %d writes + %d deletes to LevelDB...", written, deleted)
+
+	// Final data chunk, synced — everything durable before the tip moves.
 	berr := storage.ldb_batch_write(cc.db.store.chainstate_db, cc.db.store.sync_opts, batch)
+	if berr == .None {
+		// Tip marker last, in its own synced batch.
+		tip_batch := storage.ldb_batch_create()
+		defer storage.ldb_batch_destroy(tip_batch)
+		write_meta_tip(cc.db.store, tip_batch, tip_hash, tip_height)
+		berr = storage.ldb_batch_write(cc.db.store.chainstate_db, cc.db.store.sync_opts, tip_batch)
+	}
 	if berr != .None {
 		log.errorf("UTXO flush: batch write failed")
 		return .Storage_Error

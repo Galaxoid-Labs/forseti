@@ -826,7 +826,10 @@ main :: proc() {
 		}
 		cookie_hex := string(hex_buf[:])
 
-		cookie_content := fmt.aprintf("__cookie__:%s\n", cookie_hex)
+		// No trailing newline — Bitcoin Core writes the cookie bare, and
+		// strict readers (bitcoincore-rpc/electrs) take the file verbatim,
+		// newline included, then fail auth with 401.
+		cookie_content := fmt.aprintf("__cookie__:%s", cookie_hex)
 		defer delete(cookie_content)
 
 		if os.write_entire_file(cookie_path, transmute([]byte)cookie_content) != nil {
@@ -844,6 +847,56 @@ main :: proc() {
 			os.remove(cookie_path)
 			delete(cookie_path)
 		}
+	}
+
+	// --gui: open the window immediately; the node initializes on a worker
+	// thread while the main thread (required for raylib on macOS) animates
+	// the loading screen. Headless/TUI keep the classic main-thread path.
+	if cfg.gui {
+		boot := new(gui.Boot)
+		boot.info.network = cfg.network
+		nd := new(_Node_Thread_Data)
+		nd.cfg = &cfg
+		nd.log_level = log_level
+		nd.boot = boot
+		node_thread := thread.create_and_start_with_data(rawptr(nd), proc(data: rawptr) {
+			nd := cast(^_Node_Thread_Data)data
+			context.logger = log.create_console_logger(nd.log_level, {.Level, .Time, .Terminal_Color})
+			_node_main(nd.cfg, nd.log_level, nd.boot)
+		})
+		if gui.run_boot(boot) {
+			// Window closed (during load, after, or init failed) — same
+			// graceful path as SIGINT; harmless if init never got that far.
+			if _g_rpc_server != nil {
+				rpc.rpc_server_stop(_g_rpc_server)
+			}
+			if _g_conn_manager != nil {
+				p2p.conn_manager_shutdown(_g_conn_manager)
+			}
+		}
+		// Window closed or unavailable: wait for the node to finish teardown
+		// (or run headless indefinitely if no window could be created).
+		thread.join(node_thread)
+		thread.destroy(node_thread)
+		free(nd)
+	} else {
+		_node_main(&cfg, log_level, nil)
+	}
+}
+
+_Node_Thread_Data :: struct {
+	cfg:       ^CLI_Config,
+	log_level: log.Level,
+	boot:      ^gui.Boot,
+}
+
+// Full node lifecycle: init, run, teardown (defers). Runs on the main
+// thread headless/TUI; on a worker thread under --gui, publishing readiness
+// through `boot` while gui.run_boot animates startup on the main thread.
+_node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
+	// Any early-return before readiness is an init failure — tell the GUI.
+	defer if boot != nil && !boot.ready {
+		boot.failed = true
 	}
 
 	crypto.sha256_init_backend()
@@ -1112,17 +1165,13 @@ main :: proc() {
 		}
 	}
 
-	if cfg.gui {
-		if gui.run(cm, cs, gui.Static_Info{network = cfg.network, rpc_port = rpc_port, dbcache_mb = cfg.db_cache_mb, prune_mb = cfg.prune_mb, data_dir = cfg.data_dir}) {
-			// Window was closed (or node stopped) — same path as SIGINT.
-			if srv != nil {
-				rpc.rpc_server_stop(srv)
-			}
-			if cm != nil {
-				p2p.conn_manager_shutdown(cm)
-			}
-		}
-		// If the window could not be created, fall through to headless join.
+	// GUI mode: the window is already open on the main thread (gui.run_boot);
+	// publish cm/cs so it can switch from the loading screen to the dashboard.
+	if boot != nil {
+		boot.info = gui.Static_Info{network = cfg.network, rpc_port = rpc_port, dbcache_mb = cfg.db_cache_mb, prune_mb = cfg.prune_mb, data_dir = cfg.data_dir}
+		boot.cm = cm
+		boot.cs = cs
+		boot.ready = true
 	}
 
 	// Wait for threads to finish.
@@ -1141,3 +1190,4 @@ main :: proc() {
 
 	log.info("Shutting down...")
 }
+

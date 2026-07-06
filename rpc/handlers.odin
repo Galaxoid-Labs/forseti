@@ -821,15 +821,61 @@ _handle_verifytxoutproof :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Re
 
 // --- Format mempool entry (shared helper) ---
 
+// Full Bitcoin Core getmempoolentry shape. Strict clients (bitcoincore-rpc
+// serde, hence electrs) require EVERY non-optional field: a thin response
+// parses to nothing, entries silently vanish, and electrs's mempool sync
+// never converges (get_balance hung forever).
 _format_mempool_entry :: proc(srv: ^RPC_Server, entry: ^mempool.Mempool_Entry) -> json.Object {
-	obj := make(json.Object, 8, context.temp_allocator)
+	obj := make(json.Object, 16, context.temp_allocator)
 	obj["vsize"] = json.Value(json.Integer(entry.vsize))
 	obj["weight"] = json.Value(json.Integer(consensus.get_tx_weight(&entry.tx)))
 	obj["time"] = json.Value(json.Integer(entry.time))
+	obj["height"] = json.Value(json.Integer(srv.mp.tip_height))
+	obj["wtxid"] = json.Value(json.String(_hash_to_hex(entry.wtxid)))
+	obj["unbroadcast"] = json.Value(json.Boolean(false))
 
-	fees := make(json.Object, 1, context.temp_allocator)
+	// Ancestor/descendant aggregates (counts include the tx itself).
+	anc := mempool.mempool_get_ancestors(srv.mp, entry.txid)
+	defer delete(anc)
+	desc := mempool.mempool_get_descendants(srv.mp, entry.txid)
+	defer delete(desc)
+	anc_size, anc_fees := entry.vsize, entry.fee
+	for a in anc {
+		if e, e_found := mempool.mempool_get(srv.mp, a); e_found {
+			anc_size += e.vsize
+			anc_fees += e.fee
+		}
+	}
+	desc_size, desc_fees := entry.vsize, entry.fee
+	for d in desc {
+		if e, e_found := mempool.mempool_get(srv.mp, d); e_found {
+			desc_size += e.vsize
+			desc_fees += e.fee
+		}
+	}
+	obj["ancestorcount"] = json.Value(json.Integer(len(anc) + 1))
+	obj["ancestorsize"] = json.Value(json.Integer(anc_size))
+	obj["descendantcount"] = json.Value(json.Integer(len(desc) + 1))
+	obj["descendantsize"] = json.Value(json.Integer(desc_size))
+
+	fees := make(json.Object, 4, context.temp_allocator)
 	fees["base"] = json.Value(json.Float(_satoshi_to_btc(entry.fee)))
+	fees["modified"] = json.Value(json.Float(_satoshi_to_btc(entry.fee))) // no prioritisetransaction
+	fees["ancestor"] = json.Value(json.Float(_satoshi_to_btc(anc_fees)))
+	fees["descendant"] = json.Value(json.Float(_satoshi_to_btc(desc_fees)))
 	obj["fees"] = json.Value(fees)
+
+	// spentby: in-mempool children spending this tx's outputs.
+	spentby := make(json.Array, 0, context.temp_allocator)
+	seen := make(map[Hash256]bool, 8, context.temp_allocator)
+	for out_idx in 0 ..< len(entry.tx.outputs) {
+		op := wire.Outpoint{hash = entry.txid, index = u32(out_idx)}
+		if child, spent := srv.mp.spent_outpoints[op]; spent && !seen[child] {
+			seen[child] = true
+			append(&spentby, json.Value(json.String(_hash_to_hex(child))))
+		}
+	}
+	obj["spentby"] = json.Value(spentby)
 
 	// depends: parent txids that are also in mempool
 	dep_count := 0
@@ -1172,9 +1218,15 @@ _services_to_names :: proc(services: u64) -> json.Array {
 
 // --- getnetworkinfo ---
 
+// Core-style numeric version (major*10000 + minor*100). Clients branch on
+// this to pick RPC schemas — bitcoincore-rpc treats version < 190000 as
+// Bitcoin 0.18 and demands the legacy softforks array + bip9_softforks map.
+// Report the Core version whose RPC surface we mirror.
+CORE_COMPAT_VERSION :: 280000
+
 _handle_getnetworkinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 	obj := make(json.Object, 12, context.temp_allocator)
-	obj["version"] = json.Value(json.Integer(1))
+	obj["version"] = json.Value(json.Integer(CORE_COMPAT_VERSION))
 	obj["subversion"] = json.Value(json.String(wire.NODE_USER_AGENT))
 	obj["protocolversion"] = json.Value(json.Integer(i64(wire.PROTOCOL_VERSION)))
 

@@ -22,7 +22,11 @@ import "../wire"
 // polls flush_done (single writer: the worker; plain bool is sufficient for
 // this handshake given the pump also joins the thread before touching data).
 
-FLUSH_CHUNK_ENTRIES :: 2_000_000
+// Cap each WriteBatch at ~16MB (Bitcoin Core's dbbatchsize). A WriteBatch
+// is a single atomic WAL record: LevelDB's log grows to hold the whole
+// batch and the next open REPLAYS it in full — 2M-entry chunks produced a
+// 2.7GB WAL and a 4-minute startup on mainnet.
+FLUSH_BATCH_BYTES :: 16 * 1024 * 1024
 
 // Snapshot the cache and start the background flush. No-op (returns false)
 // if a flush is already running or the cache is empty.
@@ -144,7 +148,7 @@ _flush_worker :: proc(data: rawptr) {
 	cc := cast(^Coins_Cache)data
 
 	batch := storage.ldb_batch_create()
-	in_batch := 0
+	batch_bytes := 0
 	processed := 0
 
 	for outpoint, entry in cc.frozen {
@@ -158,13 +162,14 @@ _flush_worker :: proc(data: rawptr) {
 		if _is_spent_sentinel_val(entry) {
 			storage.utxo_db_batch_delete(cc.db, batch, outpoint)
 			cc.flush_deleted += 1
+			batch_bytes += 48 // key + batch overhead
 		} else {
 			storage.utxo_db_batch_put(cc.db, batch, outpoint, entry.coin)
 			cc.flush_written += 1
+			batch_bytes += 64 + len(entry.coin.script) // key + encoded value + overhead
 		}
-		in_batch += 1
 
-		if in_batch >= FLUSH_CHUNK_ENTRIES {
+		if batch_bytes >= FLUSH_BATCH_BYTES {
 			werr := storage.ldb_batch_write(cc.db.store.chainstate_db, cc.db.store.write_opts, batch)
 			storage.ldb_batch_destroy(batch)
 			free_all(context.temp_allocator)
@@ -174,7 +179,7 @@ _flush_worker :: proc(data: rawptr) {
 				return
 			}
 			batch = storage.ldb_batch_create()
-			in_batch = 0
+			batch_bytes = 0
 		}
 	}
 
