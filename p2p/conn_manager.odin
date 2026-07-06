@@ -1775,6 +1775,9 @@ _update_node_status :: proc(cm: ^Conn_Manager, now: i64) {
 		ps.start_height = peer.start_height
 		ps.bytes_sent = peer.bytes_sent
 		ps.bytes_recv = peer.bytes_recv
+		if peer.last_recv > 0 {
+			ps.last_recv_secs = now - peer.last_recv
+		}
 		if sync_ps, ok := cm.sync_mgr.peer_sync[id]; ok {
 			ps.blocks_delivered = sync_ps.blocks_delivered
 			ps.blocks_in_flight = sync_ps.blocks_in_flight

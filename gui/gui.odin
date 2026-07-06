@@ -138,7 +138,10 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	peers_h: f32 = 258
 	rl.GuiGroupBox(rl.Rectangle{pad, 150, WIN_W - 2 * pad, peers_h}, fmt.ctprintf("Peers (%d)", st.peer_count))
 	col_x := [?]i32{pad + 12, pad + 52, pad + 96, pad + 296, pad + 500, pad + 580, pad + 640, pad + 710, pad + 786}
-	headers := [?]cstring{"ID", "DIR", "ADDRESS", "AGENT", "HEIGHT", "BLKS", "RATE", "SENT", "RECV"}
+	// RATE (blocks/s) only means something during bulk download; at the tip
+	// show LAST — seconds since the peer's last message (liveness).
+	downloading := st.sync_state == .Downloading_Blocks
+	headers := [?]cstring{"ID", "DIR", "ADDRESS", "AGENT", "HEIGHT", "BLKS", downloading ? "RATE" : "LAST", "SENT", "RECV"}
 	for h, i in headers {
 		rl.DrawText(h, col_x[i], 162, 13, COL_DIM)
 	}
@@ -157,7 +160,11 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 		rl.DrawText(fmt.ctprintf("%s", agent), col_x[3], y, 13, COL_DIM)
 		rl.DrawText(fmt.ctprintf("%d", p.start_height), col_x[4], y, 13, COL_TEXT)
 		rl.DrawText(fmt.ctprintf("%d", p.blocks_delivered), col_x[5], y, 13, COL_TEXT)
-		rl.DrawText(fmt.ctprintf("%.1f/s", p.throughput), col_x[6], y, 13, COL_TEXT)
+		if downloading {
+			rl.DrawText(fmt.ctprintf("%.1f/s", p.throughput), col_x[6], y, 13, COL_TEXT)
+		} else {
+			rl.DrawText(fmt.ctprintf("%ds", p.last_recv_secs), col_x[6], y, 13, p.last_recv_secs > 90 ? COL_ORANGE : COL_TEXT)
+		}
 		rl.DrawText(fmt.ctprintf("%s", _fmt_bytes(p.bytes_sent)), col_x[7], y, 13, COL_TEXT)
 		rl.DrawText(fmt.ctprintf("%s", _fmt_bytes(p.bytes_recv)), col_x[8], y, 13, COL_TEXT)
 		y += 18

@@ -117,6 +117,7 @@ Peer_Status :: struct {
 	blocks_delivered: int,
 	blocks_in_flight: int,
 	throughput:       f64, // blocks/sec since tracking began
+	last_recv_secs:   i64, // seconds since last message from this peer
 }
 
 Node_Status :: struct {
