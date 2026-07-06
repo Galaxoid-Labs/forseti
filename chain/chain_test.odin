@@ -1278,3 +1278,57 @@ test_background_flush_roundtrip :: proc(t: ^testing.T) {
 	_, h := chain_tip(&cs)
 	testing.expect_value(t, h, 54)
 }
+
+// Regression: block_index_load must build skip lists parents-first. The old
+// random-map-order build let children copy from unbuilt ancestor skips,
+// silently truncating them (get_ancestor degraded to a linear prev-walk).
+@(test)
+test_block_index_load_skip_lists :: proc(t: ^testing.T) {
+	N :: 4096
+	db: storage.Index_DB
+	db.records = make(map[wire.Hash256]storage.Block_Index_Record, N, context.temp_allocator)
+	prev: Hash256
+	hashes := make([]Hash256, N, context.temp_allocator)
+	for h in 0 ..< N {
+		hash: Hash256
+		hash[0] = byte(h)
+		hash[1] = byte(h >> 8)
+		hash[2] = byte(h >> 16)
+		hash[3] = 0xab // avoid HASH_ZERO for h=0? genesis must have prev == zero, hash nonzero
+		hashes[h] = hash
+		db.records[hash] = storage.Block_Index_Record{
+			prev_hash = prev,
+			height    = i32(h),
+			bits      = 0x1d00ffff,
+			status    = {.Valid_Header},
+		}
+		prev = hash
+	}
+
+	idx := block_index_init(capacity = N * 2, allocator = context.temp_allocator)
+	block_index_load(&idx, &db)
+
+	testing.expect_value(t, len(idx.entries), N)
+	tip := idx.entries[hashes[N - 1]]
+	testing.expect(t, tip != nil, "tip present")
+	testing.expect_value(t, idx.best_header.height, N - 1)
+
+	// Every skip pointer must land exactly 2^i blocks back.
+	for h in 1 ..< N {
+		e := idx.entries[hashes[h]]
+		for i in 0 ..< SKIP_LIST_MAX {
+			if e.skip[i] == nil {
+				break
+			}
+			testing.expect_value(t, e.skip[i].height, max(e.height - (1 << uint(i)), 0))
+		}
+	}
+
+	// Ancestor lookups resolve correctly across the whole range.
+	testing.expect_value(t, block_index_get_ancestor(tip, 0).height, 0)
+	testing.expect_value(t, block_index_get_ancestor(tip, 1234).height, 1234)
+	testing.expect_value(t, block_index_get_ancestor(tip, N - 2).height, N - 2)
+
+	// Chainwork strictly increases along the chain (accumulated parents-first).
+	testing.expect(t, consensus.u256_compare(tip.chain_work, idx.genesis.chain_work) > 0, "tip work > genesis work")
+}

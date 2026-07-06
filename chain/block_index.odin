@@ -35,6 +35,7 @@ Block_Index :: struct {
 	genesis:     ^Block_Index_Entry,
 	best_header: ^Block_Index_Entry,
 	allocator:   mem.Allocator,
+	slab:        []Block_Index_Entry, // bulk storage for load-time entries (fast startup path)
 }
 
 block_index_init :: proc(capacity: int = 1024, allocator := context.allocator) -> Block_Index {
@@ -46,18 +47,36 @@ block_index_init :: proc(capacity: int = 1024, allocator := context.allocator) -
 }
 
 block_index_destroy :: proc(idx: ^Block_Index) {
+	slab_lo := len(idx.slab) > 0 ? uintptr(&idx.slab[0]) : 0
+	slab_hi := len(idx.slab) > 0 ? uintptr(&idx.slab[len(idx.slab) - 1]) : 0
 	for _, entry in idx.entries {
+		ep := uintptr(entry)
+		if slab_lo != 0 && ep >= slab_lo && ep <= slab_hi {
+			continue // slab-backed; freed wholesale below
+		}
 		free(entry, idx.allocator)
 	}
+	delete(idx.slab)
 	delete(idx.entries)
 	delete(idx.by_prev)
 }
 
 // Load all records from Index_DB, link prev pointers, build skip lists.
 block_index_load :: proc(idx: ^Block_Index, db: ^storage.Index_DB) {
-	// First pass: create entries for all records
+	n := len(db.records)
+	if n == 0 {
+		return
+	}
+
+	// One slab instead of n individual news — ~1M fewer heap allocations
+	// and contiguous memory for the pointer-chasing passes below.
+	idx.slab = make([]Block_Index_Entry, n, idx.allocator)
+
+	// Create entries for all records.
+	i := 0
 	for hash, rec in db.records {
-		entry := new(Block_Index_Entry, idx.allocator)
+		entry := &idx.slab[i]
+		i += 1
 		entry.hash = hash
 		entry.prev_hash = rec.prev_hash
 		entry.height = int(rec.height)
@@ -73,7 +92,8 @@ block_index_load :: proc(idx: ^Block_Index, db: ^storage.Index_DB) {
 		idx.entries[hash] = entry
 	}
 
-	// Second pass: link prev pointers, find genesis, build by_prev index
+	// Link prev pointers, find genesis, build by_prev index.
+	max_h := 0
 	for _, entry in idx.entries {
 		if entry.prev_hash == HASH_ZERO {
 			idx.genesis = entry
@@ -84,42 +104,34 @@ block_index_load :: proc(idx: ^Block_Index, db: ^storage.Index_DB) {
 			}
 			idx.by_prev[entry.prev_hash] = entry
 		}
+		if entry.height > max_h { max_h = entry.height }
 	}
 
-	// Third pass: build skip lists
+	// Order entries by ascending height (counting sort — no per-height
+	// allocations), then do skip lists, chainwork, and best-header in ONE
+	// parents-first walk. Skip lists copy from ancestors' skip lists, so
+	// random map order silently truncated them (get_ancestor degraded from
+	// O(log n) toward O(n)); chainwork accumulates from prev the same way.
+	counts := make([]int, max_h + 2, context.temp_allocator)
 	for _, entry in idx.entries {
+		counts[entry.height + 1] += 1
+	}
+	for h in 1 ..< len(counts) {
+		counts[h] += counts[h - 1]
+	}
+	ordered := make([]^Block_Index_Entry, n, context.temp_allocator)
+	for _, entry in idx.entries {
+		ordered[counts[entry.height]] = entry
+		counts[entry.height] += 1
+	}
+	for entry in ordered {
 		_build_skip_list(entry)
-	}
-
-	// Fourth pass: cumulative chainwork, ascending height so parents are
-	// done before children (forks included — a child is always taller than
-	// its parent). Derived from headers; nothing persisted.
-	{
-		max_h := 0
-		for _, entry in idx.entries {
-			if entry.height > max_h { max_h = entry.height }
+		own := consensus.work_from_bits(entry.bits)
+		if entry.prev != nil {
+			entry.chain_work = consensus.u256_add(entry.prev.chain_work, own)
+		} else {
+			entry.chain_work = own
 		}
-		by_height := make([][dynamic]^Block_Index_Entry, max_h + 1, context.temp_allocator)
-		for _, entry in idx.entries {
-			if by_height[entry.height] == nil {
-				by_height[entry.height] = make([dynamic]^Block_Index_Entry, 0, 1, context.temp_allocator)
-			}
-			append(&by_height[entry.height], entry)
-		}
-		for h in 0 ..= max_h {
-			for entry in by_height[h] {
-				own := consensus.work_from_bits(entry.bits)
-				if entry.prev != nil {
-					entry.chain_work = consensus.u256_add(entry.prev.chain_work, own)
-				} else {
-					entry.chain_work = own
-				}
-			}
-		}
-	}
-
-	// Fifth pass: best header by cumulative work (first-seen wins ties).
-	for _, entry in idx.entries {
 		if .Valid_Header in entry.status {
 			if idx.best_header == nil || consensus.u256_compare(entry.chain_work, idx.best_header.chain_work) > 0 {
 				idx.best_header = entry
