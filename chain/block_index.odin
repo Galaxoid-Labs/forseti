@@ -124,9 +124,18 @@ block_index_load :: proc(idx: ^Block_Index, db: ^storage.Index_DB) {
 		ordered[counts[entry.height]] = entry
 		counts[entry.height] += 1
 	}
+	// work_from_bits is a bit-serial 256-bit division (~75µs) and nBits
+	// only changes per retarget period (~475 distinct values over 957k
+	// mainnet blocks) — memoizing it is the difference between a 71-second
+	// and a ~2-second index build.
+	work_cache := make(map[u32][32]byte, 1024, context.temp_allocator)
 	for entry in ordered {
 		_build_skip_list(entry)
-		own := consensus.work_from_bits(entry.bits)
+		own, cached := work_cache[entry.bits]
+		if !cached {
+			own = consensus.work_from_bits(entry.bits)
+			work_cache[entry.bits] = own
+		}
 		if entry.prev != nil {
 			entry.chain_work = consensus.u256_add(entry.prev.chain_work, own)
 		} else {
