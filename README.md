@@ -6,7 +6,7 @@ This is an educational/experimental project implementing 33 BIPs. It covers the 
 
 ## Status
 
-**314 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Accepts both inbound and outbound P2P connections with v2 encrypted transport enabled by default. Builds on macOS and Linux.
+**320 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Accepts both inbound and outbound P2P connections with v2 encrypted transport enabled by default. Builds on macOS and Linux.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
@@ -421,7 +421,7 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 ## Testing
 
 ```bash
-# Run all 314 tests
+# Run all 320 tests
 make test
 
 # Test individual packages
@@ -489,7 +489,6 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 ### Features
 
 - **`generatetoaddress` RPC** — Regtest block generation for self-contained testing
-- **Block pruning** — Discard old block data to reduce disk usage on mainnet
 
 ## GUI Dashboard
 
