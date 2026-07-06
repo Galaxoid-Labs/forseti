@@ -40,6 +40,12 @@ Chain_State :: struct {
 	filter_db: ^storage.Filter_DB,
 	// Performance profiling counters (cumulative, logged every 1000 blocks)
 	prof: Block_Profile,
+	// Pruning: target bytes for blk+rev files (0 = keep everything);
+	// prune_height = lowest height whose block data is still on disk;
+	// last_flush_height = durable UTXO state (never prune above it).
+	prune_target:      int,
+	prune_height:      int,
+	last_flush_height: int,
 }
 
 Block_Profile :: struct {
@@ -56,8 +62,9 @@ Block_Profile :: struct {
 
 // Initialize chain state. Caller allocates Chain_State and passes pointer.
 // script_threads: 0 or 1 = serial verification, >= 2 = parallel with N worker threads.
-chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.Chain_Params, db_cache_mb: int = 450, script_threads: int = 0) -> Chain_Error {
+chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.Chain_Params, db_cache_mb: int = 450, script_threads: int = 0, prune_target: int = 0) -> Chain_Error {
 	cs.params = params
+	cs.prune_target = prune_target
 
 	// Ensure data_dir exists
 	os.make_directory(data_dir)
@@ -130,6 +137,13 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	_rebuild_active_chain(cs)
 	log.infof("Active chain rebuilt: %d blocks", len(cs.active_chain))
 
+	// The recovered tip IS the durable flush point (pending blocks connected
+	// below are beyond it and must not be pruned until the next flush).
+	{
+		_, flushed_h := chain_tip(cs)
+		cs.last_flush_height = flushed_h
+	}
+
 	// Compute cumulative chain_tx for the active chain
 	_compute_chain_tx(cs)
 
@@ -164,6 +178,9 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 		_, tip_height := chain_tip(cs)
 		log.infof("Connected %d pending blocks on startup (tip now at height %d)", pending_connected, tip_height)
 	}
+
+	// Reclaim disk from any files that became prunable before the last shutdown.
+	prune_block_files(cs, cs.last_flush_height)
 
 	return .None
 }

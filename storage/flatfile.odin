@@ -14,6 +14,7 @@ FILE_POS_NULL :: File_Pos{file_num = 0xFFFFFFFF, offset = 0xFFFFFFFF}
 
 Flat_File_Manager :: struct {
 	data_dir:     string,
+	dir:          string, // resolved directory: <data_dir>/blocks (new) or <data_dir> (legacy layout)
 	prefix:       string, // "blk" or "rev"
 	current_file: u32,
 	current_pos:  u32,
@@ -22,7 +23,7 @@ Flat_File_Manager :: struct {
 
 // Build path like "data_dir/blk00042.dat" into caller-provided buffer.
 flat_file_path :: proc(mgr: ^Flat_File_Manager, file_num: u32, buf: []byte) -> string {
-	s := fmt.bprintf(buf, "%s/%s%05d.dat", mgr.data_dir, mgr.prefix, file_num)
+	s := fmt.bprintf(buf, "%s/%s%05d.dat", mgr.dir, mgr.prefix, file_num)
 	return s
 }
 
@@ -33,6 +34,20 @@ flat_file_open :: proc(data_dir: string, prefix: string) -> (mgr: Flat_File_Mana
 	mgr.current_file = 0
 	mgr.current_pos = 0
 	mgr.fd = nil
+
+	// Flat files live in <data_dir>/blocks/ (Core-compatible). Datadirs from
+	// before this layout have them at the datadir root — keep using that
+	// location if file 0 exists there (no migration).
+	legacy_buf: [512]byte
+	legacy := fmt.bprintf(legacy_buf[:], "%s/%s00000.dat", data_dir, prefix)
+	if os.exists(legacy) {
+		mgr.dir = data_dir
+	} else {
+		blocks_buf: [512]byte
+		blocks_dir := fmt.bprintf(blocks_buf[:], "%s/blocks", data_dir)
+		os.make_directory(blocks_dir)
+		mgr.dir = fmt.aprintf("%s/blocks", data_dir)
+	}
 
 	// Scan existing files to find the last one
 	path_buf: [512]byte
@@ -169,4 +184,30 @@ _file_size :: proc(path: string) -> (size: i64, err: Storage_Error) {
 		return 0, .IO_Error
 	}
 	return sz, .None
+}
+
+// Delete a flat file (pruning). Never called for the currently-open file —
+// prune candidates are strictly below the active write file.
+flat_file_delete :: proc(mgr: ^Flat_File_Manager, file_num: u32) -> bool {
+	if file_num == mgr.current_file {
+		return false
+	}
+	path_buf: [512]byte
+	path := flat_file_path(mgr, file_num, path_buf[:])
+	if !os.exists(path) {
+		return false
+	}
+	return os.remove(path) == nil
+}
+
+// Size of one flat file on disk (0 if absent) — used for prune accounting.
+flat_file_size :: proc(mgr: ^Flat_File_Manager, file_num: u32) -> i64 {
+	path_buf: [512]byte
+	path := flat_file_path(mgr, file_num, path_buf[:])
+	fd, open_err := os.open(path, os.O_RDONLY)
+	if open_err != nil { return 0 }
+	defer os.close(fd)
+	sz, serr := os.file_size(fd)
+	if serr != nil { return 0 }
+	return sz
 }

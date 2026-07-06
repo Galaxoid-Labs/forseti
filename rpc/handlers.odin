@@ -92,7 +92,10 @@ _handle_getblockchaininfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_R
 
 	// Initial block download: consider IBD if headers are significantly ahead of blocks
 	obj["initialblockdownload"] = json.Value(json.Boolean(header_height - height > 24))
-	obj["pruned"] = json.Value(json.Boolean(false))
+	obj["pruned"] = json.Value(json.Boolean(srv.chain.prune_target > 0))
+	if srv.chain.prune_target > 0 {
+		obj["pruneheight"] = json.Value(json.Integer(i64(srv.chain.prune_height)))
+	}
 	obj["warnings"] = json.Value(json.String(""))
 
 	// Softforks (Bitcoin Core format)

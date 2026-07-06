@@ -49,7 +49,9 @@ _remove_dir_contents :: proc(dir: string) {
 
 // Build a regtest block at a given height with prev_hash linkage.
 make_chain_block :: proc(height: int, prev_hash: Hash256, params: ^consensus.Chain_Params) -> wire.Block {
-	cb := consensus.make_coinbase(height)
+	// Pay the real subsidy — regtest halves every 150 blocks, and long test
+	// chains (e.g. pruning needs 288+) hit Bad_Coinbase_Value otherwise.
+	cb := consensus.make_coinbase(height, value = consensus.get_block_subsidy(height, params))
 	txs := make([]wire.Tx, 1, context.temp_allocator)
 	txs[0] = cb
 
@@ -998,4 +1000,64 @@ test_compute_filter_header_chain :: proc(t: ^testing.T) {
 	// Same filter hash but different prev should give different header.
 	header1_alt := compute_filter_header(h1, HASH_ZERO)
 	testing.expect(t, header1_alt != header1, "same filter hash with different prev should differ")
+}
+
+@(test)
+test_prune_block_files :: proc(t: ^testing.T) {
+	dir := make_test_dir("prune")
+	defer remove_test_dir(dir)
+
+	params := consensus.REGTEST_PARAMS
+	cs: Chain_State
+	err := chain_state_init(&cs, dir, &params, prune_target = 1) // prune aggressively
+	testing.expect_value(t, err, Chain_Error.None)
+	defer chain_state_destroy(&cs)
+
+	// Connect 400 blocks (comfortably past MIN_BLOCKS_TO_KEEP = 288).
+	NUM :: 400
+	prev_hash := HASH_ZERO
+	for i in 0 ..< NUM {
+		block := make_chain_block(i, prev_hash, &params)
+		aerr := accept_block(&cs, &block)
+		testing.expect(t, aerr == .None, fmt.tprintf("accept block %d: %v", i, aerr))
+		prev_hash = wire.block_header_hash(&block.header)
+	}
+
+	// All blocks landed in file 0 — the active write file is never pruned.
+	fd0, fr0 := prune_block_files(&cs, NUM - 1)
+	testing.expect_value(t, fd0, 0)
+	testing.expect_value(t, fr0, 0)
+
+	// Simulate a file rollover: heights <= 100 belong to file 0, the rest to
+	// file 1 (now the active file). This mirrors a real rollover without
+	// writing 128MB in a test.
+	for _, entry in cs.block_index.entries {
+		if .Has_Data not_in entry.status { continue }
+		entry.file_num = entry.height <= 100 ? 0 : 1
+	}
+	cs.block_db.files.current_file = 1
+	cs.undo_files.current_file = 1
+
+	// prune_height = min(399-288, flushed=399) = 111 > file 0 max (100) → prunable.
+	blk0 := fmt.tprintf("%s/blocks/blk00000.dat", dir)
+	testing.expect(t, os.exists(blk0), "blk00000.dat should exist before prune")
+
+	fd, freed := prune_block_files(&cs, NUM - 1)
+	testing.expect_value(t, fd, 1)
+	testing.expect(t, freed > 0, "should free bytes")
+	testing.expect(t, !os.exists(blk0), "blk00000.dat should be deleted")
+	testing.expect(t, cs.prune_height == 101, fmt.tprintf("prune_height should be 101, got %d", cs.prune_height))
+
+	// Index: heights <= 100 lost Has_Data, everything above kept it.
+	for _, entry in cs.block_index.entries {
+		if entry.height <= 100 && entry.height >= 0 {
+			testing.expect(t, .Has_Data not_in entry.status, fmt.tprintf("height %d should be pruned", entry.height))
+		} else if entry.height > 100 {
+			testing.expect(t, .Has_Data in entry.status, fmt.tprintf("height %d should keep data", entry.height))
+		}
+	}
+
+	// Second call: nothing left to prune (file 1 is active).
+	fd2, _ := prune_block_files(&cs, NUM - 1)
+	testing.expect_value(t, fd2, 0)
 }

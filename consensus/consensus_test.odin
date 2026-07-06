@@ -23,7 +23,7 @@ hash_to_hex :: proc(h: Hash256) -> string {
 }
 
 // Build a minimal coinbase transaction.
-make_coinbase :: proc(height: int, allocator := context.temp_allocator) -> wire.Tx {
+make_coinbase :: proc(height: int, allocator := context.temp_allocator, value: i64 = 50 * 100_000_000) -> wire.Tx {
 	// Coinbase script: push height as script number
 	height_bytes: [4]byte
 	height_bytes[0] = byte(height & 0xff)
@@ -59,7 +59,7 @@ make_coinbase :: proc(height: int, allocator := context.temp_allocator) -> wire.
 
 	outputs := make([]wire.Tx_Out, 1, allocator)
 	outputs[0] = wire.Tx_Out {
-		value         = 50 * COIN,
+		value         = value,
 		script_pubkey = script_pubkey,
 	}
 

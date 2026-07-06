@@ -74,6 +74,7 @@ CLI_Flag :: enum {
 	Listen,
 	Peer_Bloom_Filters,
 	Gui,
+	Prune,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
 
@@ -112,6 +113,7 @@ CLI_Config :: struct {
 	debug:                  bool,   // enable debug logging (default: false)
 	peer_bloom_filters:     bool,   // BIP111: bloom filter support (default: false)
 	gui:                    bool,   // show GUI dashboard window (default: false = headless)
+	prune_mb:               int,    // prune target in MB (0 = keep all blocks)
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -179,6 +181,18 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 		} else if arg == "--gui" {
 			cfg.gui = true
 			flags_set += {.Gui}
+		} else if strings.has_prefix(arg, "--prune=") {
+			val, parse_ok := strconv.parse_int(arg[len("--prune="):])
+			if !parse_ok {
+				fmt.eprintln("Error: invalid --prune value")
+				return cfg, flags_set, false
+			}
+			if val > 0 && val < 550 {
+				fmt.eprintln("Error: --prune target must be at least 550 (MB), or 0 to disable")
+				return cfg, flags_set, false
+			}
+			cfg.prune_mb = val
+			flags_set += {.Prune}
 		} else if strings.has_prefix(arg, "--mempoolfullrbf=") {
 			val := arg[len("--mempoolfullrbf="):]
 			cfg.mempool_fullrbf = val == "1" || val == "true"
@@ -399,6 +413,7 @@ _print_usage :: proc() {
 	fmt.println("  --blocksonly          Disable tx relay, only sync blocks (default: off)")
 	fmt.println("  --persistmempool=<0|1> Save/load mempool on shutdown/startup (default: 1)")
 	fmt.println("  --gui                  Show GUI dashboard window (default: headless)")
+	fmt.println("  --prune=<MB>           Delete old block files, keep usage under target (min 550, 0=off)")
 	fmt.println()
 	fmt.println("  --peerbloomfilters=<0|1> Enable BIP 37 bloom filters + BIP 35 mempool msg (default: 0)")
 	fmt.println("  --debug               Enable debug logging (default: off)")
@@ -488,6 +503,14 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 		if val, found := _ini_get(&m, cfg.network, "dbcache"); found {
 			if mb, parse_ok := strconv.parse_int(val); parse_ok {
 				cfg.db_cache_mb = max(mb, 4)
+			}
+		}
+	}
+
+	if .Prune not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "prune"); found {
+			if mb, parse_ok := strconv.parse_int(val); parse_ok && (mb == 0 || mb >= 550) {
+				cfg.prune_mb = mb
 			}
 		}
 	}
@@ -852,7 +875,7 @@ main :: proc() {
 
 	// Initialize chain state.
 	cs := new(chain.Chain_State)
-	cs_err := chain.chain_state_init(cs, cfg.data_dir, params, cfg.db_cache_mb, script_threads)
+	cs_err := chain.chain_state_init(cs, cfg.data_dir, params, cfg.db_cache_mb, script_threads, cfg.prune_mb * 1024 * 1024)
 	if cs_err != .None {
 		log.errorf("Failed to initialize chain state: %v", cs_err)
 		return
@@ -969,6 +992,11 @@ main :: proc() {
 			cm.max_outbound = p2p.MAX_OUTBOUND_FULL_RELAY
 			cm.v2_transport_enabled = cfg.v2_transport
 			cm.local_services = p2p.LOCAL_SERVICES
+			if cfg.prune_mb > 0 {
+				// Pruned: can serve only recent blocks — NODE_NETWORK_LIMITED
+				// stays, full NODE_NETWORK must not be advertised.
+				cm.local_services &~= p2p.NODE_NETWORK
+			}
 			if cfg.block_filter_index {
 				cm.local_services |= p2p.NODE_COMPACT_FILTERS
 			}
@@ -1059,7 +1087,7 @@ main :: proc() {
 	// graceful shutdown path as SIGINT. Without --gui nothing here runs and
 	// the node stays fully headless.
 	if cfg.gui {
-		if gui.run(cm, cs, gui.Static_Info{network = cfg.network, rpc_port = rpc_port, dbcache_mb = cfg.db_cache_mb}) {
+		if gui.run(cm, cs, gui.Static_Info{network = cfg.network, rpc_port = rpc_port, dbcache_mb = cfg.db_cache_mb, prune_mb = cfg.prune_mb}) {
 			// Window was closed (or node stopped) — same path as SIGINT.
 			if srv != nil {
 				rpc.rpc_server_stop(srv)
