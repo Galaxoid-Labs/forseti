@@ -14,7 +14,7 @@ Static_Info :: struct {
 }
 
 WIN_W :: 900
-WIN_H :: 700
+WIN_H :: 560
 FPS :: 30
 
 // Cascadia Code (variable font; raylib loads the default weight instance),
@@ -164,33 +164,33 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	_text(fmt.ctprintf("Uptime: %s", _fmt_uptime(st.uptime_secs)), pad, 38, 14, COL_DIM)
 
 	// --- Sync progress ---
-	rl.GuiGroupBox(rl.Rectangle{pad, 70, WIN_W - 2 * pad, 64}, "Sync Progress")
+	rl.GuiGroupBox(rl.Rectangle{pad, 64, WIN_W - 2 * pad, 58}, "Sync Progress")
 	progress: f32 = 1
 	if st.best_header > 0 {
 		progress = f32(st.chain_height) / f32(st.best_header)
 	}
-	rl.GuiProgressBar(rl.Rectangle{pad + 12, 84, WIN_W - 2 * pad - 90, 18}, nil, fmt.ctprintf("%.2f%%", progress * 100), &progress, 0, 1)
+	rl.GuiProgressBar(rl.Rectangle{pad + 12, 76, WIN_W - 2 * pad - 90, 18}, nil, fmt.ctprintf("%.2f%%", progress * 100), &progress, 0, 1)
 	_text(
 		fmt.ctprintf("%s / %s blocks    |    %d in-flight    |    %s remaining",
 			_commas(st.chain_height), _commas(st.best_header), st.blocks_in_flight, _commas(st.blocks_remaining)),
-		pad + 12, 110, 14, COL_DIM)
+		pad + 12, 100, 14, COL_DIM)
 
 	// --- Peers table ---
-	peers_h: f32 = 258
-	rl.GuiGroupBox(rl.Rectangle{pad, 150, WIN_W - 2 * pad, peers_h}, fmt.ctprintf("Peers (%d)", st.peer_count))
+	peers_h: f32 = 200
+	rl.GuiGroupBox(rl.Rectangle{pad, 130, WIN_W - 2 * pad, peers_h}, fmt.ctprintf("Peers (%d)", st.peer_count))
 	col_x := [?]i32{pad + 12, pad + 52, pad + 96, pad + 296, pad + 500, pad + 580, pad + 640, pad + 710, pad + 786}
 	// RATE (blocks/s) only means something during bulk download; at the tip
 	// show LAST — seconds since the peer's last message (liveness).
 	downloading := st.sync_state == .Downloading_Blocks
 	headers := [?]cstring{"ID", "DIR", "ADDRESS", "AGENT", "HEIGHT", "BLKS", downloading ? "RATE" : "LAST", "SENT", "RECV"}
 	for h, i in headers {
-		_text(h, col_x[i], 162, 13, COL_DIM)
+		_text(h, col_x[i], 142, 13, COL_DIM)
 	}
-	rl.DrawLine(pad + 8, 180, WIN_W - pad - 8, 180, COL_LINE)
-	y: i32 = 188
+	rl.DrawLine(pad + 8, 158, WIN_W - pad - 8, 158, COL_LINE)
+	y: i32 = 166
 	for i in 0 ..< st.peer_count {
 		p := &st.peers[i]
-		if y > 150 + i32(peers_h) - 20 { break }
+		if y > 130 + i32(peers_h) - 18 { break }
 		addr := string(p.address[:p.addr_len])
 		agent := string(p.user_agent[:p.agent_len])
 		if len(agent) > 22 { agent = agent[:22] }
@@ -212,12 +212,12 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	}
 
 	// --- Mempool + UTXO cache ---
-	row2_y: f32 = 424
-	rl.GuiGroupBox(rl.Rectangle{pad, row2_y, 280, 92}, "Mempool")
+	row2_y: f32 = 338
+	rl.GuiGroupBox(rl.Rectangle{pad, row2_y, 280, 84}, "Mempool")
 	_text(fmt.ctprintf("Txs:  %s", _commas(st.mempool_count)), pad + 12, i32(row2_y) + 16, 14, COL_TEXT)
 	_text(fmt.ctprintf("Size: %s vB", _commas(st.mempool_vbytes)), pad + 12, i32(row2_y) + 40, 14, COL_TEXT)
 
-	rl.GuiGroupBox(rl.Rectangle{pad + 296, row2_y, WIN_W - 2 * pad - 296, 92}, "UTXO Cache")
+	rl.GuiGroupBox(rl.Rectangle{pad + 296, row2_y, WIN_W - 2 * pad - 296, 84}, "UTXO Cache")
 	_text(fmt.ctprintf("Entries: %s", _commas(st.utxo_cache_count)), pad + 308, i32(row2_y) + 16, 14, COL_TEXT)
 	_text(
 		fmt.ctprintf("Memory:  %s / %s MB", _commas(st.utxo_cache_bytes / 1_048_576), _commas(st.utxo_cache_budget / 1_048_576)),
@@ -226,18 +226,18 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	if st.utxo_cache_budget > 0 {
 		cache_fill = f32(st.utxo_cache_bytes) / f32(st.utxo_cache_budget)
 	}
-	rl.GuiProgressBar(rl.Rectangle{pad + 308, row2_y + 64, WIN_W - 2 * pad - 296 - 24, 12}, nil, nil, &cache_fill, 0, 1)
+	rl.GuiProgressBar(rl.Rectangle{pad + 308, row2_y + 62, WIN_W - 2 * pad - 296 - 24, 12}, nil, nil, &cache_fill, 0, 1)
 
 	// --- Block profile ---
-	prof_y: f32 = 532
-	rl.GuiGroupBox(rl.Rectangle{pad, prof_y, WIN_W - 2 * pad, 92}, fmt.ctprintf("Block Profile (last %d blocks)", st.prof_blocks))
+	prof_y: f32 = 434
+	rl.GuiGroupBox(rl.Rectangle{pad, prof_y, WIN_W - 2 * pad, 84}, fmt.ctprintf("Block Profile (last %d blocks)", st.prof_blocks))
 	if st.prof_blocks > 0 {
 		_text(fmt.ctprintf("Total: %.1f ms/block", st.prof_ms_per_block), pad + 12, i32(prof_y) + 18, 15, COL_ACCENT)
 		_text(
 			fmt.ctprintf("Read: %.0f%%   Prefetch: %.0f%%   Validate: %.0f%%   UTXO: %.0f%%   Scripts: %.0f%%   Undo: %.0f%%",
 				st.prof_read_pct, st.prof_prefetch_pct, st.prof_valid_pct,
 				st.prof_utxo_pct, st.prof_scripts_pct, st.prof_undo_pct),
-			pad + 12, i32(prof_y) + 48, 14, COL_TEXT)
+			pad + 12, i32(prof_y) + 46, 14, COL_TEXT)
 	} else {
 		_text("No blocks connected in the current window yet", pad + 12, i32(prof_y) + 32, 14, COL_DIM)
 	}
