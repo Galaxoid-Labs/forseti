@@ -63,6 +63,17 @@ _text :: proc(text: cstring, x, y: i32, size: f32, color: rl.Color) {
 	rl.DrawTextEx(_font_for(size)^, text, rl.Vector2{f32(x), f32(y)}, size, 0, color)
 }
 
+// Horizontally centered text (measured with the same font _text draws with).
+_text_centered :: proc(text: cstring, y: i32, size: f32, color: rl.Color) {
+	w: f32
+	if g_fonts_ok {
+		w = rl.MeasureTextEx(_font_for(size)^, text, size, 0).x
+	} else {
+		w = f32(rl.MeasureText(text, i32(size)))
+	}
+	_text(text, i32((f32(WIN_W) - w) / 2), y, size, color)
+}
+
 // Dark theme palette.
 COL_BG      :: rl.Color{0x10, 0x14, 0x18, 0xff}
 COL_PANEL   :: rl.Color{0x16, 0x1b, 0x21, 0xff}
@@ -180,9 +191,11 @@ Boot :: struct {
 	ready:   bool, // node init complete; cm/cs are valid
 	failed:  bool, // node init failed; GUI shows the error and exits
 	closing: bool, // window closed during init; node shuts down once ready
+	stopped: bool, // node teardown fully complete (set by _node_main's last defer)
 	cm:      ^p2p.Conn_Manager,
 	cs:      ^chain.Chain_State,
 	info:    Static_Info,
+	request_shutdown: proc(), // set by main: stops RPC + P2P (idempotent)
 }
 
 // GUI-first startup: open the window immediately and animate init progress
@@ -207,40 +220,91 @@ run_boot :: proc(boot: ^Boot) -> bool {
 		frame += 1
 	}
 
-	if boot.failed || boot.closing {
-		return true // main handles shutdown/exit
+	if !boot.failed && !boot.closing {
+		if boot.cm == nil {
+			_dashboard_loop(boot.info, nil, nil, boot.cs, local = true)
+		} else {
+			fetch :: proc(ud: rawptr) -> (p2p.Node_Status, bool) {
+				cm := cast(^p2p.Conn_Manager)ud
+				if cm.shutdown { return {}, false }
+				return p2p.conn_manager_get_status(cm), true
+			}
+			_dashboard_loop(boot.info, fetch, boot.cm, nil, local = true)
+		}
 	}
 
-	if boot.cm == nil {
-		_dashboard_loop(boot.info, nil, nil, boot.cs, local = true)
-		return true
+	// Shutdown hold: the flush can take minutes, and a vanished window
+	// reads as "safe to force-quit" — exactly when it isn't. Trigger the
+	// stop, then keep the window up narrating teardown until the node
+	// thread has fully finished.
+	if boot.request_shutdown != nil {
+		boot.request_shutdown()
 	}
-	fetch :: proc(ud: rawptr) -> (p2p.Node_Status, bool) {
-		cm := cast(^p2p.Conn_Manager)ud
-		if cm.shutdown { return {}, false }
-		return p2p.conn_manager_get_status(cm), true
+	frame = 0
+	for !boot.stopped {
+		rl.BeginDrawing()
+		rl.ClearBackground(COL_BG)
+		_draw_shutdown(frame)
+		rl.EndDrawing()
+		frame += 1
 	}
-	_dashboard_loop(boot.info, fetch, boot.cm, nil, local = true)
 	return true
+}
+
+_draw_shutdown :: proc(frame: int) {
+	cy := i32(WIN_H/2 - 60)
+	_text_centered("bitcoin-node-odin", cy, 26, COL_TEXT)
+	_text_centered("Shutting down", cy + 40, 20, COL_ORANGE)
+
+	stage := string(chain.Boot_Stage)
+	if stage == "" {
+		stage = "Stopping network and RPC"
+	}
+	stage_c := fmt.ctprintf("%s", stage)
+	sw: f32 = g_fonts_ok ? rl.MeasureTextEx(_font_for(16)^, stage_c, 16, 0).x : f32(rl.MeasureText(stage_c, 16))
+	sx := i32((f32(WIN_W) - sw) / 2)
+	_text(stage_c, sx, cy + 70, 16, COL_TEXT)
+	ellipsis := "..."
+	dots := (frame / (FPS / 2)) % 4
+	_text(fmt.ctprintf("%s", ellipsis[:dots]), sx + i32(sw), cy + 70, 16, COL_TEXT)
+
+	elapsed := frame / FPS
+	_text_centered(fmt.ctprintf("%ds elapsed", elapsed), cy + 94, 14, COL_DIM)
+	_text_centered("Flushing the UTXO cache to disk can take a few minutes.", cy + 126, 15, COL_TEXT)
+	_text_centered("Do NOT force-quit — the window closes itself when done.", cy + 148, 15, COL_ORANGE)
+
+	bar_w := i32(340)
+	bx := i32(WIN_W/2 - 170)
+	by := cy + 180
+	rl.DrawRectangle(bx, by, bar_w, 8, COL_PANEL)
+	sweep_w := i32(70)
+	span := int(bar_w - sweep_w)
+	pos := frame * 3 % (span * 2)
+	if pos > span { pos = 2*span - pos }
+	rl.DrawRectangle(bx + i32(pos), by, sweep_w, 8, COL_ORANGE)
 }
 
 _draw_boot :: proc(boot: ^Boot, frame: int) {
 	cy := i32(WIN_H/2 - 60)
-	_text("bitcoin-node-odin", WIN_W/2 - 110, cy, 26, COL_TEXT)
-	_text(fmt.ctprintf("network: %s", boot.info.network), WIN_W/2 - 110, cy + 34, 15, COL_DIM)
+	_text_centered("bitcoin-node-odin", cy, 26, COL_TEXT)
+	_text_centered(fmt.ctprintf("network: %s", boot.info.network), cy + 34, 15, COL_DIM)
 
+	// Stage centered WITHOUT the animated dots (centering a changing string
+	// makes the whole line shimmer side to side); dots dangle off the end.
 	stage := string(chain.Boot_Stage)
 	if stage == "" {
 		stage = "Starting"
 	}
-	// Animated ellipsis so a long stage (multi-minute WAL replay) still
-	// reads as alive, plus a sweeping progress strip.
+	stage_c := fmt.ctprintf("%s", stage)
+	sw: f32 = g_fonts_ok ? rl.MeasureTextEx(_font_for(17)^, stage_c, 17, 0).x : f32(rl.MeasureText(stage_c, 17))
+	sx := i32((f32(WIN_W) - sw) / 2)
+	_text(stage_c, sx, cy + 66, 17, COL_ORANGE)
 	ellipsis := "..."
 	dots := (frame / (FPS / 2)) % 4
-	_text(fmt.ctprintf("%s%s", stage, ellipsis[:dots]), WIN_W/2 - 110, cy + 66, 17, COL_ORANGE)
+	_text(fmt.ctprintf("%s", ellipsis[:dots]), sx + i32(sw), cy + 66, 17, COL_ORANGE)
 
 	elapsed := frame / FPS
-	_text(fmt.ctprintf("%ds elapsed", elapsed), WIN_W/2 - 110, cy + 92, 14, COL_DIM)
+	_text_centered(fmt.ctprintf("%ds elapsed", elapsed), cy + 92, 14, COL_DIM)
 
 	// Indeterminate sweep bar.
 	bar_w := i32(340)

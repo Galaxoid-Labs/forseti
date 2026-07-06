@@ -855,6 +855,14 @@ main :: proc() {
 	if cfg.gui {
 		boot := new(gui.Boot)
 		boot.info.network = cfg.network
+		boot.request_shutdown = proc() {
+			if _g_rpc_server != nil {
+				rpc.rpc_server_stop(_g_rpc_server)
+			}
+			if _g_conn_manager != nil {
+				p2p.conn_manager_shutdown(_g_conn_manager)
+			}
+		}
 		nd := new(_Node_Thread_Data)
 		nd.cfg = &cfg
 		nd.log_level = log_level
@@ -864,18 +872,9 @@ main :: proc() {
 			context.logger = log.create_console_logger(nd.log_level, {.Level, .Time, .Terminal_Color})
 			_node_main(nd.cfg, nd.log_level, nd.boot)
 		})
-		if gui.run_boot(boot) {
-			// Window closed (during load, after, or init failed) — same
-			// graceful path as SIGINT; harmless if init never got that far.
-			if _g_rpc_server != nil {
-				rpc.rpc_server_stop(_g_rpc_server)
-			}
-			if _g_conn_manager != nil {
-				p2p.conn_manager_shutdown(_g_conn_manager)
-			}
-		}
-		// Window closed or unavailable: wait for the node to finish teardown
-		// (or run headless indefinitely if no window could be created).
+		// run_boot triggers shutdown itself and holds the window open until
+		// boot.stopped — returning false means no display session (headless).
+		gui.run_boot(boot)
 		thread.join(node_thread)
 		thread.destroy(node_thread)
 		free(nd)
@@ -894,6 +893,11 @@ _Node_Thread_Data :: struct {
 // thread headless/TUI; on a worker thread under --gui, publishing readiness
 // through `boot` while gui.run_boot animates startup on the main thread.
 _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
+	// Registered first = runs LAST, after every teardown defer below has
+	// finished — the GUI holds its shutdown screen until this flips.
+	defer if boot != nil {
+		boot.stopped = true
+	}
 	// Any early-return before readiness is an init failure — tell the GUI.
 	defer if boot != nil && !boot.ready {
 		boot.failed = true

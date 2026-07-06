@@ -214,6 +214,7 @@ chain_state_destroy :: proc(cs: ^Chain_State) {
 	coins_cache_destroy(&cs.coins)
 	// LevelDB close can trigger compaction after a large flush — log so a slow
 	// shutdown here doesn't look like a hang.
+	Boot_Stage = "Closing databases"
 	log.info("Closing databases...")
 	if cs.filter_db != nil {
 		storage.filter_db_close(cs.filter_db)
