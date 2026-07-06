@@ -103,6 +103,12 @@ mempool_load :: proc(mp: ^Mempool, data_dir: string) -> (loaded: int, skipped: i
 	loaded = 0
 	skipped = 0
 
+	// Entries are saved in map-iteration (random) order, so children can
+	// appear before their unconfirmed parents. Failed Missing_Inputs entries
+	// are retried in extra passes until a pass makes no progress.
+	deferred := make([dynamic]_Persist_Entry, 0, 64, context.temp_allocator)
+	err_counts: [Mempool_Error]int
+
 	for _ in 0 ..< count {
 		fee, fee_err := wire.read_i64le(&r)
 		if fee_err != nil { break }
@@ -121,29 +127,42 @@ mempool_load :: proc(mp: ^Mempool, data_dir: string) -> (loaded: int, skipped: i
 		tx_data := r.data[r.pos:r.pos + int(tx_size)]
 		r.pos += int(tx_size)
 
-		// Deserialize the tx.
-		tx_reader := wire.reader_init(tx_data)
-		tx, tx_err := wire.deserialize_tx(&tx_reader, context.temp_allocator)
-		if tx_err != nil {
-			skipped += 1
-			continue
+		if _load_one(mp, tx_data, orig_time, &err_counts, &deferred) {
+			loaded += 1
 		}
+	}
 
-		// Re-validate and add to mempool.
-		mp_err := mempool_add(mp, &tx)
-		if mp_err != .None {
-			skipped += 1
-			continue
+	// Retry passes for ordering-dependent failures.
+	for len(deferred) > 0 {
+		progress := 0
+		still := make([dynamic]_Persist_Entry, 0, len(deferred), context.temp_allocator)
+		for pe in deferred {
+			tx_reader := wire.reader_init(pe.data)
+			tx, tx_err := wire.deserialize_tx(&tx_reader, context.temp_allocator)
+			if tx_err != nil { continue }
+			mp_err := mempool_add(mp, &tx)
+			if mp_err == .None {
+				txid := wire.tx_id(&tx)
+				if entry, found := mp.entries[txid]; found { entry.time = pe.time }
+				loaded += 1
+				progress += 1
+			} else if mp_err == .Missing_Inputs {
+				append(&still, pe)
+			} else {
+				err_counts[mp_err] += 1
+			}
 		}
+		deferred = still
+		if progress == 0 { break }
+	}
+	for pe in deferred { _ = pe; err_counts[.Missing_Inputs] += 1 }
 
-		// Restore original timestamp.
-		txid := wire.tx_id(&tx)
-		entry, found := mp.entries[txid]
-		if found {
-			entry.time = orig_time
+	for err in Mempool_Error {
+		if err == .None { continue }
+		if err_counts[err] > 0 {
+			skipped += err_counts[err]
+			log.infof("mempool.dat: %d entries skipped: %v", err_counts[err], err)
 		}
-
-		loaded += 1
 	}
 
 	if loaded > 0 || skipped > 0 {
@@ -189,4 +208,35 @@ _write_bytes :: proc(fd: ^os.File, data: []byte) -> bool {
 	}
 	_, err := os.write(fd, data)
 	return err == nil
+}
+
+_Persist_Entry :: struct {
+	fee:  i64,
+	time: i64,
+	data: []byte,
+}
+
+// Try one saved entry: returns true if accepted, defers Missing_Inputs for a
+// retry pass (unconfirmed parent may appear later in the file), tallies
+// everything else.
+_load_one :: proc(mp: ^Mempool, tx_data: []byte, orig_time: i64, err_counts: ^[Mempool_Error]int, deferred: ^[dynamic]_Persist_Entry) -> bool {
+	tx_reader := wire.reader_init(tx_data)
+	tx, tx_err := wire.deserialize_tx(&tx_reader, context.temp_allocator)
+	if tx_err != nil {
+		err_counts[.Non_Standard] += 1
+		return false
+	}
+
+	mp_err := mempool_add(mp, &tx)
+	if mp_err == .None {
+		txid := wire.tx_id(&tx)
+		if entry, found := mp.entries[txid]; found { entry.time = orig_time }
+		return true
+	}
+	if mp_err == .Missing_Inputs {
+		append(deferred, _Persist_Entry{time = orig_time, data = tx_data})
+		return false
+	}
+	err_counts[mp_err] += 1
+	return false
 }
