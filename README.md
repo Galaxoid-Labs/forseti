@@ -511,6 +511,10 @@ ssh -L 8332:localhost:8332 myserver
 
 # One-shot health check, no window
 ./btcnode-gui --probe --cookie=<datadir>/.cookie
+
+# Terminal dashboard (SSH-friendly, no window server needed; q quits)
+./btcnode --tui ...                       # in-process
+./btcnode-gui --tui --cookie=...          # remote, e.g. inside an SSH session
 ```
 
 The client shows a "connection lost" banner and retries when the node goes

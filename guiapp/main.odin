@@ -19,6 +19,7 @@ import "core:strconv"
 import "core:strings"
 import "../gui"
 import "../p2p"
+import "../tui"
 
 Client :: struct {
 	endpoint: net.Endpoint,
@@ -32,6 +33,7 @@ main :: proc() {
 	address := "127.0.0.1:8332"
 	user, pass, cookie_path: string
 	probe := false
+	use_tui := false
 
 	for arg in os.args[1:] {
 		if strings.has_prefix(arg, "--connect=") {
@@ -44,12 +46,15 @@ main :: proc() {
 			cookie_path = arg[len("--cookie="):]
 		} else if arg == "--probe" {
 			probe = true
+		} else if arg == "--tui" {
+			use_tui = true
 		} else if arg == "--help" || arg == "-h" {
 			fmt.println("btcnode-gui — remote dashboard for btcnode")
 			fmt.println("  --connect=<ip:port>    Node RPC address (default: 127.0.0.1:8332)")
 			fmt.println("  --rpcuser=<u> --rpcpassword=<p>   RPC credentials")
 			fmt.println("  --cookie=<path>        Read credentials from a .cookie file")
 			fmt.println("  --probe                Fetch one status snapshot, print it, exit (no window)")
+			fmt.println("  --tui                  Terminal dashboard instead of a window (SSH-friendly)")
 			fmt.println("Remote nodes: tunnel first — ssh -L 8332:localhost:8332 <server>")
 			return
 		}
@@ -99,11 +104,27 @@ main :: proc() {
 		return
 	}
 
-	title := fmt.ctprintf("btcnode-gui — %s", address)
 	fetch :: proc(ud: rawptr) -> (p2p.Node_Status, bool) {
 		c := cast(^Client)ud
 		return _fetch_status(c)
 	}
+
+	// Prime the static info (network/datadir/prune/dbcache) with one fetch —
+	// the renderers take Static_Info by value, so it must be correct up front.
+	_, _ = _fetch_status(&client)
+
+	if use_tui {
+		tinfo := tui.Static_Info{
+			network    = client.info.network,
+			rpc_port   = client.info.rpc_port,
+			dbcache_mb = client.info.dbcache_mb,
+			prune_mb   = client.info.prune_mb,
+			data_dir   = client.info.data_dir,
+		}
+		tui.run_with_source(tinfo, fetch, &client)
+		return
+	}
+	title := fmt.ctprintf("btcnode-gui — %s", address)
 	gui.run_with_source(title, client.info, fetch, &client)
 }
 

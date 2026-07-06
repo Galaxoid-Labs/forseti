@@ -15,6 +15,7 @@ import "crypto"
 import "mempool"
 import "p2p"
 import "gui"
+import "tui"
 import "rpc"
 import "storage"
 import "wire"
@@ -74,6 +75,7 @@ CLI_Flag :: enum {
 	Listen,
 	Peer_Bloom_Filters,
 	Gui,
+	Tui,
 	Prune,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
@@ -113,6 +115,7 @@ CLI_Config :: struct {
 	debug:                  bool,   // enable debug logging (default: false)
 	peer_bloom_filters:     bool,   // BIP111: bloom filter support (default: false)
 	gui:                    bool,   // show GUI dashboard window (default: false = headless)
+	tui:                    bool,   // terminal dashboard (mutually exclusive with --gui)
 	prune_mb:               int,    // prune target in MB (0 = keep all blocks)
 }
 
@@ -181,6 +184,9 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 		} else if arg == "--gui" {
 			cfg.gui = true
 			flags_set += {.Gui}
+		} else if arg == "--tui" {
+			cfg.tui = true
+			flags_set += {.Tui}
 		} else if strings.has_prefix(arg, "--prune=") {
 			val, parse_ok := strconv.parse_int(arg[len("--prune="):])
 			if !parse_ok {
@@ -413,6 +419,7 @@ _print_usage :: proc() {
 	fmt.println("  --blocksonly          Disable tx relay, only sync blocks (default: off)")
 	fmt.println("  --persistmempool=<0|1> Save/load mempool on shutdown/startup (default: 1)")
 	fmt.println("  --gui                  Show GUI dashboard window (default: headless)")
+	fmt.println("  --tui                  Terminal dashboard (for SSH sessions; q quits)")
 	fmt.println("  --prune=<MB>           Delete old block files, keep usage under target (min 550, 0=off)")
 	fmt.println()
 	fmt.println("  --peerbloomfilters=<0|1> Enable BIP 37 bloom filters + BIP 35 mempool msg (default: 0)")
@@ -777,6 +784,11 @@ main :: proc() {
 	// Load config file (CLI flags take precedence).
 	_load_config_file(fmt.tprintf("%s/btcnode.conf", cfg.data_dir), &cfg, flags_set)
 
+	if cfg.gui && cfg.tui {
+		fmt.eprintln("Error: --gui and --tui are mutually exclusive")
+		return
+	}
+
 	// Validate rpcuser/rpcpassword: must set both or neither.
 	has_user := len(cfg.rpc_user) > 0
 	has_pass := len(cfg.rpc_password) > 0
@@ -1086,6 +1098,20 @@ main :: proc() {
 	// runs the dashboard render loop. Closing the window triggers the same
 	// graceful shutdown path as SIGINT. Without --gui nothing here runs and
 	// the node stays fully headless.
+	if cfg.tui && cm != nil {
+		tui_fetch :: proc(ud: rawptr) -> (p2p.Node_Status, bool) {
+			c := cast(^p2p.Conn_Manager)ud
+			if c.shutdown { return {}, false }
+			return p2p.conn_manager_get_status(c), true
+		}
+		if tui.run_with_source(tui.Static_Info{network = cfg.network, rpc_port = rpc_port, dbcache_mb = cfg.db_cache_mb, prune_mb = cfg.prune_mb, data_dir = cfg.data_dir}, tui_fetch, cm, local = true) {
+			if srv != nil {
+				rpc.rpc_server_stop(srv)
+			}
+			p2p.conn_manager_shutdown(cm)
+		}
+	}
+
 	if cfg.gui {
 		if gui.run(cm, cs, gui.Static_Info{network = cfg.network, rpc_port = rpc_port, dbcache_mb = cfg.db_cache_mb, prune_mb = cfg.prune_mb, data_dir = cfg.data_dir}) {
 			// Window was closed (or node stopped) — same path as SIGINT.
