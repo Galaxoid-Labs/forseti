@@ -112,14 +112,25 @@ rpc_server_run :: proc(srv: ^RPC_Server) {
 		thread.create_and_start_with_data(rawptr(arg), _serve_connection, self_cleanup = true)
 	}
 
-	// Force-close remaining client sockets so their threads unblock and exit
-	// before node teardown proceeds.
+	// Force-close remaining client sockets so their threads unblock, then
+	// DRAIN: node teardown follows right after this returns, and a handler
+	// still reading LevelDB when the DB closes is a use-after-free inside
+	// leveldb (chainstate corruption risk). Threads deregister themselves;
+	// bound the wait so a wedged handler can't hold shutdown hostage.
 	sync.mutex_lock(&srv.conn_mutex)
 	for s in srv.conns {
 		tcp.close(s)
 	}
-	clear(&srv.conns)
 	sync.mutex_unlock(&srv.conn_mutex)
+	for _ in 0 ..< 500 {
+		sync.mutex_lock(&srv.conn_mutex)
+		remaining := len(srv.conns)
+		sync.mutex_unlock(&srv.conn_mutex)
+		if remaining == 0 {
+			break
+		}
+		time.sleep(10 * time.Millisecond)
+	}
 }
 
 _Conn_Arg :: struct {

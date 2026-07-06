@@ -46,6 +46,7 @@ Chain_State :: struct {
 	prune_target:      int,
 	prune_height:      int,
 	last_flush_height: int,
+	last_halt_log_height: int, // rate-limits the validation-halt error log
 }
 
 Block_Profile :: struct {
@@ -1003,7 +1004,10 @@ connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 =
 			} else {
 				// Validation error (Bad_Script, Consensus_Error, etc.) — re-downloading
 				// won't help. Log and stop connecting; block stays stored but unconnected.
-				log.errorf("Block validation FAILED at height %d: %v — halting chain progress", next_entry.height, cerr)
+				if cs.last_halt_log_height != next_entry.height {
+					cs.last_halt_log_height = next_entry.height
+					log.errorf("Block validation FAILED at height %d: %v — halting chain progress", next_entry.height, cerr)
+				}
 			}
 			return connected, cerr
 		}
@@ -1149,11 +1153,28 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 		return
 	}
 
-	// If the block index extends beyond the meta tip, strip Valid_Chain
-	// from entries above meta_height so they get replayed.
+	// If the block index extends beyond the meta tip, the UTXO set on disk
+	// may reflect ANY partially-flushed state in (meta_tip, index_tip]: a
+	// flush writes data chunks before the tip marker, so a failed or
+	// interrupted flush leaves data ahead of the tip. Naively reconnecting
+	// blocks over such a state dies on already-spent inputs (mainnet wedge
+	// at 729,325, 2026-07-06). Undo-based rollback is state-independent:
+	// force every key in the range to its pre-block value from the rev
+	// files, which converges to the exact set @meta_tip no matter which
+	// subset of writes landed (Bitcoin Core's ReplayBlocks approach).
+	// Blocks in this range are above the last flush point, so pruning has
+	// never touched their block/undo data.
 	if best_valid.height > meta_height {
-		log.infof("Crash recovery: index tip %d > meta tip %d, rolling back %d blocks",
+		log.infof("Crash recovery: index tip %d > meta tip %d, rolling back %d blocks via undo data",
 			best_valid.height, meta_height, best_valid.height - meta_height)
+
+		for entry := best_valid; entry != nil && entry.height > meta_height; entry = entry.prev {
+			if rerr := _rollback_block_for_recovery(cs, entry); rerr != .None {
+				log.errorf("Crash recovery: rollback failed at height %d (%v) — UTXO set may be inconsistent",
+					entry.height, rerr)
+				break
+			}
+		}
 
 		for _, entry in cs.block_index.entries {
 			if .Valid_Chain in entry.status && entry.height > meta_height {
@@ -1161,6 +1182,53 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 			}
 		}
 	}
+}
+
+// Force-undo one block into the coins cache, tolerant of partially-applied
+// on-disk state: created outputs are deleted whether or not they exist;
+// spent inputs are restored unconditionally from the undo record. Purely
+// mechanical — no validation, no active_chain interaction (recovery runs
+// before the active chain is rebuilt).
+_rollback_block_for_recovery :: proc(cs: ^Chain_State, entry: ^Block_Index_Entry) -> Chain_Error {
+	if .Has_Data not_in entry.status || .Has_Undo not_in entry.status {
+		return .Storage_Error
+	}
+
+	loc := storage.Block_Location{
+		file_num    = entry.file_num,
+		data_offset = entry.data_offset,
+		data_size   = entry.data_size,
+	}
+	raw, rerr := storage.block_db_read_raw(&cs.block_db, loc, context.temp_allocator)
+	if rerr != .None {
+		return .Storage_Error
+	}
+	r := wire.reader_init(raw)
+	block, derr := wire.deserialize_block(&r, context.temp_allocator)
+	if derr != nil {
+		return .Storage_Error
+	}
+
+	undo, uerr := read_block_undo(&cs.undo_files, entry, context.temp_allocator)
+	if uerr != .None {
+		return uerr
+	}
+
+	for tx_idx := len(block.txs) - 1; tx_idx >= 0; tx_idx -= 1 {
+		tx := block.txs[tx_idx]
+		txid := wire.tx_id(&tx)
+		for out_idx := len(tx.outputs) - 1; out_idx >= 0; out_idx -= 1 {
+			op := wire.Outpoint{hash = txid, index = u32(out_idx)}
+			coins_cache_spend(&cs.coins, op) // missing already = fine
+		}
+	}
+	for i in 0 ..< len(undo.spent_coins) {
+		uc := undo.spent_coins[i]
+		coins_cache_restore(&cs.coins, uc.outpoint, uc.coin)
+	}
+
+	free_all(context.temp_allocator)
+	return .None
 }
 
 // Read chain tip metadata from LevelDB chainstate database.

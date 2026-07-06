@@ -48,6 +48,7 @@ Sync_Manager :: struct {
 	chain:              ^chain.Chain_State,
 	params:             ^consensus.Chain_Params,
 	mp:                 ^mempool.Mempool,
+	last_halt_log_height: int, // rate-limits the validation-halt error (once per height, not per tick)
 	state:              Sync_State,
 	headers_received:   int,
 	best_header_height: int,
@@ -325,7 +326,10 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 	connected, cerr := chain.connect_pending_blocks(sm.chain, &redownload)
 	if cerr != .None && cerr != .Storage_Error {
 		_, tip_height := chain.chain_tip(sm.chain)
-		log.errorf("Block validation failed at height %d: %v — sync halted", tip_height + 1, cerr)
+		if sm.last_halt_log_height != tip_height + 1 {
+			sm.last_halt_log_height = tip_height + 1
+			log.errorf("Block validation failed at height %d: %v — sync halted", tip_height + 1, cerr)
+		}
 		// Don't requeue or request more blocks — chain is stuck.
 		return
 	}
