@@ -75,7 +75,11 @@ bip324_derive_keys :: proc(shared_secret: [32]u8, initiating: bool, network_magi
 
 // --- FSChaCha20 (length encryption) ---
 
-REKEY_INTERVAL :: u64(1 << 24) // 16777216
+// BIP324: both ciphers rekey every 224 messages. Getting this wrong is
+// invisible in light traffic and fatal under load: the peer rekeys at packet
+// 224 and our cipher goes stale — every v2 IBD session died ~45-70s in
+// (the original 'v2transport sync stalls' bug).
+REKEY_INTERVAL :: u64(224)
 
 FSChaCha20 :: struct {
 	cc:            chacha20.Context,
@@ -166,16 +170,24 @@ fschacha20poly1305_open :: proc(ctx: ^FSChaCha20Poly1305, dst, aad, ciphertext, 
 }
 
 _fschacha20poly1305_rekey :: proc(ctx: ^FSChaCha20Poly1305) {
-	// Nonce = LE32(0) || LE64(rekey_counter) — chunk part is 0 after rekey.
-	rekey_counter := ctx.counter / REKEY_INTERVAL
+	// BIP324: new_key = AEAD_Encrypt(key, nonce = 0xFFFFFFFF || LE64(epoch),
+	// aad = "", plaintext = 32 zero bytes)[:32] — where epoch is the rekey
+	// counter of the packet just processed (counter has already been
+	// incremented past the boundary, hence counter - 1). The previous
+	// implementation derived from a raw ChaCha20 keystream with the wrong
+	// epoch: every v2 session desynced at its first rekey (packet 224).
+	epoch := (ctx.counter - 1) / REKEY_INTERVAL
 	nonce: [12]byte
-	endian.unchecked_put_u64le(nonce[4:], rekey_counter)
+	nonce[0] = 0xff; nonce[1] = 0xff; nonce[2] = 0xff; nonce[3] = 0xff
+	endian.unchecked_put_u64le(nonce[4:], epoch)
 
-	cc: chacha20.Context
-	chacha20.init(&cc, ctx.key[:], nonce[:])
+	zeros: [32]byte
 	new_key: [32]byte
-	chacha20.keystream_bytes(&cc, new_key[:])
-	chacha20.reset(&cc)
+	tag: [16]byte
+	aead_ctx: chacha20poly1305.Context
+	chacha20poly1305.init(&aead_ctx, ctx.key[:])
+	chacha20poly1305.seal(&aead_ctx, new_key[:], tag[:], nonce[:], nil, zeros[:])
+	chacha20poly1305.reset(&aead_ctx)
 
 	ctx.key = new_key
 }
