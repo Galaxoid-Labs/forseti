@@ -1725,6 +1725,7 @@ RPC_METHODS := [?]string{
 	"getmempoolinfo",
 	"getmemoryinfo",
 	"getmininginfo",
+	"getnodestatus",
 	"getnettotals",
 	"getnetworkhashps",
 	"getnetworkinfo",
@@ -1810,6 +1811,7 @@ _get_method_help :: proc(method: string) -> string {
 	case "gettxoutsetinfo":      return "gettxoutsetinfo\nReturns statistics about the unspent transaction output set."
 	case "help":                 return "help ( \"method\" )\nList all commands, or get help for a specified command."
 	case "getmininginfo":        return "getmininginfo\nReturns a json object containing mining-related information."
+	case "getnodestatus":        return "getnodestatus\nReturns the dashboard status snapshot (chain, sync, peers, mempool, cache, profile)."
 	case "getnetworkhashps":     return "getnetworkhashps ( nblocks height )\nReturns the estimated network hashes per second."
 	case "getnettotals":         return "getnettotals\nReturns information about network traffic."
 	case "validateaddress":      return "validateaddress \"address\"\nReturn information about the given bitcoin address."
@@ -2741,4 +2743,63 @@ _handle_verifymessage :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respo
 	}
 
 	return _make_result(json.Value(json.Boolean(false)), srv._current_id)
+}
+
+// Dashboard status snapshot — everything the GUI renders, for remote
+// dashboards. Mirrors p2p.Node_Status plus the node's static config.
+_handle_getnodestatus :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	if srv.cm == nil {
+		return _make_error(.Internal_Error, "P2P not running", srv._current_id)
+	}
+	st := p2p.conn_manager_get_status(srv.cm)
+
+	obj := make(json.Object, 40, context.temp_allocator)
+	obj["network"] = json.Value(json.String(srv.params.name))
+	obj["data_dir"] = json.Value(json.String(srv.data_dir))
+	obj["prune_mb"] = json.Value(json.Integer(i64(srv.chain.prune_target / 1_048_576)))
+	obj["dbcache_mb"] = json.Value(json.Integer(i64(srv.chain.coins.budget / 1_048_576)))
+
+	obj["chain_height"] = json.Value(json.Integer(i64(st.chain_height)))
+	obj["best_header"] = json.Value(json.Integer(i64(st.best_header)))
+	obj["sync_state"] = json.Value(json.Integer(i64(st.sync_state)))
+	obj["blocks_remaining"] = json.Value(json.Integer(i64(st.blocks_remaining)))
+	obj["blocks_in_flight"] = json.Value(json.Integer(i64(st.blocks_in_flight)))
+	obj["verification_pct"] = json.Value(json.Float(st.verification_pct))
+	obj["eta_secs"] = json.Value(json.Integer(st.eta_secs))
+	obj["mempool_count"] = json.Value(json.Integer(i64(st.mempool_count)))
+	obj["mempool_vbytes"] = json.Value(json.Integer(i64(st.mempool_vbytes)))
+	obj["utxo_cache_count"] = json.Value(json.Integer(i64(st.utxo_cache_count)))
+	obj["utxo_cache_bytes"] = json.Value(json.Integer(i64(st.utxo_cache_bytes)))
+	obj["utxo_cache_budget"] = json.Value(json.Integer(i64(st.utxo_cache_budget)))
+	obj["prof_blocks"] = json.Value(json.Integer(i64(st.prof_blocks)))
+	obj["prof_ms_per_block"] = json.Value(json.Float(st.prof_ms_per_block))
+	obj["prof_read_pct"] = json.Value(json.Float(st.prof_read_pct))
+	obj["prof_prefetch_pct"] = json.Value(json.Float(st.prof_prefetch_pct))
+	obj["prof_valid_pct"] = json.Value(json.Float(st.prof_valid_pct))
+	obj["prof_utxo_pct"] = json.Value(json.Float(st.prof_utxo_pct))
+	obj["prof_scripts_pct"] = json.Value(json.Float(st.prof_scripts_pct))
+	obj["prof_undo_pct"] = json.Value(json.Float(st.prof_undo_pct))
+	obj["uptime_secs"] = json.Value(json.Integer(st.uptime_secs))
+	obj["disk_usage"] = json.Value(json.Integer(st.disk_usage))
+
+	peers := make(json.Array, 0, st.peer_count, context.temp_allocator)
+	for i in 0 ..< st.peer_count {
+		ps := &st.peers[i]
+		po := make(json.Object, 12, context.temp_allocator)
+		po["id"] = json.Value(json.Integer(i64(ps.id)))
+		po["address"] = json.Value(json.String(string(ps.address[:ps.addr_len])))
+		po["agent"] = json.Value(json.String(string(ps.user_agent[:ps.agent_len])))
+		po["inbound"] = json.Value(json.Boolean(ps.inbound))
+		po["start_height"] = json.Value(json.Integer(i64(ps.start_height)))
+		po["bytes_sent"] = json.Value(json.Integer(ps.bytes_sent))
+		po["bytes_recv"] = json.Value(json.Integer(ps.bytes_recv))
+		po["blocks_delivered"] = json.Value(json.Integer(i64(ps.blocks_delivered)))
+		po["blocks_in_flight"] = json.Value(json.Integer(i64(ps.blocks_in_flight)))
+		po["throughput"] = json.Value(json.Float(ps.throughput))
+		po["last_recv_secs"] = json.Value(json.Integer(ps.last_recv_secs))
+		append(&peers, json.Value(po))
+	}
+	obj["peers"] = json.Value(peers)
+
+	return _make_result(json.Value(obj), srv._current_id)
 }

@@ -16,6 +16,9 @@ deps:
 build: deps
 	odin build . -out:btcnode -extra-linker-flags:"$(CXX_LINK)"
 
+gui: deps
+	odin build guiapp -out:btcnode-gui -extra-linker-flags:"$(CXX_LINK)"
+
 test: deps
 	odin test crypto -extra-linker-flags:"$(CXX_LINK)" -define:ODIN_TEST_THREADS=1
 	odin test wire -extra-linker-flags:"$(CXX_LINK)"

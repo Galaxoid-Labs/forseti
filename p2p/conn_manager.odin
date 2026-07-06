@@ -89,6 +89,9 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 	cm.network_magic = params.network_magic
 	cm.next_peer_id = 1
 	cm.started_at = time.to_unix_seconds(time.now())
+	// Snapshot updates are cheap (a map walk at 1 Hz); always on so remote
+	// dashboards (getnodestatus RPC) work against headless nodes.
+	cm.status_enabled = true
 	cm.shutdown = false
 	cm.max_outbound = MAX_OUTBOUND_FULL_RELAY
 

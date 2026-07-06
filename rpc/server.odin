@@ -295,6 +295,8 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_help(srv, req.params)
 	case "getmininginfo":
 		return _handle_getmininginfo(srv, req.params)
+	case "getnodestatus":
+		return _handle_getnodestatus(srv, req.params)
 	case "getnetworkhashps":
 		return _handle_getnetworkhashps(srv, req.params)
 	case "getnettotals":

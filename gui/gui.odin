@@ -119,14 +119,38 @@ _sync_state_label :: proc(s: p2p.Sync_State) -> (string, rl.Color) {
 	return "Unknown", COL_DIM
 }
 
-// Run the GUI render loop on the calling (main) thread. Returns when the
-// window is closed or the node shuts down. cm may be nil (--no-p2p): a
-// minimal chain-only view is shown. Returns false if no window could be
-// created (no display session) so the caller can stay headless.
+// Status provider: fetch the next snapshot. ok=false means the source is
+// currently unavailable (remote node unreachable) — the dashboard keeps the
+// last snapshot on screen with a disconnected banner.
+Status_Fetch :: proc(ud: rawptr) -> (st: p2p.Node_Status, ok: bool)
+
+// Run the GUI render loop on the calling (main) thread against a local node.
+// Returns when the window is closed or the node shuts down. cm may be nil
+// (--no-p2p): a minimal chain-only view is shown. Returns false if no window
+// could be created (no display session) so the caller can stay headless.
 run :: proc(cm: ^p2p.Conn_Manager, cs: ^chain.Chain_State, info: Static_Info) -> bool {
+	if cm == nil {
+		return _run_window("bitcoin-node-odin", info, nil, nil, cs, local = true)
+	}
+	fetch :: proc(ud: rawptr) -> (p2p.Node_Status, bool) {
+		cm := cast(^p2p.Conn_Manager)ud
+		if cm.shutdown { return {}, false }
+		return p2p.conn_manager_get_status(cm), true
+	}
+	return _run_window("bitcoin-node-odin", info, fetch, cm, nil, local = true)
+}
+
+// Run the dashboard against any status source (e.g. a remote node polled over
+// RPC). fetch is called about once a second; on failure the last snapshot
+// stays on screen with a "connection lost" banner and fetching retries.
+run_with_source :: proc(title: cstring, info: Static_Info, fetch: Status_Fetch, ud: rawptr) -> bool {
+	return _run_window(title, info, fetch, ud, nil, local = false)
+}
+
+_run_window :: proc(title: cstring, info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: ^chain.Chain_State, local: bool) -> bool {
 	rl.SetConfigFlags({.WINDOW_HIGHDPI})
 	rl.SetTraceLogLevel(.WARNING)
-	rl.InitWindow(WIN_W, WIN_H, "bitcoin-node-odin")
+	rl.InitWindow(WIN_W, WIN_H, title)
 	if !rl.IsWindowReady() {
 		// No display session (SSH, daemon context). Log and return — main
 		// falls through to the normal headless thread.join path.
@@ -151,18 +175,39 @@ run :: proc(cm: ^p2p.Conn_Manager, cs: ^chain.Chain_State, info: Static_Info) ->
 		if f.texture.id != 0 { rl.UnloadFont(f) }
 	}
 
+	st: p2p.Node_Status
+	have_status := false
+	connected := false
+	frame := 0
+
 	for !rl.WindowShouldClose() {
-		// Node shut down externally (SIGINT / stop RPC) → close the window too.
-		if cm != nil && cm.shutdown { break }
+		// Fetch about once a second (every FPS frames), starting immediately.
+		if fetch != nil && frame % FPS == 0 {
+			new_st, ok := fetch(ud)
+			if ok {
+				st = new_st
+				have_status = true
+				connected = true
+			} else {
+				connected = false
+				if local { break } // local node shut down → close the window
+			}
+		}
+		frame += 1
 
 		rl.BeginDrawing()
 		rl.ClearBackground(COL_BG)
 
-		if cm != nil {
-			st := p2p.conn_manager_get_status(cm)
-			_draw_dashboard(&st, info)
-		} else {
+		if fetch == nil {
 			_draw_no_p2p(cs, info)
+		} else if have_status {
+			_draw_dashboard(&st, info)
+			if !connected {
+				rl.DrawRectangle(0, 0, WIN_W, 26, rl.Color{0x8a, 0x2a, 0x2a, 0xff})
+				_text("CONNECTION LOST - retrying...", 16, 6, 14, rl.WHITE)
+			}
+		} else {
+			_text(connected ? "Loading..." : "Connecting...", 16, 16, 18, COL_DIM)
 		}
 
 		rl.EndDrawing()

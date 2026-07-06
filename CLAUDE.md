@@ -20,6 +20,9 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 ./btcnode --rpcuser=user --rpcpassword=pass                # Explicit RPC auth
 ./btcnode --server=0                                       # Disable RPC server
 ./btcnode --help                                           # All options
+./btcnode --gui                                            # In-process dashboard window
+./btcnode --prune=2000                                     # Prune old block files to ~2GB
+./btcnode-gui --connect=127.0.0.1:8332 --cookie=<datadir>/.cookie  # Remote dashboard (make gui)
 ```
 
 ## Project Structure
@@ -32,7 +35,9 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 - `chain/` — UTXO cache, block index with skip list, undo data, chain state, parallel verification (7 files)
 - `p2p/` — Peer connections (outbound + inbound), sync manager, connection manager, address manager, BIP324 v2 transport, TCP listener (8 files)
 - `mempool/` — Fee rates, relay policy, validation pipeline, RBF (BIP125), persistence, configurable limits (6 files)
-- `rpc/` — JSON-RPC server, 45 methods, HTTP server (4 files)
+- `rpc/` — JSON-RPC server, 46 methods, HTTP server (4 files)
+- `gui/` — raylib/raygui dashboard (in-process --gui and remote rendering; Cascadia Code embedded via #load)
+- `guiapp/` — standalone `btcnode-gui` binary: polls getnodestatus RPC, renders the gui package remotely (--probe for one-shot CLI check)
 - `deps/` — libsecp256k1 (submodule), ripemd160 (vendored C), leveldb (vendored C++), sha256 (vendored from Bitcoin Core, multi-backend), static libs in deps/lib/
 
 ## Key Architecture
@@ -50,7 +55,7 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 - **RBF (BIP125)**: Full replace-by-fee with fullrbf=true default. `--mempoolfullrbf=0|1` CLI flag. Bandwidth fee uses configurable `--incrementalrelayfee`.
 - **Mempool config**: `Mempool_Config` struct with 16 settings (Bitcoin Core parity). Memory-based size limiting (usage tracking, fee-based eviction, dynamic min_fee). Tx expiry (`--mempoolexpiry`). Ancestor/descendant chain limits (`--limitancestorcount/size`, `--limitdescendantcount/size`). Blocks-only mode (`--blocksonly`). Configurable relay/dust/incremental fees. 15 CLI flags + config file support.
 - **Difficulty validation**: Header nBits verified against `get_next_work_required` (Bitcoin Core's GetNextWorkRequired). Testnet 20-minute minimum difficulty rule (`allow_min_difficulty`). BIP94 testnet4 retarget fix (`enforce_bip94`): uses first block of retarget period's nBits instead of parent's.
-- **RPC**: 45 methods including getpeerinfo (18 fields), getmininginfo, getnetworkhashps, getnettotals, validateaddress, savemempool, ping, help, getmemoryinfo, getrpcinfo, logging, createrawtransaction, combinerawtransaction, signrawtransactionwithkey, getchaintxstats, gettxoutsetinfo, getmempoolancestors, getmempooldescendants, gettxoutproof, verifytxoutproof, signmessagewithprivkey, verifymessage. HTTP Basic Auth via `--rpcuser`/`--rpcpassword` or auto-generated `.cookie` file (Bitcoin Core compatible). `--server=0` disables RPC.
+- **RPC**: 46 methods (getnodestatus feeds the GUI/remote dashboards) including getpeerinfo (18 fields), getmininginfo, getnetworkhashps, getnettotals, validateaddress, savemempool, ping, help, getmemoryinfo, getrpcinfo, logging, createrawtransaction, combinerawtransaction, signrawtransactionwithkey, getchaintxstats, gettxoutsetinfo, getmempoolancestors, getmempooldescendants, gettxoutproof, verifytxoutproof, signmessagewithprivkey, verifymessage. HTTP Basic Auth via `--rpcuser`/`--rpcpassword` or auto-generated `.cookie` file (Bitcoin Core compatible). `--server=0` disables RPC.
 
 ## Build Notes
 

@@ -2,7 +2,7 @@
 
 A Bitcoin full node implementation written in [Odin](https://odin-lang.org/). Built from scratch with no Bitcoin library dependencies — only libsecp256k1 for elliptic curve cryptography, Bitcoin Core's multi-backend SHA-256 (SHA-NI/AVX2/SSE4.1/ARMv8), vendored RIPEMD-160, and LevelDB for storage.
 
-This is an educational/experimental project implementing 33 BIPs. It covers the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, inbound + outbound connections (Bitcoin Core 28 defaults), v2 encrypted transport (BIP324), compact block relay (BIP152), compact block filters (BIP157/158), feefilter (BIP133), wtxid relay (BIP339), addr relay with addrv2 (BIP155), mempool with RBF, and a JSON-RPC interface with 45 methods.
+This is an educational/experimental project implementing 33 BIPs. It covers the core components of a Bitcoin node: cryptographic primitives, wire protocol serialization, script interpretation (including SegWit and Taproot), consensus validation, persistent storage (LevelDB), UTXO management, P2P networking with headers-first sync, inbound + outbound connections (Bitcoin Core 28 defaults), v2 encrypted transport (BIP324), compact block relay (BIP152), compact block filters (BIP157/158), feefilter (BIP133), wtxid relay (BIP339), addr relay with addrv2 (BIP155), mempool with RBF, and a JSON-RPC interface with 46 methods.
 
 ## Status
 
@@ -18,7 +18,7 @@ This is an educational/experimental project implementing 33 BIPs. It covers the 
 | 5 | Persistent Storage (LevelDB) | Complete (18 tests) |
 | 6 | P2P Networking | Complete (33 tests) |
 | 7 | Mempool + Persistence + RBF + Config | Complete (32 tests) |
-| 8 | RPC Interface (45 methods) | Complete (53 tests) |
+| 8 | RPC Interface (46 methods) | Complete (53 tests) |
 | 9 | P2P Integration + CLI + Shutdown | Complete |
 | 10 | Signet Sync (BIP325) | Complete |
 | 11 | LevelDB Storage Migration | Complete |
@@ -187,6 +187,7 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 |------|-------------|---------|
 | `--network=<name>` | `mainnet`, `testnet3`, `testnet4`, `signet`, `regtest` | `regtest` |
 | `--gui` | Show GUI dashboard window (raylib; node stays headless without it) | headless |
+| `--prune=<MB>` | Delete old block files, keep blk+rev usage under target (min 550, 0=off). Pruned nodes advertise `NODE_NETWORK_LIMITED` only | 0 (keep all) |
 | `--datadir=<path>` | Data directory for blocks, index, UTXO database | `/tmp/btcnode-data` |
 | `--rpcport=<port>` | JSON-RPC port | Network default |
 | `--rpcuser=<user>` | RPC auth username | Cookie auth |
@@ -489,6 +490,33 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 
 - **`generatetoaddress` RPC** — Regtest block generation for self-contained testing
 - **Block pruning** — Discard old block data to reduce disk usage on mainnet
+
+## GUI Dashboard
+
+Two ways to get the dashboard (raylib/raygui, Cascadia Code, dark theme):
+
+**In-process** — `./btcnode --gui ...` renders on the otherwise-idle main
+thread. Closing the window is a graceful shutdown. Without `--gui` the node is
+fully headless (the status snapshot is still maintained for RPC).
+
+**Standalone remote client** — `make gui` builds `btcnode-gui`, which polls any
+node's `getnodestatus` RPC once a second and renders the same dashboard:
+
+```bash
+# Local node
+./btcnode-gui --cookie=<datadir>/.cookie
+
+# Remote node (RPC binds localhost only — tunnel first)
+ssh -L 8332:localhost:8332 myserver
+./btcnode-gui --connect=127.0.0.1:8332 --rpcuser=user --rpcpassword=pass
+
+# One-shot health check, no window
+./btcnode-gui --probe --cookie=<datadir>/.cookie
+```
+
+The client shows a "connection lost" banner and retries when the node goes
+away. `getnodestatus` returns the full snapshot (chain, sync progress + ETA,
+per-peer table, mempool, UTXO cache, block profile, disk usage) as JSON.
 
 ## Architecture Notes
 
