@@ -66,22 +66,26 @@ _handle_getblockchaininfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_R
 	header_height := chain.chain_header_height(srv.chain)
 
 	obj := make(json.Object, 16, context.temp_allocator)
-	obj["chain"] = json.Value(json.String(srv.params.name))
+	obj["chain"] = json.Value(json.String(_bip70_chain_name(srv.params.name)))
 	obj["blocks"] = json.Value(json.Integer(height))
 	obj["headers"] = json.Value(json.Integer(header_height))
 	obj["bestblockhash"] = json.Value(json.String(_hash_to_hex(tip_hash)))
 
-	// Difficulty and time from tip block
+	// Difficulty, time, and cumulative work from tip block
 	tip_entry, tip_found := srv.chain.block_index.entries[tip_hash]
 	if tip_found {
 		obj["difficulty"] = json.Value(json.Float(consensus.get_difficulty(tip_entry.bits)))
 		obj["time"] = json.Value(json.Integer(i64(tip_entry.timestamp)))
 		obj["mediantime"] = json.Value(json.Integer(i64(_get_median_time(srv, tip_entry))))
+		obj["chainwork"] = json.Value(json.String(_bytes_to_hex(tip_entry.chain_work[:])))
 	} else {
 		obj["difficulty"] = json.Value(json.Float(0.0))
 		obj["time"] = json.Value(json.Integer(0))
 		obj["mediantime"] = json.Value(json.Integer(0))
+		zero_work: [32]byte
+		obj["chainwork"] = json.Value(json.String(_bytes_to_hex(zero_work[:])))
 	}
+	obj["size_on_disk"] = json.Value(json.Integer(chain.disk_usage(srv.chain)))
 
 	// Verification progress: blocks / headers (0.0 to 1.0)
 	if header_height > 0 {
@@ -1198,8 +1202,45 @@ _handle_getnetworkinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Resp
 	obj["connections_in"] = json.Value(json.Integer(conn_in))
 	obj["connections_out"] = json.Value(json.Integer(conn_out))
 	obj["networkactive"] = json.Value(json.Boolean(true))
-	obj["relayfee"] = json.Value(json.Float(0.00001000))
+	obj["localrelay"] = json.Value(json.Boolean(!srv.mp.config.blocks_only))
+	obj["timeoffset"] = json.Value(json.Integer(0))
+	obj["networks"] = json.Value(make(json.Array, 0, context.temp_allocator))
+	obj["localaddresses"] = json.Value(make(json.Array, 0, context.temp_allocator))
+	obj["relayfee"] = json.Value(json.Float(_satoshi_to_btc(srv.mp.config.min_relay_tx_fee)))
+	obj["incrementalfee"] = json.Value(json.Float(_satoshi_to_btc(srv.mp.config.incremental_relay_fee)))
+	obj["warnings"] = json.Value(json.String(""))
 
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// Map internal chain params name to the BIP70 network string Bitcoin Core
+// reports (strict clients — bitcoincore-rpc serde — reject anything else).
+_bip70_chain_name :: proc(name: string) -> string {
+	switch name {
+	case "mainnet":
+		return "main"
+	case "testnet3":
+		return "test"
+	}
+	return name // signet, regtest, testnet4 match already
+}
+
+// --- estimatesmartfee ---
+//
+// Minimal Core-shaped estimator: the dynamic mempool floor (or the relay
+// minimum when the mempool is quiet) — honest lower bound, and enough for
+// clients (electrs hard-fails on Method_Not_Found here).
+_handle_estimatesmartfee :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	conf_target, has_target := _get_int_param(params, 0)
+	if !has_target || conf_target < 1 {
+		conf_target = 6
+	}
+
+	floor_sat := max(srv.mp.min_fee, srv.mp.config.min_relay_tx_fee)
+
+	obj := make(json.Object, 2, context.temp_allocator)
+	obj["feerate"] = json.Value(json.Float(_satoshi_to_btc(floor_sat)))
+	obj["blocks"] = json.Value(json.Integer(i64(conf_target)))
 	return _make_result(json.Value(obj), srv._current_id)
 }
 

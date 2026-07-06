@@ -40,27 +40,31 @@ RPC_Error :: struct {
 	message: string,
 }
 
-// Parse a JSON-RPC request body into an RPC_Request.
+// Parse a JSON-RPC request body into an RPC_Request. Parses into temp
+// memory — the per-request free_all reclaims it (parsing on the heap here
+// leaked every request's JSON tree).
 _parse_request :: proc(body: []byte) -> (req: RPC_Request, err: RPC_Error_Code) {
-	parsed, parse_err := json.parse(body, parse_integers = true)
+	parsed, parse_err := json.parse(body, parse_integers = true, allocator = context.temp_allocator)
 	if parse_err != nil {
 		return {}, .Parse_Error
 	}
+	return _request_from_value(parsed)
+}
 
+// Extract a JSON-RPC request from an already-parsed value (single request
+// or one element of a batch array).
+_request_from_value :: proc(parsed: json.Value) -> (req: RPC_Request, err: RPC_Error_Code) {
 	obj, ok := parsed.(json.Object)
 	if !ok {
-		json.destroy_value(parsed)
 		return {}, .Invalid_Request
 	}
 
 	method_val, has_method := obj["method"]
 	if !has_method {
-		json.destroy_value(parsed)
 		return {}, .Invalid_Request
 	}
 	method_str, is_str := method_val.(json.String)
 	if !is_str {
-		json.destroy_value(parsed)
 		return {}, .Invalid_Request
 	}
 

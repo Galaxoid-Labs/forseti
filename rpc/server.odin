@@ -6,6 +6,8 @@ import "core:fmt"
 import "core:log"
 import "core:strconv"
 import "core:strings"
+import "core:sync"
+import "core:thread"
 import "core:time"
 import tcp "core:net"
 
@@ -26,8 +28,15 @@ RPC_Server :: struct {
 	data_dir:     string,
 	rpc_user:     string,
 	rpc_password: string,
-	_current_id:  json.Value, // tracks request id for current dispatch
+	_current_id:  json.Value, // tracks request id for current dispatch (per-connection copy)
+	logger:       log.Logger, // captured at init; connection threads adopt it
+	conn_mutex:   sync.Mutex,
+	conns:        map[tcp.TCP_Socket]bool, // open client sockets, force-closed on stop
+	shared:       ^RPC_Server, // per-connection copies point back at the real server
 }
+
+// Loopback-only server, but bound so a misbehaving client can't exhaust fds.
+MAX_RPC_CONNECTIONS :: 32
 
 // Initialize the RPC server with references to chain state and mempool.
 rpc_server_init :: proc(srv: ^RPC_Server, cs: ^chain.Chain_State, mp: ^mempool.Mempool, params: ^consensus.Chain_Params, port: int, cm: ^p2p.Conn_Manager = nil, data_dir: string = "", rpc_user: string = "", rpc_password: string = "") {
@@ -41,6 +50,9 @@ rpc_server_init :: proc(srv: ^RPC_Server, cs: ^chain.Chain_State, mp: ^mempool.M
 	srv.rpc_password = rpc_password
 	srv.running = false
 	srv.start_time = time.to_unix_seconds(time.now())
+	srv.logger = context.logger
+	srv.conns = make(map[tcp.TCP_Socket]bool)
+	srv.shared = nil
 }
 
 // Bind the TCP socket and start listening.
@@ -61,18 +73,20 @@ rpc_server_start :: proc(srv: ^RPC_Server) -> bool {
 	return true
 }
 
-// Stop the RPC server and close the listener socket.
+// Stop the RPC server and close the listener socket. Callable from a
+// per-connection server copy (the `stop` handler) — acts on the real server.
 rpc_server_stop :: proc(srv: ^RPC_Server) {
-	srv.running = false
-	tcp.close(srv.listener)
+	target := srv.shared != nil ? srv.shared : srv
+	target.running = false
+	tcp.close(target.listener)
 }
 
-// Main accept loop: process one connection at a time.
+// Accept loop: each connection gets its own thread serving keep-alive
+// requests until the client disconnects (Bitcoin Core behavior — electrs
+// and bitcoin-cli hold persistent connections; a single-threaded loop would
+// let one client starve all others, including the GUI's getnodestatus poll).
 rpc_server_run :: proc(srv: ^RPC_Server) {
 	for srv.running {
-		// Free temp allocations from previous request.
-		free_all(context.temp_allocator)
-
 		client, _, accept_err := tcp.accept_tcp(srv.listener)
 		if accept_err != nil {
 			if !srv.running {
@@ -81,32 +95,117 @@ rpc_server_run :: proc(srv: ^RPC_Server) {
 			continue
 		}
 
-		// Read HTTP request body
-		body, auth_header, ok := _read_http_request(client)
-		if ok {
-			// Check authentication if credentials are configured.
-			if len(srv.rpc_user) > 0 && !_check_auth(srv, auth_header) {
-				_send_http_401(client)
-				tcp.close(client)
-				continue
-			}
-
-			// Parse JSON-RPC request
-			req, parse_err := _parse_request(body)
-			if parse_err != nil {
-				resp := _make_error(parse_err, "Parse error", json.Value(nil))
-				resp_bytes := _format_response(resp, context.temp_allocator)
-				_send_http_response(client, resp_bytes)
-			} else {
-				srv._current_id = req.id
-				resp := _dispatch(srv, req)
-				resp_bytes := _format_response(resp, context.temp_allocator)
-				_send_http_response(client, resp_bytes)
-			}
+		sync.mutex_lock(&srv.conn_mutex)
+		too_many := len(srv.conns) >= MAX_RPC_CONNECTIONS
+		if !too_many {
+			srv.conns[client] = true
+		}
+		sync.mutex_unlock(&srv.conn_mutex)
+		if too_many {
+			tcp.close(client)
+			continue
 		}
 
+		arg := new(_Conn_Arg)
+		arg.srv = srv
+		arg.client = client
+		thread.create_and_start_with_data(rawptr(arg), _serve_connection, self_cleanup = true)
+	}
+
+	// Force-close remaining client sockets so their threads unblock and exit
+	// before node teardown proceeds.
+	sync.mutex_lock(&srv.conn_mutex)
+	for s in srv.conns {
+		tcp.close(s)
+	}
+	clear(&srv.conns)
+	sync.mutex_unlock(&srv.conn_mutex)
+}
+
+_Conn_Arg :: struct {
+	srv:    ^RPC_Server,
+	client: tcp.TCP_Socket,
+}
+
+// Serve one client connection: keep-alive request loop, one request at a
+// time. Runs on its own thread with a shallow per-connection copy of the
+// server so _current_id is private (everything else is shared pointers).
+_serve_connection :: proc(data: rawptr) {
+	arg := cast(^_Conn_Arg)data
+	shared := arg.srv
+	client := arg.client
+	free(arg)
+
+	context.logger = shared.logger
+	local := shared^
+	local.shared = shared
+
+	defer {
+		sync.mutex_lock(&shared.conn_mutex)
+		delete_key(&shared.conns, client)
+		sync.mutex_unlock(&shared.conn_mutex)
 		tcp.close(client)
 	}
+
+	for shared.running {
+		// Each connection thread has its own default temp allocator; requests
+		// (JSON parse + response build) live entirely in it.
+		free_all(context.temp_allocator)
+
+		body, auth_header, ok := _read_http_request(client)
+		if !ok {
+			return // client closed (normal keep-alive end) or read error
+		}
+		if len(shared.rpc_user) > 0 && !_check_auth(&local, auth_header) {
+			_send_http_401(client)
+			return
+		}
+		resp_bytes := _handle_body(&local, body)
+		if !_send_http_response(client, resp_bytes) {
+			return
+		}
+	}
+}
+
+// Parse and dispatch one HTTP body: either a single JSON-RPC request or a
+// batch (JSON array of requests → JSON array of responses, same order), as
+// sent by bitcoincore-rpc batch clients like electrs.
+_handle_body :: proc(srv: ^RPC_Server, body: []byte) -> []byte {
+	parsed, parse_err := json.parse(body, parse_integers = true, allocator = context.temp_allocator)
+	if parse_err != nil {
+		resp := _make_error(.Parse_Error, "Parse error", json.Value(nil))
+		return _format_response(resp, context.temp_allocator)
+	}
+
+	if arr, is_batch := parsed.(json.Array); is_batch {
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_byte(&b, '[')
+		for elem, i in arr {
+			if i > 0 {
+				strings.write_byte(&b, ',')
+			}
+			resp: RPC_Response
+			req, req_err := _request_from_value(elem)
+			if req_err != nil {
+				resp = _make_error(req_err, "Invalid request", json.Value(nil))
+			} else {
+				srv._current_id = req.id
+				resp = _dispatch(srv, req)
+			}
+			strings.write_bytes(&b, _format_response(resp, context.temp_allocator))
+		}
+		strings.write_byte(&b, ']')
+		return transmute([]byte)strings.to_string(b)
+	}
+
+	req, req_err := _request_from_value(parsed)
+	if req_err != nil {
+		resp := _make_error(req_err, "Invalid request", json.Value(nil))
+		return _format_response(resp, context.temp_allocator)
+	}
+	srv._current_id = req.id
+	resp := _dispatch(srv, req)
+	return _format_response(resp, context.temp_allocator)
 }
 
 // Read an HTTP POST request body. Parses Content-Length and Authorization header.
@@ -229,11 +328,17 @@ _send_http_401 :: proc(socket: tcp.TCP_Socket) {
 	tcp.send_tcp(socket, transmute([]byte)body)
 }
 
-// Send an HTTP 200 response with JSON body.
-_send_http_response :: proc(socket: tcp.TCP_Socket, body: []byte) {
-	header := fmt.tprintf("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", len(body))
-	tcp.send_tcp(socket, transmute([]byte)header)
-	tcp.send_tcp(socket, body)
+// Send an HTTP 200 response with JSON body. Connection stays open
+// (keep-alive) — the per-connection loop serves the next request.
+_send_http_response :: proc(socket: tcp.TCP_Socket, body: []byte) -> bool {
+	header := fmt.tprintf("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n", len(body))
+	if _, err := tcp.send_tcp(socket, transmute([]byte)header); err != nil {
+		return false
+	}
+	if _, err := tcp.send_tcp(socket, body); err != nil {
+		return false
+	}
+	return true
 }
 
 // Route a request to the appropriate handler.
@@ -255,6 +360,8 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_sendrawtransaction(srv, req.params)
 	case "getmempoolinfo":
 		return _handle_getmempoolinfo(srv, req.params)
+	case "estimatesmartfee":
+		return _handle_estimatesmartfee(srv, req.params)
 	case "getrawmempool":
 		return _handle_getrawmempool(srv, req.params)
 	case "gettxout":

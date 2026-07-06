@@ -643,6 +643,8 @@ _conn_manager_dispatch :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, cmd: string,
 		_conn_manager_handle_tx(cm, peer_id, payload)
 	case wire.CMD_GETDATA:
 		_conn_manager_handle_getdata(cm, peer_id, payload)
+	case wire.CMD_GETHEADERS:
+		_conn_manager_handle_getheaders(cm, peer_id, payload)
 	case wire.CMD_SENDCMPCT:
 		_conn_manager_handle_sendcmpct(cm, peer_id, payload)
 	case wire.CMD_CMPCTBLOCK:
@@ -1013,6 +1015,91 @@ _conn_manager_handle_getdata :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 			peer_send_message(peer, wire.CMD_BLOCK, raw)
 		}
 	}
+}
+
+// Serve an inbound getheaders (Bitcoin Core semantics): find the fork point
+// from the block locator, then send up to 2000 active-chain headers starting
+// at its child, ending early at hash_stop. An empty locator is a single-
+// header request for hash_stop itself. Always replies — an empty headers
+// message tells the peer (e.g. electrs, Core) it is already at our tip.
+MAX_HEADERS_RESULTS :: 2000
+
+_conn_manager_handle_getheaders :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []byte) {
+	r := wire.reader_init(payload)
+	msg, err := wire.deserialize_getheaders(&r, context.temp_allocator)
+	if err != nil {
+		return
+	}
+
+	peer, found := cm.peers[peer_id]
+	if !found {
+		return
+	}
+
+	headers := make([dynamic]wire.Block_Header, 0, 128, context.temp_allocator)
+
+	if len(msg.block_hashes) == 0 {
+		if entry, known := cm.chain.block_index.entries[msg.hash_stop]; known {
+			if hdr, ok := _read_header_from_disk(cm, entry); ok {
+				append(&headers, hdr)
+			}
+		}
+	} else {
+		// First locator hash that lies on our active chain wins; serving
+		// starts at its child. No match = serve from just after genesis.
+		start := 1
+		for lh in msg.block_hashes {
+			entry, known := cm.chain.block_index.entries[lh]
+			if !known {
+				continue
+			}
+			h := entry.height
+			if h < len(cm.chain.active_chain) && cm.chain.active_chain[h] == lh {
+				start = h + 1
+				break
+			}
+		}
+		for h := start; h < len(cm.chain.active_chain) && len(headers) < MAX_HEADERS_RESULTS; h += 1 {
+			entry, known := cm.chain.block_index.entries[cm.chain.active_chain[h]]
+			if !known {
+				break
+			}
+			hdr, ok := _read_header_from_disk(cm, entry)
+			if !ok {
+				break // pruned or header-only tail — stop cleanly
+			}
+			append(&headers, hdr)
+			if entry.hash == msg.hash_stop {
+				break
+			}
+		}
+	}
+
+	peer_send_block_headers(peer, headers[:])
+}
+
+// Read just the 80-byte header of a stored block from the flat files (the
+// block index doesn't carry the merkle root, so headers can't be rebuilt
+// from index fields alone).
+_read_header_from_disk :: proc(cm: ^Conn_Manager, entry: ^chain.Block_Index_Entry) -> (hdr: wire.Block_Header, ok: bool) {
+	if .Has_Data not_in entry.status || entry.data_size < 80 {
+		return {}, false
+	}
+	loc := storage.Block_Location{
+		file_num    = entry.file_num,
+		data_offset = entry.data_offset,
+		data_size   = 80,
+	}
+	raw, rerr := storage.block_db_read_raw(&cm.chain.block_db, loc, context.temp_allocator)
+	if rerr != .None {
+		return {}, false
+	}
+	hr := wire.reader_init(raw)
+	h, derr := wire.deserialize_block_header(&hr)
+	if derr != nil {
+		return {}, false
+	}
+	return h, true
 }
 
 // BIP35: handle mempool message — reply with inv of all mempool txids.
