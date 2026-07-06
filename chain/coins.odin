@@ -1,6 +1,7 @@
 package chain
 
 import "core:log"
+import "core:mem/virtual"
 import "core:mem"
 import "../storage"
 import "../wire"
@@ -22,8 +23,21 @@ Coins_Cache :: struct {
 	db:        ^storage.UTXO_DB,
 	cache:     map[wire.Outpoint]Cache_Entry,
 	allocator: mem.Allocator,
-	mem_usage: int,   // estimated bytes used by cache
+	mem_usage: int,   // estimated bytes of live entries
 	budget:    int,   // max bytes before flush (from dbcache split)
+	// All coin scripts live in this growing arena and are never individually
+	// freed: spent scripts accumulate as dead bytes until full eviction
+	// destroys the arena wholesale, returning memory to the OS. Per-entry
+	// heap alloc/free churned tens of GB per fill-evict cycle and the
+	// allocator retained the pages — RSS ratcheted ~14GB per cycle.
+	script_arena: virtual.Arena,
+}
+
+// Allocator over the cache's script arena. Derived per call — Coins_Cache is
+// returned by value from init, so an allocator captured there would point at
+// the pre-copy stack address (first alloc then parks on a garbage mutex).
+_script_alloc :: proc(cc: ^Coins_Cache) -> mem.Allocator {
+	return virtual.arena_allocator(&cc.script_arena)
 }
 
 coins_cache_init :: proc(db: ^storage.UTXO_DB, budget: int = 440 * 1024 * 1024, allocator := context.allocator) -> Coins_Cache {
@@ -33,15 +47,21 @@ coins_cache_init :: proc(db: ^storage.UTXO_DB, budget: int = 440 * 1024 * 1024, 
 	cc.allocator = allocator
 	cc.budget = budget
 	cc.mem_usage = 0
+	_ = virtual.arena_init_growing(&cc.script_arena, 64 * 1024 * 1024)
 	return cc
 }
 
+// Effective memory footprint: live-entry estimate or the script arena's true
+// allocated bytes (live + dead-until-eviction) plus map overhead, whichever
+// is larger. Budget decisions use this so dead script bytes can't ratchet
+// RSS past the budget.
+_effective_usage :: proc(cc: ^Coins_Cache) -> int {
+	arena_backed := int(cc.script_arena.total_used) + len(cc.cache) * CACHE_ENTRY_OVERHEAD
+	return max(cc.mem_usage, arena_backed)
+}
+
 coins_cache_destroy :: proc(cc: ^Coins_Cache) {
-	for _, entry in cc.cache {
-		if len(entry.coin.script) > 0 {
-			delete(entry.coin.script, cc.allocator)
-		}
-	}
+	virtual.arena_destroy(&cc.script_arena)
 	delete(cc.cache)
 }
 
@@ -57,7 +77,7 @@ coins_cache_get :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage.U
 	}
 
 	// Fall through to DB
-	coin, db_found := storage.utxo_db_get(cc.db, outpoint, cc.allocator)
+	coin, db_found := storage.utxo_db_get(cc.db, outpoint, _script_alloc(cc))
 	if !db_found {
 		return {}, false
 	}
@@ -80,10 +100,10 @@ coins_cache_has :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> bool {
 
 // Add a new UTXO to the cache (Dirty+Fresh).
 coins_cache_add :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: storage.UTXO_Coin) {
-	// Clone script into cache allocator
+	// Clone script into the cache's script arena
 	new_script: []byte
 	if len(coin.script) > 0 {
-		new_script = make([]byte, len(coin.script), cc.allocator)
+		new_script = make([]byte, len(coin.script), _script_alloc(cc))
 		copy(new_script, coin.script)
 	}
 
@@ -117,7 +137,7 @@ coins_cache_spend :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage
 		if len(spent_coin.script) > 0 {
 			temp_script := make([]byte, len(spent_coin.script), context.temp_allocator)
 			copy(temp_script, spent_coin.script)
-			delete(entry.coin.script, cc.allocator)
+			// Arena-owned script becomes dead bytes; reclaimed at full eviction.
 			spent_coin.script = temp_script
 		}
 
@@ -127,7 +147,7 @@ coins_cache_spend :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage
 			delete_key(&cc.cache, outpoint)
 		} else {
 			// Was in DB — leave a spent sentinel so flush deletes it
-			cc.mem_usage -= len(spent_coin.script) // script was freed, only overhead remains
+			cc.mem_usage -= len(spent_coin.script) // script is dead in the arena, only overhead remains
 			entry.coin = storage.UTXO_Coin{}
 			entry.flags = {.Dirty}
 		}
@@ -135,18 +155,11 @@ coins_cache_spend :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage
 		return spent_coin, true
 	}
 
-	// Not in cache — check DB (allocates script on heap)
-	coin, db_found := storage.utxo_db_get(cc.db, outpoint, cc.allocator)
+	// Not in cache — read from DB straight into the block temp arena (the
+	// caller only uses the script within the current block's lifetime).
+	coin, db_found := storage.utxo_db_get(cc.db, outpoint, context.temp_allocator)
 	if !db_found {
 		return {}, false
-	}
-
-	// Clone script to temp allocator and free the heap copy
-	if len(coin.script) > 0 {
-		temp_script := make([]byte, len(coin.script), context.temp_allocator)
-		copy(temp_script, coin.script)
-		delete(coin.script, cc.allocator)
-		coin.script = temp_script
 	}
 
 	// Mark as spent sentinel in cache (no script, just overhead)
@@ -157,10 +170,10 @@ coins_cache_spend :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage
 
 // Restore a previously spent UTXO (for disconnect_block).
 coins_cache_restore :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: storage.UTXO_Coin) {
-	// Clone script
+	// Clone script into the script arena
 	new_script: []byte
 	if len(coin.script) > 0 {
-		new_script = make([]byte, len(coin.script), cc.allocator)
+		new_script = make([]byte, len(coin.script), _script_alloc(cc))
 		copy(new_script, coin.script)
 	}
 
@@ -192,9 +205,10 @@ coins_cache_restore :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: sto
 // committed in a single WriteBatch for crash consistency.
 coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) -> Chain_Error {
 	cache_size := len(cc.cache)
-	log.infof("UTXO flush at height %d: %d entries (%d MB / budget %d MB)",
+	log.infof("UTXO flush at height %d: %d entries (%d MB live, %d MB effective / budget %d MB)",
 		tip_height, cache_size,
 		cc.mem_usage / (1024 * 1024),
+		_effective_usage(cc) / (1024 * 1024),
 		cc.budget / (1024 * 1024))
 
 	batch := storage.ldb_batch_create()
@@ -236,17 +250,16 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 
 	// If over budget, do a full eviction — the UTXO set is too large to keep warm.
 	// This avoids iterating 100M+ entries just to prune sentinels.
-	if cc.mem_usage >= cc.budget {
-		log.infof("Cache over budget (%d MB / %d MB), full eviction (%d entries)",
-			cc.mem_usage / (1024 * 1024), cc.budget / (1024 * 1024), len(cc.cache))
-		for _, entry in cc.cache {
-			if len(entry.coin.script) > 0 {
-				delete(entry.coin.script, cc.allocator)
-			}
-		}
+	if _effective_usage(cc) >= cc.budget {
+		log.infof("Cache over budget (%d MB effective / %d MB), full eviction (%d entries)",
+			_effective_usage(cc) / (1024 * 1024), cc.budget / (1024 * 1024), len(cc.cache))
 		delete(cc.cache)
 		cc.cache = make(map[wire.Outpoint]Cache_Entry, 1024, cc.allocator)
 		cc.mem_usage = 0
+		// Destroy + re-init returns ALL script memory (live and dead) to the
+		// OS in one shot — this is what stops the cross-cycle RSS ratchet.
+		virtual.arena_destroy(&cc.script_arena)
+		_ = virtual.arena_init_growing(&cc.script_arena, 64 * 1024 * 1024)
 	} else {
 		// Under budget — prune spent sentinels and keep live entries warm.
 		keys_to_delete := make([dynamic]wire.Outpoint, 0, deleted, context.temp_allocator)
@@ -270,7 +283,7 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 
 // Returns true when the coins cache memory usage exceeds its budget.
 coins_cache_should_flush :: proc(cc: ^Coins_Cache) -> bool {
-	return cc.mem_usage >= cc.budget
+	return _effective_usage(cc) >= cc.budget
 }
 
 // Merge prefetched UTXO results into the cache (read-only warming).
@@ -282,14 +295,24 @@ coins_cache_prefetch_merge :: proc(cc: ^Coins_Cache, items: []Prefetch_Item) -> 
 	for &item in items {
 		if !item.found { continue }
 		if item.outpoint in cc.cache {
-			// Already in cache — free the heap-allocated script.
+			// Already in cache — free the worker's heap-allocated script.
 			if len(item.coin.script) > 0 {
 				delete(item.coin.script)
 			}
 			continue
 		}
-		cc.cache[item.outpoint] = Cache_Entry{coin = item.coin, flags = {}}
-		cc.mem_usage += CACHE_ENTRY_OVERHEAD + len(item.coin.script)
+		// Move the script into the cache's arena; free the worker's heap copy
+		// immediately (short-lived heap churn is fine — long-lived bytes are
+		// what must live in the arena so eviction can return them wholesale).
+		coin := item.coin
+		if len(coin.script) > 0 {
+			arena_script := make([]byte, len(coin.script), _script_alloc(cc))
+			copy(arena_script, coin.script)
+			delete(item.coin.script)
+			coin.script = arena_script
+		}
+		cc.cache[item.outpoint] = Cache_Entry{coin = coin, flags = {}}
+		cc.mem_usage += CACHE_ENTRY_OVERHEAD + len(coin.script)
 		merged += 1
 	}
 	return merged
