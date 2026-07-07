@@ -57,6 +57,10 @@ Every build phase in order. See the [README](../README.md) for the current summa
 | 48 | Crash Recovery v2 (persisted undo locations, verified rollback, bounded by safety flushes) | Complete |
 | 49 | Single-instance Datadir Lock | Complete |
 | 50 | ZMQ Notifications (native ZMTP, Core zmqpub* parity, LND-ready) | Complete |
+| 51 | Node-control RPCs + bans + createmultisig (59/78 Core coverage) | Complete |
+| 52 | Regtest Mining (generatetoaddress) | Complete |
+| 53 | UTXO Hygiene (skip unspendable outputs, --repairutxo sweep) | Complete |
+| 54 | Dashboard Halt Banners + 100%-at-tip | Complete |
 
 
 ## What's Left to Build
@@ -71,7 +75,5 @@ Every build phase in order. See the [README](../README.md) for the current summa
 
 ### Features
 
-- **`generatetoaddress` RPC** — Regtest block generation for self-contained testing
 
 - **getblocktemplate / submitblock** — mining interface
-- **UTXO repair sweep (`--repairutxo`)** — re-derive spent-ness from local block data on unpruned nodes

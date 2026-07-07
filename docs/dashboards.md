@@ -34,3 +34,7 @@ The node window opens instantly on `--gui`: node initialization runs on a
 background thread while the loading screen shows live stages (database open,
 block index build, crash recovery progress). Closing the window holds it open
 with a "shutting down" status until the final flush completes.
+
+Both dashboards show a red **VALIDATION HALTED at height N (reason)** banner
+if block validation ever wedges (cleared automatically on the next
+successful connect), and display 100% once the node is in sync.
