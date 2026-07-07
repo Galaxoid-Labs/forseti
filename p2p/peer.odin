@@ -16,6 +16,7 @@ Peer :: struct {
 	address:        string,
 	port:           int,
 	inbound:        bool,
+	conn_type:      Connection_Type, // topology role (full/block-relay/feeler/inbound/manual)
 	state:          Peer_State,
 	version:        i32,
 	services:       u64,
@@ -59,9 +60,16 @@ Peer :: struct {
 }
 
 // Start an async connect to a peer. Allocates Peer, adds to cm.peers, kicks off nbio.dial_poly.
-peer_start_connect :: proc(cm: ^Conn_Manager, address: string, port: int, peer_id: Peer_Id) {
+peer_start_connect :: proc(cm: ^Conn_Manager, address: string, port: int, peer_id: Peer_Id, conn_type: Connection_Type = .Full_Relay) {
 	// setnetworkactive gate + ban list (RPC-controlled).
 	if !cm.network_active || conn_manager_is_banned(cm, address) {
+		return
+	}
+	// Never open a second connection to an address we're already dialing or
+	// connected to (the addr manager selects randomly and can return the
+	// same address to different dial paths in one tick). Manual connections
+	// bypass this — the operator asked for it explicitly.
+	if conn_type != .Manual && _conn_manager_already_connected(cm, address) {
 		return
 	}
 	// Direct: the target must be IPv4. Proxied: we dial the PROXY and hand
@@ -83,6 +91,7 @@ peer_start_connect :: proc(cm: ^Conn_Manager, address: string, port: int, peer_i
 	peer.address = strings.clone(address)
 	peer.port = port
 	peer.state = .Connecting
+	peer.conn_type = conn_type
 	peer.network_magic = cm.network_magic
 	peer.cm = cm
 	peer.recv_buf = make([dynamic]byte, 0, 8192)
@@ -576,6 +585,8 @@ _peer_free :: proc(peer: ^Peer) {
 
 // Build and send a version message.
 peer_send_version :: proc(peer: ^Peer, params: ^consensus.Chain_Params, chain_height: int, local_services: u64 = LOCAL_SERVICES) -> Net_Error {
+	// Block-relay-only connections advertise fRelay=false (BIP37 field):
+	// the peer must not send us transaction invs.
 	now := time.now()
 	timestamp := time.to_unix_seconds(now)
 
@@ -588,7 +599,7 @@ peer_send_version :: proc(peer: ^Peer, params: ^consensus.Chain_Params, chain_he
 		nonce        = u64(timestamp) ~ u64(peer.id), // simple nonce
 		user_agent   = wire.NODE_USER_AGENT,
 		start_height = i32(chain_height),
-		relay        = true,
+		relay        = peer.conn_type != .Block_Relay,
 	}
 
 	w := wire.writer_init()

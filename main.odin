@@ -134,6 +134,7 @@ CLI_Config :: struct {
 	rpc_bind:               string, // --rpcbind address (default 127.0.0.1)
 	rpc_allow_ips:          [dynamic]string, // --rpcallowip CIDRs (repeatable)
 	proxy:                  string, // --proxy=ip[:port] SOCKS5 for all outbound P2P
+	max_upload_target_mb:   int,    // --maxuploadtarget in MiB/day (0 = unlimited)
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -205,6 +206,13 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 		} else if arg == "--tui" {
 			cfg.tui = true
 			flags_set += {.Tui}
+		} else if strings.has_prefix(arg, "--maxuploadtarget=") {
+			val, parse_ok := strconv.parse_int(arg[len("--maxuploadtarget="):])
+			if !parse_ok || val < 0 {
+				fmt.eprintln("Error: invalid --maxuploadtarget value")
+				return cfg, flags_set, false
+			}
+			cfg.max_upload_target_mb = val
 		} else if strings.has_prefix(arg, "--proxy=") {
 			cfg.proxy = arg[len("--proxy="):]
 			flags_set += {.Proxy}
@@ -447,6 +455,7 @@ _print_usage :: proc() {
 	fmt.println("  --p2p-port=<port>     P2P listen port (default: network-appropriate)")
 	fmt.println("  --no-p2p              Disable P2P networking (RPC-only mode)")
 	fmt.println("  --listen=<0|1>        Accept inbound P2P connections (default: 1)")
+	fmt.println("  --maxuploadtarget=<MiB> Daily upload budget; when spent, week-old blocks are not served (0=unlimited)")
 	fmt.println("  --proxy=<ip[:port]>   SOCKS5 proxy for ALL outbound P2P (e.g. Tor at 127.0.0.1:9050).")
 	fmt.println("                        Hostname/.onion targets resolve at the proxy (no DNS leak);")
 	fmt.println("                        DNS seeds are contacted through the proxy; inbound is disabled.")
@@ -1255,6 +1264,8 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 			// Continue without P2P — RPC still works.
 		} else {
 			cm.log_level = log_level
+			cm.data_dir = cfg.data_dir
+			cm.max_upload_target = i64(cfg.max_upload_target_mb) * 1024 * 1024
 			cm.blocks_only = cfg.blocks_only
 			cm.max_outbound = p2p.MAX_OUTBOUND_FULL_RELAY
 			cm.v2_transport_enabled = cfg.v2_transport

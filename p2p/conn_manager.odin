@@ -54,6 +54,12 @@ Conn_Manager :: struct {
 	added_mutex:   sync.Mutex,
 	added_nodes:   [dynamic]string, // addnode add list (heap clones)
 	network_active: bool, // setnetworkactive; connects/reconnects gated
+	data_dir:       string, // for anchors.dat
+	last_feeler:    i64,    // unix ts of the last feeler attempt
+	// -maxuploadtarget: rolling 24h upload budget (bytes; 0 = unlimited)
+	max_upload_target:      i64,
+	upload_window_start:    i64,
+	upload_window_baseline: i64,
 	// --proxy: route all outbound connections through this SOCKS5 endpoint;
 	// hostname targets (.onion, DNS-seed names) resolve at the proxy.
 	proxy_set:      bool,
@@ -200,10 +206,12 @@ conn_manager_destroy :: proc(cm: ^Conn_Manager) {
 }
 
 // Count outbound (non-inbound) peers.
+// Full-relay outbound only — block-relay connections and feelers have
+// their own budgets in the topology tick.
 _count_outbound_peers :: proc(cm: ^Conn_Manager) -> int {
 	count := 0
 	for _, peer in cm.peers {
-		if !peer.inbound {
+		if !peer.inbound && (peer.conn_type == .Full_Relay || peer.conn_type == .Manual) {
 			count += 1
 		}
 	}
@@ -222,15 +230,17 @@ _count_inbound_peers :: proc(cm: ^Conn_Manager) -> int {
 }
 
 // Start an async connect to a peer. Returns immediately.
-conn_manager_add_peer :: proc(cm: ^Conn_Manager, address: string, port: int) -> Net_Error {
-	if _count_outbound_peers(cm) >= cm.max_outbound {
+conn_manager_add_peer :: proc(cm: ^Conn_Manager, address: string, port: int, conn_type: Connection_Type = .Full_Relay) -> Net_Error {
+	// Block-relay and feeler connections have their own budgets (topology
+	// tick); only full-relay outbound counts against max_outbound.
+	if conn_type == .Full_Relay && _count_outbound_peers(cm) >= cm.max_outbound {
 		return .Too_Many_Peers
 	}
 
 	peer_id := cm.next_peer_id
 	cm.next_peer_id += 1
 
-	peer_start_connect(cm, address, port, peer_id)
+	peer_start_connect(cm, address, port, peer_id, conn_type)
 	return .None
 }
 
@@ -456,6 +466,11 @@ _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 		_conn_manager_start_listener(cm)
 	}
 
+	// Block-relay slots + feelers.
+	if cm.network_active {
+		_topology_tick(cm, now)
+	}
+
 	// Periodic outbound peer replacement — fill empty slots.
 	// During IBD, only try one replacement per tick to reduce connection churn.
 	outbound_count := _count_outbound_peers(cm)
@@ -529,6 +544,7 @@ _on_accept :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 	cm.next_peer_id += 1
 	peer.socket = op.accept.client
 	peer.inbound = true
+	peer.conn_type = .Inbound_Conn
 	peer.state = .Connecting
 	peer.network_magic = cm.network_magic
 	peer.cm = cm
@@ -594,9 +610,13 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 	// Defer TCP listener until In_Sync — inbound peers during IBD waste event loop cycles.
 	// Listener is started in _on_periodic_timer when sync state transitions to In_Sync.
 
+	// Anchors first: redial last session's block-relay peers (file is
+	// consumed on read).
+	anchors_connect(cm)
+
 	// If --connect was specified, add peer now (event loop is ready).
 	if len(cm.connect_address) > 0 {
-		err := conn_manager_add_peer(cm, cm.connect_address, cm.connect_port)
+		err := conn_manager_add_peer(cm, cm.connect_address, cm.connect_port, .Manual)
 		if err == .None {
 			log.infof("Connecting to manual peer %s:%d", cm.connect_address, cm.connect_port)
 		} else {
@@ -604,8 +624,16 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 		}
 	}
 
-	// Discover peers via DNS if no manual peer was configured.
-	if len(cm.peers) == 0 {
+	// Discover peers via DNS if no manual peer was configured (anchors are
+	// block-relay-only and do not replace full-relay discovery).
+	only_anchors := true
+	for _, peer in cm.peers {
+		if peer.conn_type != .Block_Relay {
+			only_anchors = false
+			break
+		}
+	}
+	if len(cm.peers) == 0 || (only_anchors && len(cm.peers) > 0 && len(cm.connect_address) == 0) {
 		conn_manager_discover_peers(cm)
 
 		connected := 0
@@ -639,6 +667,9 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 
 	// Run the event loop until shutdown.
 	nbio.run_until(&cm.shutdown)
+
+	// Remember the block-relay peers for the next start.
+	anchors_save(cm)
 
 	// Destroy all peers while the event loop is still active on this thread.
 	// peer_destroy calls nbio.remove to cancel pending recv timeouts — this must
@@ -761,7 +792,7 @@ _drain_control_queue :: proc(cm: ^Conn_Manager) {
 			}
 		case .Connect_Once:
 			if cm.network_active && !conn_manager_is_banned(cm, req.address) {
-				peer_start_connect(cm, req.address, req.port, cm.next_peer_id)
+				peer_start_connect(cm, req.address, req.port, cm.next_peer_id, .Manual)
 				cm.next_peer_id += 1
 			}
 		case .Set_Network_Active:
@@ -957,10 +988,13 @@ _conn_manager_handle_version :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 	} else {
 		// Outbound: we sent version first, they're responding.
 		// BIP339/BIP155 (between version and verack), gated on 70016.
+		// Block-relay-only and feeler connections skip addr relay entirely.
 		if peer.version >= WTXID_RELAY_VERSION {
 			peer_send_wtxidrelay(peer)
 			peer.wtxid_relay_us = true
-			peer_send_sendaddrv2(peer)
+			if peer.conn_type != .Block_Relay && peer.conn_type != .Feeler {
+				peer_send_sendaddrv2(peer)
+			}
 		}
 
 		// Send verack in response.
@@ -980,6 +1014,13 @@ _conn_manager_handle_verack :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 	}
 
 	if peer.state == .Handshake_Complete {
+		// Feeler: the handshake IS the probe — the address works. Done.
+		if peer.conn_type == .Feeler {
+			log.debugf("Feeler to %s succeeded", peer.address)
+			conn_manager_remove_peer(cm, peer_id)
+			return
+		}
+
 		// Outbound slots are scarce (8): drop peers that cannot serve blocks
 		// or meaningful tx relay. Crawlers/monitors advertise start_height 0
 		// or an empty user agent; deeply stale nodes are equally useless.
@@ -997,7 +1038,7 @@ _conn_manager_handle_verack :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 		}
 
 		peer.state = .Active
-		log.debugf("Peer %d handshake complete, now active", peer_id)
+		log.debugf("Peer %d handshake complete, now active (%s)", peer_id, connection_type_string(peer.conn_type))
 
 		// Feature messages, each gated on the peer's advertised version
 		// (Core parity — old/strict peers treat unknowns as fatal).
@@ -1007,14 +1048,15 @@ _conn_manager_handle_verack :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 		if peer.version >= COMPACT_BLOCKS_VERSION_GATE {
 			peer_send_sendcmpct(peer, true, COMPACT_BLOCK_VERSION) // BIP152
 		}
-		if cm.mp != nil && peer.version >= FEEFILTER_VERSION {
+		if cm.mp != nil && peer.version >= FEEFILTER_VERSION && peer.conn_type != .Block_Relay {
 			our_fee := max(cm.mp.min_fee, cm.mp.config.min_relay_tx_fee)
 			peer_send_feefilter(peer, our_fee) // BIP133
 		}
 
-		// Request peer's address list — outbound connections only (Core
-		// never getaddrs inbound peers; they connected to us).
-		if !peer.inbound {
+		// Request peer's address list — outbound full-relay connections only
+		// (Core never getaddrs inbound peers, and block-relay-only
+		// connections do no addr relay by design).
+		if !peer.inbound && peer.conn_type != .Block_Relay {
 			peer_send_getaddr(peer)
 		}
 
@@ -1239,6 +1281,15 @@ _conn_manager_handle_getdata :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payloa
 			if !known || .Has_Data not_in idx_entry.status {
 				continue
 			}
+			// -maxuploadtarget: once the 24h budget is spent, stop serving
+			// week-old blocks to inbound peers (tip relay stays unaffected).
+			if peer.inbound && cm.max_upload_target > 0 {
+				now := time.to_unix_seconds(time.now())
+				if upload_target_reached(cm, now) && i64(idx_entry.timestamp) < now - HISTORICAL_BLOCK_SECS {
+					log.debugf("Upload target reached — refusing historical block to peer %d", peer_id)
+					continue
+				}
+			}
 			loc := storage.Block_Location{
 				file_num    = idx_entry.file_num,
 				data_offset = idx_entry.data_offset,
@@ -1403,6 +1454,10 @@ _conn_manager_relay_tx :: proc(cm: ^Conn_Manager, txid, wtxid: Hash256, fee_rate
 
 	for id, peer in cm.peers {
 		if id == from_peer || peer.state != .Active {
+			continue
+		}
+		// Never announce txs on block-relay-only connections.
+		if peer.conn_type == .Block_Relay || peer.conn_type == .Feeler {
 			continue
 		}
 
@@ -1579,8 +1634,9 @@ _conn_manager_v2_fallback :: proc(cm: ^Conn_Manager, peer: ^Peer) {
 	sync_handle_disconnect(&cm.sync_mgr, peer.id, &cm.peers)
 	conn_manager_remove_peer(cm, peer.id)
 
-	// Reconnect to same address with v1.
-	conn_manager_add_peer(cm, addr, port)
+	// Reconnect to same address with v1, preserving the connection type
+	// (a block-relay anchor must not silently become full-relay).
+	conn_manager_add_peer(cm, addr, port, peer.conn_type)
 	delete(addr)
 }
 
@@ -1596,7 +1652,7 @@ _conn_manager_replace_peer :: proc(cm: ^Conn_Manager) {
 		if !ok {
 			break
 		}
-		if _addr_is_useless(cm, addr_str) {
+		if _addr_is_useless(cm, addr_str) || _conn_manager_already_connected(cm, addr_str) {
 			delete(addr_str)
 			continue
 		}

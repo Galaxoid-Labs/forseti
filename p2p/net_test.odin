@@ -2,6 +2,7 @@ package p2p
 
 import "core:encoding/hex"
 import "core:fmt"
+import "core:os"
 import "core:testing"
 
 import "../chain"
@@ -1118,4 +1119,43 @@ test_parse_proxy_endpoint :: proc(t: ^testing.T) {
 	testing.expect(t, !bad, "hostname proxy rejected (proxy must be an IP)")
 	_, bad2 := parse_proxy_endpoint("10.0.0.1:99999", 9050)
 	testing.expect(t, !bad2, "bad port rejected")
+}
+
+@(test)
+test_anchors_roundtrip :: proc(t: ^testing.T) {
+	dir := fmt.tprintf("/tmp/btcnode_anchors_%d", 42)
+	os.make_directory(dir)
+	defer os.remove(fmt.tprintf("%s/anchors.dat", dir))
+	defer os.remove(dir)
+
+	cm: Conn_Manager
+	cm.data_dir = dir
+	cm.peers = make(map[Peer_Id]^Peer, 4)
+	defer delete(cm.peers)
+
+	p1 := new(Peer, context.temp_allocator)
+	p1.address = "203.0.113.7"
+	p1.port = 8333
+	p1.conn_type = .Block_Relay
+	p1.state = .Active
+	p2 := new(Peer, context.temp_allocator)
+	p2.address = "203.0.113.9"
+	p2.port = 8333
+	p2.conn_type = .Full_Relay // must NOT be anchored
+	p2.state = .Active
+	cm.peers[1] = p1
+	cm.peers[2] = p2
+
+	anchors_save(&cm)
+	data, rerr := os.read_entire_file(fmt.tprintf("%s/anchors.dat", dir), context.temp_allocator)
+	testing.expect(t, rerr == nil, "anchors.dat written")
+	testing.expect_value(t, string(data), "203.0.113.7:8333\n")
+
+	// Consume: network_active=false so no dial actually happens, but the
+	// file must be read and DELETED.
+	clear(&cm.peers)
+	cm.network_active = false
+	dialed := anchors_connect(&cm)
+	testing.expect_value(t, dialed, 1)
+	testing.expect(t, !os.exists(fmt.tprintf("%s/anchors.dat", dir)), "anchors.dat consumed")
 }

@@ -1187,10 +1187,10 @@ _handle_getpeerinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respons
 		obj["version"] = json.Value(json.Integer(i64(peer.version)))
 		obj["subver"] = json.Value(json.String(peer.user_agent))
 		obj["inbound"] = json.Value(json.Boolean(peer.inbound))
+		obj["connection_type"] = json.Value(json.String(p2p.connection_type_string(peer.conn_type)))
 		obj["startingheight"] = json.Value(json.Integer(i64(peer.start_height)))
 		obj["synced_headers"] = json.Value(json.Integer(srv.cm.sync_mgr.best_header_height))
 		obj["synced_blocks"] = json.Value(json.Integer(chain.chain_height(srv.chain)))
-		obj["connection_type"] = json.Value(json.String("inbound" if peer.inbound else "outbound-full-relay"))
 		obj["transport_protocol_type"] = json.Value(json.String("v2" if (peer.v2 != nil && peer.v2.state == .Active) else "v1"))
 
 		// Peer sync state
