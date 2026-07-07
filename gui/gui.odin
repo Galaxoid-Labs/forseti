@@ -229,44 +229,68 @@ run_boot :: proc(boot: ^Boot) -> bool {
 	for !boot.stopped {
 		rl.BeginDrawing()
 		rl.ClearBackground(COL_BG)
-		_draw_shutdown(frame)
+		_draw_shutdown(boot, frame)
 		rl.EndDrawing()
 		frame += 1
 	}
 	return true
 }
 
-_draw_shutdown :: proc(frame: int) {
+_draw_shutdown :: proc(boot: ^Boot, frame: int) {
 	cy := i32(WIN_H/2 - 60)
 	_text_centered("bitcoin-node-odin", cy, 26, COL_TEXT)
 	_text_centered("Shutting down", cy + 40, 20, COL_ORANGE)
 
-	stage := string(chain.Boot_Stage)
-	if stage == "" {
-		stage = "Stopping network and RPC"
+	// Real UTXO-flush progress when the shutdown flush is running (the coins
+	// cache publishes flush_progress/flush_total/flushing — plain ints, safe
+	// to read cross-thread). flush_progress == flush_total = the commit phase.
+	flushing := boot.cs != nil && boot.cs.coins.flushing
+	prog := flushing ? boot.cs.coins.flush_progress : 0
+	total := flushing ? boot.cs.coins.flush_total : 0
+	scanning := flushing && total > 0 && prog < total
+
+	stage: string
+	switch {
+	case scanning: stage = "Flushing UTXO cache to disk"
+	case flushing: stage = "Committing UTXO cache to LevelDB"
+	case:
+		stage = string(chain.Boot_Stage)
+		if stage == "" { stage = "Stopping network and RPC" }
 	}
 	stage_c := fmt.ctprintf("%s", stage)
 	sw: f32 = g_fonts_ok ? rl.MeasureTextEx(_font_for(16)^, stage_c, 16, 0).x : f32(rl.MeasureText(stage_c, 16))
 	sx := i32((f32(WIN_W) - sw) / 2)
 	_text(stage_c, sx, cy + 70, 16, COL_TEXT)
-	ellipsis := "..."
-	dots := (frame / (FPS / 2)) % 4
-	_text(fmt.ctprintf("%s", ellipsis[:dots]), sx + i32(sw), cy + 70, 16, COL_TEXT)
+	if !scanning {
+		// Animated dots only while the phase is indeterminate.
+		ellipsis := "..."
+		dots := (frame / (FPS / 2)) % 4
+		_text(fmt.ctprintf("%s", ellipsis[:dots]), sx + i32(sw), cy + 70, 16, COL_TEXT)
+	}
 
-	elapsed := frame / FPS
-	_text_centered(fmt.ctprintf("%ds elapsed", elapsed), cy + 94, 14, COL_DIM)
-	_text_centered("Flushing the UTXO cache to disk can take a few minutes.", cy + 126, 15, COL_TEXT)
+	if scanning {
+		pct := 100 * prog / total
+		_text_centered(fmt.ctprintf("%d%%   %s / %s entries", pct, _commas(prog), _commas(total)), cy + 94, 14, COL_DIM)
+	} else {
+		_text_centered(fmt.ctprintf("%ds elapsed", frame / FPS), cy + 94, 14, COL_DIM)
+	}
 	_text_centered("Do NOT force-quit — the window closes itself when done.", cy + 148, 15, COL_ORANGE)
 
+	// Real bar while scanning; the sweep animation otherwise.
 	bar_w := i32(340)
 	bx := i32(WIN_W/2 - 170)
 	by := cy + 180
 	rl.DrawRectangle(bx, by, bar_w, 8, COL_PANEL)
-	sweep_w := i32(70)
-	span := int(bar_w - sweep_w)
-	pos := frame * 3 % (span * 2)
-	if pos > span { pos = 2*span - pos }
-	rl.DrawRectangle(bx + i32(pos), by, sweep_w, 8, COL_ORANGE)
+	if scanning {
+		fill := i32(f32(bar_w) * clamp(f32(prog) / f32(total), 0, 1))
+		rl.DrawRectangle(bx, by, fill, 8, COL_GREEN)
+	} else {
+		sweep_w := i32(70)
+		span := int(bar_w - sweep_w)
+		pos := frame * 3 % (span * 2)
+		if pos > span { pos = 2*span - pos }
+		rl.DrawRectangle(bx + i32(pos), by, sweep_w, 8, COL_ORANGE)
+	}
 }
 
 _draw_boot :: proc(boot: ^Boot, frame: int) {
