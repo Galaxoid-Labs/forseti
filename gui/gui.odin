@@ -323,6 +323,7 @@ _window_open :: proc(title: cstring) -> bool {
 		fmt.eprintln("GUI: window creation failed (no display session?) — continuing headless")
 		return false
 	}
+	apply_transparent_titlebar({COL_BG.r, COL_BG.g, COL_BG.b, COL_BG.a}) // macOS unified titlebar; no-op elsewhere
 	rl.SetTargetFPS(FPS)
 	_apply_theme()
 
