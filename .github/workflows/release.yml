@@ -69,6 +69,22 @@ jobs:
       - name: Verify toolchain
         run: odin version
 
+      # Odin's vendored raylib ships x64-only Linux static libs; build
+      # arm64 ones from source (raylib 5.5 + raygui 4.0 — the exact
+      # versions the vendor bindings target) and drop them into the
+      # toolchain's vendor dir, which the bindings reference by path.
+      - name: Build arm64 raylib/raygui vendor libs
+        if: matrix.target == 'linux-arm64'
+        run: |
+          VENDOR="$(odin root)/vendor/raylib/linux"
+          git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib "$RUNNER_TEMP/raylib"
+          make -C "$RUNNER_TEMP/raylib/src" PLATFORM=PLATFORM_DESKTOP -j"$(nproc)"
+          cp "$RUNNER_TEMP/raylib/src/libraylib.a" "$VENDOR/libraylib.a"
+          git clone --depth 1 --branch 4.0 https://github.com/raysan5/raygui "$RUNNER_TEMP/raygui"
+          printf '#define RAYGUI_IMPLEMENTATION\n#include "raygui.h"\n' > "$RUNNER_TEMP/raygui/src/raygui.c"
+          cc -c -O2 -I"$RUNNER_TEMP/raylib/src" -o "$RUNNER_TEMP/raygui.o" "$RUNNER_TEMP/raygui/src/raygui.c"
+          ar rcs "$VENDOR/libraygui.a" "$RUNNER_TEMP/raygui.o"
+
       - name: Build (deps + node + dashboard client)
         env:
           MACOS_MIN: "13.0" # portable minos for release binaries
