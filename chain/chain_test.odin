@@ -1332,3 +1332,39 @@ test_block_index_load_skip_lists :: proc(t: ^testing.T) {
 	// Chainwork strictly increases along the chain (accumulated parents-first).
 	testing.expect(t, consensus.u256_compare(tip.chain_work, idx.genesis.chain_work) > 0, "tip work > genesis work")
 }
+
+// Regression: a restored coin must NEVER be marked Fresh. Recovery rollback
+// restores coins over arbitrary partial-flush DB states; a Fresh restore
+// that gets re-spent is dropped from the cache with no delete sentinel, so
+// a DB copy survives forever (2026-07-06: ~265M stale coins leaked into
+// mainnet chainstate across two recovery cycles; caught by gettxoutsetinfo).
+@(test)
+test_restore_respend_deletes_from_db :: proc(t: ^testing.T) {
+	dir := fmt.tprintf("%s/btcnode-test-restore-leak", os.temp_dir(context.temp_allocator))
+	defer os.remove_all(dir)
+	cc, db, store := _make_test_coins_cache(dir)
+	defer _cleanup_test_coins(&cc, db, store)
+
+	op := wire.Outpoint{index = 7}
+	op.hash[0] = 0xaa
+	script := []byte{0x51}
+	coin := storage.UTXO_Coin{height = 100, amount = 50_0000_0000, script = script}
+
+	// Simulate a partial-flush chunk that landed this coin in the DB
+	// (the cache knows nothing about it).
+	batch := storage.ldb_batch_create()
+	storage.utxo_db_batch_put(db, batch, op, coin)
+	_ = storage.ldb_batch_write(store.chainstate_db, store.sync_opts, batch)
+	storage.ldb_batch_destroy(batch)
+
+	// Recovery restores it (not in cache), replay re-spends it, flush.
+	coins_cache_restore(&cc, op, coin)
+	_, spent_ok := coins_cache_spend(&cc, op)
+	testing.expect(t, spent_ok, "respend of restored coin")
+	ferr := coins_cache_flush(&cc, Hash256{}, 100)
+	testing.expect_value(t, ferr, Chain_Error.None)
+
+	// The DB copy must be gone. (Fresh-flagged restores skipped the delete.)
+	_, still_there := storage.utxo_db_get(db, op, context.temp_allocator)
+	testing.expect(t, !still_there, "restored+respent coin must be deleted from DB")
+}

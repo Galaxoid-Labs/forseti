@@ -253,8 +253,16 @@ coins_cache_restore :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: sto
 		cc.cache[outpoint] = Cache_Entry{coin = cached_coin, flags = {.Dirty}}
 		cc.mem_usage += len(new_script)
 	} else if !exists {
-		// Not in cache at all — mark as Dirty+Fresh
-		cc.cache[outpoint] = Cache_Entry{coin = cached_coin, flags = {.Dirty, .Fresh}}
+		// Not in cache — Dirty WITHOUT Fresh. Fresh means "provably never
+		// reached the DB", which a restore cannot know: recovery rollback
+		// restores coins over arbitrary partial-flush states, and a Fresh
+		// restore that gets re-spent is dropped from the cache with NO
+		// delete sentinel — any DB copy survives forever. The 2026-07-06
+		// recovery cycles leaked ~265M stale coins into mainnet chainstate
+		// exactly this way (443M entries where ~178M belong; caught by the
+		// post-sync gettxoutsetinfo audit). Cost of Dirty-only: a redundant
+		// DB delete per restored-then-respent coin.
+		cc.cache[outpoint] = Cache_Entry{coin = cached_coin, flags = {.Dirty}}
 		cc.mem_usage += CACHE_ENTRY_OVERHEAD + len(new_script)
 	} else {
 		// Existing non-sentinel entry — just replace (shouldn't happen normally)
