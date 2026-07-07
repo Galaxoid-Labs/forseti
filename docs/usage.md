@@ -11,6 +11,34 @@
 curl -s -u user:pass --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:18443/
 ```
 
+### First-Run Setup Wizard
+
+If you'd rather not assemble a command line or config by hand, run the wizard:
+
+```bash
+./btcnode --wizard
+```
+
+It's a `menuconfig`-style ncurses flow that walks through the decisions that
+actually vary per user, then does the setup for you:
+
+1. **Network** — mainnet / testnet4 / signet / regtest
+2. **Data directory** — where blocks, chainstate, and the config live
+3. **Disk usage** — full node or pruned (choose a size)
+4. **Cache** — `dbcache` in MB
+5. **RPC auth** — cookie file (default) or an explicit user/password
+6. **Dashboard** — GUI window, terminal TUI, or headless
+7. **Review** — confirm and write; an **Advanced** screen here toggles
+   `server`, `listen`, `v2transport`, `txindex`, `blockfilterindex`,
+   `mempoolfullrbf`, `persistmempool`, `peerbloomfilters`, and `blocksonly`
+
+Navigate with the arrow keys, `Space` toggles checkboxes, `←/→` move between
+the bottom buttons, and `Enter` activates the focused one. On finish it creates
+the data directory, writes `<datadir>/btcnode.conf` (only keys that differ from
+the defaults), and prints the exact command to start the node. It never touches
+the network — everything it doesn't ask keeps its default and can be edited in
+the conf afterward. Requires an interactive terminal (a TTY).
+
 ### Syncing a Network
 
 Each network syncs via P2P and stores data in its own directory. The examples below set explicit RPC credentials so you can query the node immediately. Run in the background with `nohup` and monitor via the log file:
@@ -97,6 +125,7 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--network=<name>` | `mainnet`, `testnet3`, `testnet4`, `signet`, `regtest` | `regtest` |
+| `--wizard` | Interactive first-run setup: write a `btcnode.conf`, then exit (see above) | — |
 | `--gui` | GUI dashboard window (raylib; node stays headless without it) | headless |
 | `--tui` | Terminal dashboard (ncurses, SSH-friendly; `q` quits gracefully) | headless |
 | `--prune=<MB>` | Delete old block files, keep blk+rev usage under target (min 550, 0=off). Pruned nodes advertise `NODE_NETWORK_LIMITED` only | 0 (keep all) |
@@ -177,7 +206,7 @@ maxuploadtarget=5000
 dbcache=512
 ```
 
-`rpcallowip` accepts a comma-separated list. The following are CLI-only and are *not* read from the config file: `--no-p2p`, `--repairutxo`, `--gui`, `--tui`, `--debug`, `--help`.
+`rpcallowip` accepts a comma-separated list. The following are CLI-only and are *not* read from the config file: `--no-p2p`, `--repairutxo`, `--gui`, `--tui`, `--wizard`, `--debug`, `--help`.
 
 Keys match CLI flag names without the `--` prefix. Boolean values accept `1`, `true`, or `yes` for on.
 

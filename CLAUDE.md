@@ -44,7 +44,7 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 - `gui/` — raylib/raygui dashboard (in-process --gui and remote rendering; Cascadia Code embedded via #load)
 - `guiapp/` — standalone `btcnode-gui` binary: polls getnodestatus RPC, renders the gui package remotely (--probe for one-shot CLI check, --tui for terminal rendering)
 - `ncurses/` — minimal libncurses FFI bindings (system lib, secp256k1-binding style)
-- `tui/` — terminal dashboard over Node_Status (`--tui`, SSH-friendly; ASCII-safe glyphs — non-wide system curses garbles multibyte). Wizard planned on same bindings (docs/plans/tui.md)
+- `tui/` — terminal dashboard over Node_Status (`--tui`, SSH-friendly; ASCII-safe glyphs — non-wide system curses garbles multibyte) + first-run setup wizard (`--wizard`, tui/wizard.odin): menuconfig/lxdialog-styled ncurses flow (network/datadir/prune/dbcache/rpc-auth/dashboard + Advanced toggles) that writes `<datadir>/btcnode.conf` and prints the start command; runs before any node init, TTY-only
 - `deps/` — libsecp256k1 (submodule), ripemd160 (vendored C), leveldb (vendored C++), sha256 (vendored from Bitcoin Core, multi-backend), static libs in deps/lib/
 
 ## Key Architecture

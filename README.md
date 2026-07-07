@@ -28,6 +28,8 @@ testnet3. 364 tests across 12 packages.
   proposal/withdrawal tracking, escrow (CTIP) validation, blind merged mining
 - **Dashboards** — instant-start GUI window (raylib), SSH-friendly TUI
   (ncurses), and a standalone remote client (`btcnode-gui`)
+- **First-run setup wizard** (`--wizard`) — a `menuconfig`-style ncurses flow
+  that writes your `btcnode.conf` and prints the exact command to start
 
 ## Quick Start
 
@@ -44,6 +46,21 @@ cd bitcoin-node-odin && make
 
 Requires the Odin compiler, LLVM 15+, and `make` — full details in
 [docs/build.md](docs/build.md).
+
+### First-run setup wizard
+
+Not sure what to configure? Run the wizard — a `menuconfig`-style ncurses flow
+that asks the handful of decisions that actually vary per user (network, data
+directory, full vs pruned, cache size, RPC auth, dashboard, plus an Advanced
+toggles screen), then creates the data directory, writes a `btcnode.conf`, and
+prints the exact command to start:
+
+```bash
+./btcnode --wizard
+```
+
+It writes the config and exits without touching the network — everything it
+doesn't ask keeps its default and can be edited in the conf afterward.
 
 ### Configuration file
 

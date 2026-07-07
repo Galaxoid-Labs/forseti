@@ -13,7 +13,19 @@ import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
 
-PANEL_W :: 66
+// lxdialog color pairs (10+ to avoid the dashboard's 1..6).
+D_SCREEN     :: 10
+D_SHADOW     :: 11
+D_BODY       :: 12
+D_BORDER     :: 13
+D_TITLE      :: 14
+D_ITEMKEY    :: 15
+D_ITEMSEL    :: 16
+D_ITEMSELKEY :: 17
+D_BTNSEL     :: 18
+D_TOPBAR     :: 19
+
+g_color: bool
 
 Wiz_Action :: enum {
 	Next,
@@ -30,6 +42,16 @@ Wiz_State :: struct {
 	rpc_user:   string,
 	rpc_pass:   string,
 	dashboard:  string, // "gui" / "tui" / "" (headless)
+	// Advanced toggles (defaults match the node's built-ins).
+	adv_server:      bool, // RPC server on
+	adv_listen:      bool, // accept inbound connections
+	adv_v2:          bool, // BIP324 v2 transport
+	adv_txindex:     bool, // full transaction index
+	adv_blockfilter: bool, // BIP157/158 compact block filters
+	adv_fullrbf:     bool, // full replace-by-fee
+	adv_persistmp:   bool, // persist mempool across restarts
+	adv_bloom:       bool, // BIP37 peer bloom filters
+	adv_blocksonly:  bool, // blocks-only (no tx relay)
 }
 
 // Entry point. Returns true if a config was written, false if cancelled.
@@ -48,23 +70,34 @@ run_wizard :: proc() -> bool {
 	nc.noecho()
 	nc.curs_set(0)
 	nc.keypad(nc.stdscr, true)
-	if nc.has_colors() {
+	g_color = nc.has_colors()
+	if g_color {
 		nc.start_color()
-		nc.use_default_colors()
-		nc.init_pair(P_TEXT, nc.COLOR_WHITE, nc.COLOR_DEFAULT)
-		nc.init_pair(P_DIM, nc.COLOR_CYAN, nc.COLOR_DEFAULT)
-		nc.init_pair(P_GREEN, nc.COLOR_GREEN, nc.COLOR_DEFAULT)
-		nc.init_pair(P_YELLOW, nc.COLOR_YELLOW, nc.COLOR_DEFAULT)
-		nc.init_pair(P_BLUE, nc.COLOR_BLUE, nc.COLOR_DEFAULT)
-		nc.init_pair(P_RED, nc.COLOR_RED, nc.COLOR_DEFAULT)
+		// Classic lxdialog/menuconfig palette. "Gray" is COLOR_WHITE as a
+		// background (light gray on most terminals); bright white is A_BOLD.
+		nc.init_pair(D_SCREEN,     nc.COLOR_CYAN,  nc.COLOR_BLUE)   // blue backdrop
+		nc.init_pair(D_SHADOW,     nc.COLOR_BLACK, nc.COLOR_BLACK)  // dialog shadow
+		nc.init_pair(D_BODY,       nc.COLOR_BLACK, nc.COLOR_WHITE)  // dialog surface
+		nc.init_pair(D_BORDER,     nc.COLOR_WHITE, nc.COLOR_WHITE)  // raised border (bold)
+		nc.init_pair(D_TITLE,      nc.COLOR_BLUE,  nc.COLOR_WHITE)  // dialog title
+		nc.init_pair(D_ITEMKEY,    nc.COLOR_RED,   nc.COLOR_WHITE)  // hotkey letter
+		nc.init_pair(D_ITEMSEL,    nc.COLOR_WHITE, nc.COLOR_BLUE)   // selected item bar
+		nc.init_pair(D_ITEMSELKEY, nc.COLOR_YELLOW, nc.COLOR_BLUE)  // selected hotkey
+		nc.init_pair(D_BTNSEL,     nc.COLOR_WHITE, nc.COLOR_BLUE)   // active button
+		nc.init_pair(D_TOPBAR,     nc.COLOR_WHITE, nc.COLOR_BLUE)   // top title line
 	}
 
 	st := Wiz_State {
-		network    = "mainnet",
-		datadir    = _default_datadir(),
-		dbcache_mb = 2048,
-		rpc_cookie = true,
-		dashboard  = "gui",
+		network       = "mainnet",
+		datadir       = _default_datadir(),
+		dbcache_mb    = 2048,
+		rpc_cookie    = true,
+		dashboard     = "gui",
+		adv_server    = true,
+		adv_listen    = true,
+		adv_v2        = true,
+		adv_fullrbf   = true,
+		adv_persistmp = true,
 	}
 	completed := _run_steps(&st)
 	nc.endwin()
@@ -266,22 +299,102 @@ _step_dashboard :: proc(st: ^Wiz_State, step, total: int) -> Wiz_Action {
 }
 
 _step_review :: proc(st: ^Wiz_State, step, total: int) -> Wiz_Action {
+	btn := 0 // focused button: 0 Write, 1 Advanced, 2 Back, 3 Quit
 	for {
-		top, left := _frame(step, total, "Review", "Confirm your setup:")
-		y := top
-		_kv(y + 0, left, "Network", st.network)
-		_kv(y + 1, left, "Data directory", st.datadir)
-		_kv(y + 2, left, "Disk", st.prune_mb > 0 ? fmt.tprintf("pruned to ~%.2f GB", f64(st.prune_mb) / 1000) : "full node")
-		_kv(y + 3, left, "dbcache", fmt.tprintf("%d MB", st.dbcache_mb))
-		_kv(y + 4, left, "RPC auth", st.rpc_cookie ? "cookie file" : fmt.tprintf("user %q", st.rpc_user))
-		_kv(y + 5, left, "Dashboard", st.dashboard == "" ? "headless" : st.dashboard)
-		_footer("Enter  write config      b  change      q  cancel")
-		nc.refresh()
+		rows := []([2]string){
+			{"Network", st.network},
+			{"Data directory", st.datadir},
+			{"Disk", st.prune_mb > 0 ? fmt.tprintf("pruned to ~%.2f GB", f64(st.prune_mb) / 1000) : "full node"},
+			{"dbcache", fmt.tprintf("%d MB", st.dbcache_mb)},
+			{"RPC auth", st.rpc_cookie ? "cookie file" : fmt.tprintf("user %q", st.rpc_user)},
+			{"Dashboard", st.dashboard == "" ? "headless" : st.dashboard},
+			{"Advanced", _advanced_summary(st)},
+		}
+		f := _frame_open(step, total, "Review", "Confirm your setup, then write the config:", len(rows))
+		for kv, i in rows {
+			_wtext(f.lst, i + 1, 2, fmt.tprintf("%-16s %s", fmt.tprintf("%s:", kv[0]), kv[1]), _pair(D_BODY))
+		}
+		_frame_close(f, {"Write", "Advanced", "Back", "Quit"}, btn)
 		switch nc.getch() {
-		case nc.KEY_ENTER, 10, 13:  return .Next
-		case 'b', 'B', nc.KEY_LEFT: return .Back
-		case 'q', 'Q':              return .Quit
-		case nc.KEY_RESIZE:         continue
+		case nc.KEY_LEFT:  btn = (btn - 1 + 4) % 4
+		case nc.KEY_RIGHT: btn = (btn + 1) % 4
+		case nc.KEY_ENTER, 10, 13:
+			switch btn {
+			case 0: return .Next
+			case 1: _advanced_screen(st)
+			case 2: return .Back
+			case 3: return .Quit
+			}
+		case 'a', 'A': _advanced_screen(st)
+		case 'b', 'B': return .Back
+		case 'q', 'Q': return .Quit
+		case nc.KEY_RESIZE: continue
+		}
+	}
+}
+
+// Compact one-line summary of toggles that differ from the defaults.
+_advanced_summary :: proc(st: ^Wiz_State) -> string {
+	changes := make([dynamic]string, 0, 4, context.temp_allocator)
+	if !st.adv_server    { append(&changes, "no RPC") }
+	if !st.adv_listen    { append(&changes, "no inbound") }
+	if !st.adv_v2        { append(&changes, "v1 only") }
+	if st.adv_txindex    { append(&changes, "txindex") }
+	if st.adv_blockfilter { append(&changes, "cfilters") }
+	if !st.adv_fullrbf   { append(&changes, "no fullrbf") }
+	if !st.adv_persistmp { append(&changes, "no mempool save") }
+	if st.adv_bloom      { append(&changes, "bloom") }
+	if st.adv_blocksonly { append(&changes, "blocks-only") }
+	if len(changes) == 0 { return "defaults (press A to change)" }
+	return strings.join(changes[:], ", ", context.temp_allocator)
+}
+
+// Opt-in advanced checklist (menuconfig-style [*] toggles). Returns to the
+// review screen when finished. Not a numbered step.
+_advanced_screen :: proc(st: ^Wiz_State) {
+	Toggle :: struct { label: string, on: ^bool }
+	toggles := []Toggle{
+		{"RPC server (bitcoin-cli / electrs)",       &st.adv_server},
+		{"Accept inbound connections",               &st.adv_listen},
+		{"v2 encrypted transport (BIP324)",          &st.adv_v2},
+		{"Transaction index (getrawtransaction)",    &st.adv_txindex},
+		{"Compact block filters (BIP157/158)",       &st.adv_blockfilter},
+		{"Full replace-by-fee",                      &st.adv_fullrbf},
+		{"Persist mempool across restarts",          &st.adv_persistmp},
+		{"Peer bloom filters (BIP37)",               &st.adv_bloom},
+		{"Blocks-only (no transaction relay)",       &st.adv_blocksonly},
+	}
+	cur := 0
+	for {
+		f := _frame_open(0, 0, "Advanced options", "Space toggles, Enter returns to review:", len(toggles))
+		for t, i in toggles {
+			box := t.on^ ? "[*]" : "[ ]"
+			row := i + 1
+			line := fmt.tprintf("%s %s", box, t.label)
+			if i == cur {
+				sel := g_color ? _pair(D_ITEMSEL) | nc.A_BOLD : nc.A_REVERSE
+				_wfill(f.lst, row, 1, f.lw - 2, sel)
+				_wtext(f.lst, row, 2, line, sel)
+			} else {
+				_wtext(f.lst, row, 2, line, _pair(D_BODY))
+			}
+		}
+		_frame_close(f, {"Toggle", "Done"}, 1)
+		switch ch := nc.getch(); ch {
+		case nc.KEY_UP:   cur = (cur - 1 + len(toggles)) % len(toggles)
+		case nc.KEY_DOWN: cur = (cur + 1) % len(toggles)
+		case ' ':
+			t := toggles[cur]
+			// txindex is incompatible with pruning.
+			if t.on == &st.adv_txindex && !st.adv_txindex && st.prune_mb > 0 {
+				_err_flash("txindex is incompatible with pruning")
+				continue
+			}
+			t.on^ = !t.on^
+		case nc.KEY_ENTER, 10, 13, 'b', 'B', 'q', 'Q', nc.KEY_LEFT:
+			return
+		case nc.KEY_RESIZE:
+			continue
 		}
 	}
 }
@@ -290,44 +403,64 @@ _step_review :: proc(st: ^Wiz_State, step, total: int) -> Wiz_Action {
 
 _menu :: proc(step, total: int, title, prompt: string, options: []string, initial: int) -> (int, Wiz_Action) {
 	cur := clamp(initial, 0, len(options) - 1)
+	btn := 0 // focused button: 0 Select, 1 Back, 2 Quit
 	for {
-		top, left := _frame(step, total, title, prompt)
+		f := _frame_open(step, total, title, prompt, len(options))
 		for opt, i in options {
-			marker := i == cur ? "> " : "  "
-			attr := i == cur ? nc.A_REVERSE : nc.color_pair(P_TEXT)
-			_wput(top + i, left, fmt.tprintf("%s%s", marker, opt), attr)
+			row := i + 1 // inside the list box border
+			if i == cur {
+				sel := g_color ? _pair(D_ITEMSEL) | nc.A_BOLD : nc.A_REVERSE
+				_wfill(f.lst, row, 1, f.lw - 2, sel)
+				_wtext(f.lst, row, 2, opt, sel)
+				if len(opt) > 0 {
+					_wtext(f.lst, row, 2, opt[:1], g_color ? _pair(D_ITEMSELKEY) | nc.A_BOLD : nc.A_REVERSE)
+				}
+			} else {
+				_wtext(f.lst, row, 2, opt, _pair(D_BODY))
+				if len(opt) > 0 {
+					_wtext(f.lst, row, 2, opt[:1], _pair(D_ITEMKEY) | nc.A_BOLD)
+				}
+			}
 		}
-		_footer("Up/Down  move      Enter  select      b  back      q  quit")
-		nc.refresh()
+		_frame_close(f, {"Select", "Back", "Quit"}, btn)
 		switch nc.getch() {
 		case nc.KEY_UP:             cur = (cur - 1 + len(options)) % len(options)
 		case nc.KEY_DOWN:           cur = (cur + 1) % len(options)
-		case nc.KEY_ENTER, 10, 13:  return cur, .Next
-		case 'b', 'B', nc.KEY_LEFT: return cur, .Back
+		case nc.KEY_LEFT:           btn = (btn - 1 + 3) % 3
+		case nc.KEY_RIGHT:          btn = (btn + 1) % 3
+		case nc.KEY_ENTER, 10, 13:
+			switch btn {
+			case 0: return cur, .Next
+			case 1: return cur, .Back
+			case 2: return cur, .Quit
+			}
+		case 'b', 'B':              return cur, .Back
 		case 'q', 'Q':              return cur, .Quit
 		case nc.KEY_RESIZE:         continue
 		}
 	}
 }
 
-// Text field. `hidden` masks input (passwords). Left arrow = back.
+// Text field rendered as an lxdialog inputbox. `hidden` masks input.
 _field :: proc(step, total: int, title, prompt, initial: string, hidden: bool, _unused: string) -> (string, Wiz_Action) {
 	buf := make([dynamic]byte, 0, 64, context.temp_allocator)
 	append(&buf, initial)
-	nc.curs_set(1)
-	defer nc.curs_set(0)
+	btn := 0 // focused button: 0 OK, 1 Back
 	for {
-		top, left := _frame(step, total, title, prompt)
+		f := _frame_open(step, total, title, prompt, 1)
 		shown := hidden ? strings.repeat("*", len(buf), context.temp_allocator) : string(buf[:])
-		_wput(top, left, fmt.tprintf("> %s", shown), nc.color_pair(P_TEXT))
-		_footer("Enter  confirm      Backspace  edit      Left arrow  back")
-		nc.refresh()
+		maxw := f.lw - 4
+		if len(shown) > maxw { shown = shown[len(shown) - maxw:] } // scroll to end
+		_wtext(f.lst, 1, 2, shown, _pair(D_BODY))
+		// Block caret at the end of the input.
+		_wtext(f.lst, 1, 2 + len(shown), " ", g_color ? _pair(D_ITEMSEL) : nc.A_REVERSE)
+		_frame_close(f, {"OK", "Back"}, btn)
 		ch := nc.getch()
 		switch {
 		case ch == nc.KEY_ENTER || ch == 10 || ch == 13:
-			return string(buf[:]), .Next
-		case ch == nc.KEY_LEFT:
-			return string(buf[:]), .Back
+			return string(buf[:]), btn == 1 ? .Back : .Next
+		case ch == nc.KEY_LEFT || ch == nc.KEY_RIGHT:
+			btn = (btn + 1) % 2 // OK <-> Back
 		case ch == nc.KEY_BACKSPACE || ch == 127 || ch == 8:
 			if len(buf) > 0 { pop(&buf) }
 		case ch >= 32 && ch < 127:
@@ -338,46 +471,123 @@ _field :: proc(step, total: int, title, prompt, initial: string, hidden: bool, _
 	}
 }
 
-// --- drawing helpers ---
+// --- lxdialog-style drawing layer ---
 
-// Draw the standard chrome (title bar + step counter, prompt) and return the
-// (top row, left col) of the content region.
-_frame :: proc(step, total: int, title, prompt: string) -> (int, int) {
-	nc.erase()
-	w := int(nc.getmaxx(nc.stdscr))
-	h := int(nc.getmaxy(nc.stdscr))
-	pw := min(PANEL_W, w - 2)
-	left := max((w - pw) / 2, 1)
-	top := max(h / 2 - 6, 1)
-
-	_wput(top, left, "bitcoin-node-odin — setup", nc.color_pair(P_BLUE) | nc.A_BOLD)
-	_wput(top, left + pw - 8, fmt.tprintf("%d / %d", step, total), nc.color_pair(P_DIM))
-	_wput(top + 1, left, strings.repeat("─", pw, context.temp_allocator), nc.color_pair(P_DIM))
-	_wput(top + 3, left, title, nc.color_pair(P_YELLOW) | nc.A_BOLD)
-	_wput(top + 4, left, prompt, nc.color_pair(P_TEXT))
-	return top + 6, left
+Frame :: struct {
+	dlg, lst: ^nc.WINDOW,
+	dh, dw:   int, // dialog size, for the button row
+	lw:       int, // list-window width
 }
 
-_footer :: proc(hint: string) {
-	h := int(nc.getmaxy(nc.stdscr))
-	_wput(h - 1, 2, hint, nc.color_pair(P_DIM))
+_pair :: proc(p: int) -> c.int {
+	return g_color ? nc.color_pair(c.int(p)) : 0
 }
 
-_kv :: proc(y, x: int, key, val: string) {
-	_wput(y, x, fmt.tprintf("%-16s %s", fmt.tprintf("%s:", key), val), nc.color_pair(P_TEXT))
-}
-
-_wput :: proc(y, x: int, s: string, attr: c.int) {
+_st :: proc(y, x: int, s: string, attr: c.int) {
 	cs := strings.clone_to_cstring(s, context.temp_allocator)
 	nc.attron(attr)
 	nc.mvaddnstr(c.int(y), c.int(x), cs, c.int(len(s)))
 	nc.attroff(attr)
 }
 
-// Flash an error message on the footer area and wait for a keypress.
+_wtext :: proc(win: ^nc.WINDOW, y, x: int, s: string, attr: c.int) {
+	cs := strings.clone_to_cstring(s, context.temp_allocator)
+	nc.wattron(win, attr)
+	nc.mvwaddnstr(win, c.int(y), c.int(x), cs, c.int(len(s)))
+	nc.wattroff(win, attr)
+}
+
+_wfill :: proc(win: ^nc.WINDOW, y, x, w: int, attr: c.int) {
+	if w <= 0 { return }
+	_wtext(win, y, x, strings.repeat(" ", w, context.temp_allocator), attr)
+}
+
+// Draw the full menuconfig frame for one screen: blue backdrop + top bar,
+// a shadowed gray dialog with a bordered title and prompt, and an inner
+// bordered list box sized for `rows` content rows. Returns the windows;
+// the caller fills the list box, then calls _frame_close.
+_frame_open :: proc(step, total: int, title, prompt: string, rows: int) -> Frame {
+	W := int(nc.getmaxx(nc.stdscr))
+	H := int(nc.getmaxy(nc.stdscr))
+	nc.erase()
+
+	// Blue backdrop + top title line.
+	if g_color {
+		blank := strings.repeat(" ", W, context.temp_allocator)
+		for y in 0 ..< H { _st(y, 0, blank, _pair(D_SCREEN)) }
+	}
+	_st(0, 1, "bitcoin-node-odin  Setup", _pair(D_TOPBAR) | nc.A_BOLD)
+
+	dw := min(72, W - 4)
+	list_h := rows + 2
+	dh := min(list_h + 8, H - 2)
+	dy := max((H - dh) / 2, 1)
+	dx := max((W - dw) / 2, 1)
+
+	// Drop shadow on the backdrop (down + right of the dialog).
+	if g_color {
+		sh := strings.repeat(" ", dw, context.temp_allocator)
+		for y in dy + 1 ..= min(dy + dh, H - 1) {
+			_st(y, dx + dw, "  ", _pair(D_SHADOW))
+		}
+		_st(min(dy + dh, H - 1), dx + 2, sh, _pair(D_SHADOW))
+	}
+	nc.wnoutrefresh(nc.stdscr)
+
+	// Dialog surface.
+	dlg := nc.newwin(c.int(dh), c.int(dw), c.int(dy), c.int(dx))
+	body := _pair(D_BODY)
+	fillrow := strings.repeat(" ", dw, context.temp_allocator)
+	for y in 0 ..< dh { _wtext(dlg, y, 0, fillrow, body) }
+	nc.wattron(dlg, _pair(D_BORDER) | nc.A_BOLD)
+	nc.box(dlg, 0, 0)
+	nc.wattroff(dlg, _pair(D_BORDER) | nc.A_BOLD)
+	tt := fmt.tprintf(" %s ", title)
+	_wtext(dlg, 0, max((dw - len(tt)) / 2, 2), tt, _pair(D_TITLE) | nc.A_BOLD)
+	if total > 0 {
+		sc := fmt.tprintf(" %d/%d ", step, total)
+		_wtext(dlg, 0, dw - len(sc) - 3, sc, _pair(D_TITLE))
+	}
+	_wtext(dlg, 2, 3, prompt, body)
+
+	// Inner list box.
+	lw := dw - 6
+	lst := nc.newwin(c.int(list_h), c.int(lw), c.int(dy + 4), c.int(dx + 3))
+	lrow := strings.repeat(" ", lw, context.temp_allocator)
+	for y in 0 ..< list_h { _wtext(lst, y, 0, lrow, body) }
+	nc.wattron(lst, _pair(D_BORDER) | nc.A_BOLD)
+	nc.box(lst, 0, 0)
+	nc.wattroff(lst, _pair(D_BORDER) | nc.A_BOLD)
+
+	return Frame{dlg = dlg, lst = lst, dh = dh, dw = dw, lw = lw}
+}
+
+// Draw the button row, flip both windows in one update, and free them.
+_frame_close :: proc(f: Frame, buttons: []string, active: int) {
+	total_w := 0
+	for b in buttons { total_w += len(b) + 4 + 2 }
+	x := max((f.dw - total_w) / 2, 2)
+	for b, i in buttons {
+		label := fmt.tprintf("< %s >", b)
+		if i == active {
+			_wtext(f.dlg, f.dh - 2, x, label, g_color ? _pair(D_BTNSEL) | nc.A_BOLD : nc.A_REVERSE)
+		} else {
+			_wtext(f.dlg, f.dh - 2, x, label, _pair(D_BODY))
+			if len(b) > 0 { _wtext(f.dlg, f.dh - 2, x + 2, b[:1], _pair(D_ITEMKEY) | nc.A_BOLD) }
+		}
+		x += len(label) + 2
+	}
+	nc.wnoutrefresh(f.dlg)
+	nc.wnoutrefresh(f.lst)
+	nc.doupdate()
+	nc.delwin(f.lst)
+	nc.delwin(f.dlg)
+}
+
+// Flash a transient error line over the backdrop, then wait for a keypress.
 _err_flash :: proc(msg: string) {
 	h := int(nc.getmaxy(nc.stdscr))
-	_wput(h - 2, 2, fmt.tprintf("! %s (press a key)", msg), nc.color_pair(P_RED) | nc.A_BOLD)
+	_st(h - 1, 2, fmt.tprintf(" ! %s — press any key ", msg), _pair(D_TOPBAR) | nc.A_BOLD)
 	nc.refresh()
 	nc.getch()
 }
@@ -400,6 +610,17 @@ _write_config :: proc(st: ^Wiz_State) -> (string, bool) {
 		fmt.sbprintfln(&b, "rpcuser=%s", st.rpc_user)
 		fmt.sbprintfln(&b, "rpcpassword=%s", st.rpc_pass)
 	}
+	// Advanced toggles — only emit keys that differ from the node's defaults,
+	// keeping the conf minimal.
+	if !st.adv_server    { strings.write_string(&b, "server=0\n") }
+	if !st.adv_listen    { strings.write_string(&b, "listen=0\n") }
+	if !st.adv_v2        { strings.write_string(&b, "v2transport=0\n") }
+	if st.adv_txindex    { strings.write_string(&b, "txindex=1\n") }
+	if st.adv_blockfilter { strings.write_string(&b, "blockfilterindex=1\n") }
+	if !st.adv_fullrbf   { strings.write_string(&b, "mempoolfullrbf=0\n") }
+	if !st.adv_persistmp { strings.write_string(&b, "persistmempool=0\n") }
+	if st.adv_bloom      { strings.write_string(&b, "peerbloomfilters=1\n") }
+	if st.adv_blocksonly { strings.write_string(&b, "blocksonly=1\n") }
 
 	path := fmt.tprintf("%s/btcnode.conf", st.datadir)
 	if os.write_entire_file(path, transmute([]byte)strings.to_string(b)) != nil {
