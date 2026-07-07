@@ -112,6 +112,7 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | `--no-p2p` | Disable P2P (RPC-only mode) | `false` |
 | `--maxconnections=<N>` | Total peer connections (8 outbound + N-9 inbound) | `125` |
 | `--listen=<0\|1>` | Accept inbound P2P connections | `1` |
+| `--proxy=<ip[:port]>` | SOCKS5 proxy for all outbound P2P (e.g. Tor at `127.0.0.1:9050`). Hostnames/.onion resolve at the proxy, DNS seeds are contacted through it, inbound is disabled | direct |
 | `--dbcache=<MB>` | Database cache size in MiB | `450` |
 | `--par=<N>` | Script verification threads (0=auto, 1=serial, 2+=parallel) | `0` |
 | `--assumevalid=<height>` | Skip script verification below height (0=disable) | Network default |

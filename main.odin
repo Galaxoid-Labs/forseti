@@ -82,6 +82,7 @@ CLI_Flag :: enum {
 	Prune,
 	Drivechain,
 	Rpc_Bind,
+	Proxy,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
 
@@ -131,6 +132,7 @@ CLI_Config :: struct {
 	drivechain:             string, // BIP300/301: "off", "track", "enforce"
 	rpc_bind:               string, // --rpcbind address (default 127.0.0.1)
 	rpc_allow_ips:          [dynamic]string, // --rpcallowip CIDRs (repeatable)
+	proxy:                  string, // --proxy=ip[:port] SOCKS5 for all outbound P2P
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -202,6 +204,9 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 		} else if arg == "--tui" {
 			cfg.tui = true
 			flags_set += {.Tui}
+		} else if strings.has_prefix(arg, "--proxy=") {
+			cfg.proxy = arg[len("--proxy="):]
+			flags_set += {.Proxy}
 		} else if strings.has_prefix(arg, "--rpcbind=") {
 			cfg.rpc_bind = arg[len("--rpcbind="):]
 			flags_set += {.Rpc_Bind}
@@ -437,6 +442,9 @@ _print_usage :: proc() {
 	fmt.println("  --p2p-port=<port>     P2P listen port (default: network-appropriate)")
 	fmt.println("  --no-p2p              Disable P2P networking (RPC-only mode)")
 	fmt.println("  --listen=<0|1>        Accept inbound P2P connections (default: 1)")
+	fmt.println("  --proxy=<ip[:port]>   SOCKS5 proxy for ALL outbound P2P (e.g. Tor at 127.0.0.1:9050).")
+	fmt.println("                        Hostname/.onion targets resolve at the proxy (no DNS leak);")
+	fmt.println("                        DNS seeds are contacted through the proxy; inbound is disabled.")
 	fmt.println("  --zmqpubhashblock=<tcp://ip:port>  ZMQ publish block hashes")
 	fmt.println("  --zmqpubhashtx=<tcp://ip:port>     ZMQ publish tx hashes")
 	fmt.println("  --zmqpubrawblock=<tcp://ip:port>   ZMQ publish raw blocks")
@@ -583,6 +591,11 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 	if .Rpc_Bind not_in flags_set {
 		if val, found := _ini_get(&m, cfg.network, "rpcbind"); found {
 			cfg.rpc_bind = strings.clone(val)
+		}
+	}
+	if .Proxy not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "proxy"); found {
+			cfg.proxy = strings.clone(val)
 		}
 	}
 	if len(cfg.rpc_allow_ips) == 0 {
@@ -1211,6 +1224,16 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 			cm.blocks_only = cfg.blocks_only
 			cm.max_outbound = p2p.MAX_OUTBOUND_FULL_RELAY
 			cm.v2_transport_enabled = cfg.v2_transport
+			if cfg.proxy != "" {
+				if !p2p.conn_manager_set_proxy(cm, cfg.proxy) {
+					return
+				}
+				if cfg.listen {
+					// Inbound + proxy would advertise/serve our real address.
+					log.info("Proxy configured — disabling inbound P2P connections")
+					cfg.listen = false
+				}
+			}
 			cm.local_services = p2p.LOCAL_SERVICES
 			if cfg.prune_mb > 0 {
 				// Pruned: can serve only recent blocks — NODE_NETWORK_LIMITED

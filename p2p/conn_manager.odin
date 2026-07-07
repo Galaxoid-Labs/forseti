@@ -54,6 +54,10 @@ Conn_Manager :: struct {
 	added_mutex:   sync.Mutex,
 	added_nodes:   [dynamic]string, // addnode add list (heap clones)
 	network_active: bool, // setnetworkactive; connects/reconnects gated
+	// --proxy: route all outbound connections through this SOCKS5 endpoint;
+	// hostname targets (.onion, DNS-seed names) resolve at the proxy.
+	proxy_set:      bool,
+	proxy_endpoint: tcp.Endpoint,
 	peers:              map[Peer_Id]^Peer,
 	sync_mgr:           Sync_Manager,
 	chain:              ^chain.Chain_State,
@@ -241,6 +245,20 @@ conn_manager_remove_peer :: proc(cm: ^Conn_Manager, peer_id: Peer_Id) {
 	append(&cm.zombie_peers, peer)
 }
 
+// Configure the SOCKS5 proxy from an "ip[:port]" string. Must run before
+// any connections start.
+conn_manager_set_proxy :: proc(cm: ^Conn_Manager, proxy: string) -> bool {
+	ep, ok := parse_proxy_endpoint(proxy, 9050) // Tor's default SOCKS port
+	if !ok {
+		log.errorf("Invalid --proxy value: %s (want ipv4[:port])", proxy)
+		return false
+	}
+	cm.proxy_set = true
+	cm.proxy_endpoint = ep
+	log.infof("All outbound P2P connections will use SOCKS5 proxy %v:%d", ep.address, ep.port)
+	return true
+}
+
 // Discover peers via DNS seed resolution and populate addr_mgr.
 conn_manager_discover_peers :: proc(cm: ^Conn_Manager) {
 	seeds: []string
@@ -262,6 +280,17 @@ conn_manager_discover_peers :: proc(cm: ^Conn_Manager) {
 	}
 
 	now := u32(time.to_unix_seconds(time.now()))
+
+	// With a proxy, local DNS lookups would leak — connect to the seed
+	// hostnames THROUGH the proxy instead (Core's ADDR_FETCH behavior: the
+	// seed names answer P2P on the default port, we getaddr and move on).
+	if cm.proxy_set {
+		for seed in seeds {
+			peer_start_connect(cm, seed, cm.default_port, cm.next_peer_id)
+			cm.next_peer_id += 1
+		}
+		return
+	}
 
 	for seed in seeds {
 		records, dns_err := tcp.get_dns_records_from_os(seed, .IP4, context.temp_allocator)
@@ -593,7 +622,9 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 			delete(addr_str)
 		}
 
-		if connected == 0 && !cm.listening {
+		// Under a proxy, discover_peers dials the seed hostnames directly
+		// (async, already in cm.peers) instead of filling the addr manager.
+		if connected == 0 && len(cm.peers) == 0 && !cm.listening {
 			log.warn("No peers available. Exiting.")
 			sync.mutex_lock(&cm.event_loop_mu)
 			cm.event_loop = nil
@@ -631,7 +662,7 @@ conn_manager_run :: proc(cm: ^Conn_Manager) {
 }
 
 // Called from _on_connect when async dial succeeds. Sends version (v1) or ell64 (v2) and starts recv.
-_conn_manager_peer_connected :: proc(cm: ^Conn_Manager, peer: ^Peer) {
+_conn_manager_peer_connected :: proc(cm: ^Conn_Manager, peer: ^Peer, arm_recv := true) {
 	if cm.v2_transport_enabled && !(peer.address in cm.v2_failed_addrs) {
 		// BIP324: initiate v2 handshake.
 		peer.v2 = new(V2_Transport)
@@ -644,7 +675,9 @@ _conn_manager_peer_connected :: proc(cm: ^Conn_Manager, peer: ^Peer) {
 			ell := v2_transport_get_ell64(peer.v2)
 			_peer_send_raw(peer, ell[:])
 			peer.state = .V2_Handshake
-			_peer_start_recv(peer)
+			if arm_recv {
+				_peer_start_recv(peer)
+			}
 			return
 		}
 	}
@@ -653,7 +686,9 @@ _conn_manager_peer_connected :: proc(cm: ^Conn_Manager, peer: ^Peer) {
 	_, chain_height := chain.chain_tip(cm.chain)
 	peer_send_version(peer, cm.params, chain_height, cm.local_services)
 	peer.state = .Version_Sent
-	_peer_start_recv(peer)
+	if arm_recv {
+		_peer_start_recv(peer)
+	}
 }
 
 // Enqueue a control request from any thread; the P2P event loop drains it

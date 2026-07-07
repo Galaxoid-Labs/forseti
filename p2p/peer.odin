@@ -47,6 +47,8 @@ Peer :: struct {
 	// BIP324 v2 transport (nil = v1)
 	v2:             ^V2_Transport,
 	v2_detect:      bool, // inbound responder: sniffing v1-vs-v2 from first bytes; nothing sent yet
+	// SOCKS5 proxy handshake in progress (nil = direct / tunnel established)
+	socks:          ^Socks5_State,
 	// nbio fields
 	read_buf:       [65536]byte,  // fixed buffer for async recv
 	recv_op:        ^nbio.Operation, // pending recv operation (for cancel on destroy)
@@ -62,13 +64,19 @@ peer_start_connect :: proc(cm: ^Conn_Manager, address: string, port: int, peer_i
 	if !cm.network_active || conn_manager_is_banned(cm, address) {
 		return
 	}
-	// Resolve address to endpoint (DNS is blocking — happens once at startup, acceptable).
-	ip4, ip4_ok := tcp.parse_ip4_address(address)
-	if !ip4_ok {
-		log.debugf("Failed to parse address: %s", address)
-		return
+	// Direct: the target must be IPv4. Proxied: we dial the PROXY and hand
+	// the target (IPv4 or hostname/.onion) to it during the SOCKS5 handshake.
+	endpoint: tcp.Endpoint
+	if cm.proxy_set {
+		endpoint = cm.proxy_endpoint
+	} else {
+		ip4, ip4_ok := tcp.parse_ip4_address(address)
+		if !ip4_ok {
+			log.debugf("Failed to parse address: %s", address)
+			return
+		}
+		endpoint = tcp.Endpoint{address = ip4, port = port}
 	}
-	endpoint := tcp.Endpoint{address = ip4, port = port}
 
 	peer := new(Peer)
 	peer.id = peer_id
@@ -80,6 +88,11 @@ peer_start_connect :: proc(cm: ^Conn_Manager, address: string, port: int, peer_i
 	peer.recv_buf = make([dynamic]byte, 0, 8192)
 	peer.send_queue = make([dynamic][]byte, 0, 16)
 	peer.connected_at = time.to_unix_seconds(time.now())
+	if cm.proxy_set {
+		peer.socks = new(Socks5_State)
+		peer.socks.target_host = peer.address // peer owns the clone
+		peer.socks.target_port = port
+	}
 
 	// Add peer to map immediately so we can track it.
 	cm.peers[peer_id] = peer
@@ -113,6 +126,14 @@ _on_connect :: proc(op: ^nbio.Operation, peer: ^Peer) {
 	}
 
 	log.debugf("Connected to %s (peer %d)", peer.address, peer.id)
+
+	// Proxied: run the SOCKS5 handshake first; the Bitcoin transport starts
+	// when the tunnel reply arrives (see _peer_process_messages).
+	if peer.socks != nil {
+		_peer_socks5_start(peer)
+		_peer_start_recv(peer)
+		return
+	}
 
 	// Send version message and start recv — delegated to conn_manager.
 	_conn_manager_peer_connected(peer.cm, peer)
@@ -166,6 +187,19 @@ _on_recv :: proc(op: ^nbio.Operation, peer: ^Peer) {
 
 // Parse complete messages from recv_buf and dispatch inline.
 _peer_process_messages :: proc(peer: ^Peer) {
+	if peer.socks != nil {
+		if !_peer_socks5_process(peer) {
+			return // mid-handshake (or disconnected on failure)
+		}
+		// Tunnel established — start the Bitcoin transport. recv is already
+		// armed by our caller's loop, so don't arm it again.
+		_conn_manager_peer_connected(peer.cm, peer, arm_recv = false)
+		if len(peer.recv_buf) == 0 {
+			return
+		}
+		// (A proxy shouldn't have peer bytes for us this early, but fall
+		// through and parse whatever arrived just in case.)
+	}
 	if peer.v2 != nil && peer.v2_detect {
 		if !_peer_v2_detect(peer) {
 			return // not enough bytes to decide yet
@@ -527,6 +561,10 @@ peer_destroy :: proc(peer: ^Peer) {
 // Free peer memory (without closing socket — used by both destroy and failed connect).
 _peer_free :: proc(peer: ^Peer) {
 	delete(peer.recv_buf)
+	if peer.socks != nil {
+		free(peer.socks)
+		peer.socks = nil
+	}
 	if len(peer.address) > 0 {
 		delete(peer.address)
 	}

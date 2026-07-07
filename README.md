@@ -22,6 +22,8 @@ testnet3. 342 tests across 11 packages.
 - **Crash-safe by construction** — chunked atomic flushes, undo-based
   recovery with live progress, bounded rollback depth, single-instance lock
 - **Pruning** (`--prune`), background UTXO flushes, sync ETA
+- **Tor-ready** — `--proxy` routes all outbound P2P through SOCKS5 with
+  proxy-side name resolution (no DNS leaks); `.onion` peers via `--connect`
 - **Drivechain (BIP300/301)** — opt-in `--drivechain=track|enforce`: sidechain
   proposal/withdrawal tracking, escrow (CTIP) validation, blind merged mining
 - **Dashboards** — instant-start GUI window (raylib), SSH-friendly TUI

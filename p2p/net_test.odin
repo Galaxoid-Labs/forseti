@@ -1103,3 +1103,19 @@ test_bip339_wtx_inv_type :: proc(t: ^testing.T) {
 	testing.expect_value(t, u32(decoded.inventory[0].type), 5)
 	testing.expect_value(t, decoded.inventory[0].hash[0], 0xaa)
 }
+
+@(test)
+test_parse_proxy_endpoint :: proc(t: ^testing.T) {
+	ep, ok := parse_proxy_endpoint("127.0.0.1:9050", 9050)
+	testing.expect(t, ok, "ip:port parses")
+	testing.expect_value(t, ep.port, 9050)
+
+	ep2, ok2 := parse_proxy_endpoint("10.0.0.1", 9050)
+	testing.expect(t, ok2, "bare ip gets default port")
+	testing.expect_value(t, ep2.port, 9050)
+
+	_, bad := parse_proxy_endpoint("localhost:9050", 9050)
+	testing.expect(t, !bad, "hostname proxy rejected (proxy must be an IP)")
+	_, bad2 := parse_proxy_endpoint("10.0.0.1:99999", 9050)
+	testing.expect(t, !bad2, "bad port rejected")
+}
