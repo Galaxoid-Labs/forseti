@@ -123,6 +123,7 @@ CLI_Config :: struct {
 	zmq_sequence:           string,
 	repair_utxo:            bool,   // --repairutxo maintenance sweep, then exit
 	block_filter_index:     bool,   // BIP158 compact block filter index
+	txindex:                bool,   // full transaction index (prune-incompatible)
 	listen:                 bool,   // accept inbound connections (default: true)
 	debug:                  bool,   // enable debug logging (default: false)
 	peer_bloom_filters:     bool,   // BIP111: bloom filter support (default: false)
@@ -402,6 +403,10 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 		} else if arg == "--blockfilterindex=0" {
 			cfg.block_filter_index = false
 			flags_set += {.Block_Filter_Index}
+		} else if arg == "--txindex" || arg == "--txindex=1" {
+			cfg.txindex = true
+		} else if arg == "--txindex=0" {
+			cfg.txindex = false
 		} else if arg == "--listen" || arg == "--listen=1" {
 			cfg.listen = true
 			flags_set += {.Listen}
@@ -454,6 +459,7 @@ _print_usage :: proc() {
 	fmt.println("  --maxconnections=<N>  Total peer connections (default: 125)")
 	fmt.println("  --v2transport=<0|1>   BIP 324 v2 encrypted P2P transport, v1 fallback (default: 1)")
 	fmt.println("  --blockfilterindex=<0|1|basic> Enable BIP 158 compact block filter index (default: 0)")
+	fmt.println("  --txindex=<0|1>       Full transaction index for getrawtransaction (default: 0; incompatible with --prune)")
 	fmt.println("  --dbcache=<MB>        Database cache size in MiB (default: 450, min: 4)")
 	fmt.println("  --par=<N>             Script verification threads (0=auto, 1=serial, 2+=parallel; default: 0)")
 	fmt.println("  --assumevalid=<height> Skip script verification below height (0=disable; default: network-specific)")
@@ -792,6 +798,11 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 			cfg.block_filter_index = val == "1" || val == "basic" || val == "true"
 		}
 	}
+	{
+		if val, found := _ini_get(&m, cfg.network, "txindex"); found {
+			cfg.txindex = val == "1" || val == "true"
+		}
+	}
 
 	if .Listen not_in flags_set {
 		if val, found := _ini_get(&m, cfg.network, "listen"); found {
@@ -1113,6 +1124,29 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 			cs.filter_db = fdb
 			log.infof("BIP 158 compact block filter index enabled")
 		}
+	}
+
+	// Open the transaction index if enabled (Core parity: refuse with pruning).
+	if cfg.txindex {
+		if cfg.prune_mb > 0 {
+			log.error("--txindex is incompatible with --prune (the index reads txs from full block files)")
+			return
+		}
+		tdb := new(storage.Tx_Index_DB)
+		tdb_result, tdb_err := storage.tx_index_db_open(cfg.data_dir)
+		if tdb_err != .None {
+			log.errorf("Failed to open tx index: %v", tdb_err)
+			free(tdb)
+			return
+		}
+		tdb^ = tdb_result
+		cs.tx_index = tdb
+		chain.Boot_Stage = "Building transaction index"
+		if !chain.tx_index_catchup(cs) {
+			log.error("Transaction index could not be built (missing block data)")
+			return
+		}
+		chain.Boot_Stage = ""
 	}
 
 	tip_hash, tip_height := chain.chain_tip(cs)

@@ -118,6 +118,7 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | `--assumevalid=<height>` | Skip script verification below height (0=disable) | Network default |
 | `--v2transport=<0\|1>` | BIP 324 v2 encrypted P2P transport (automatic v1 fallback) | `1` |
 | `--blockfilterindex=<0\|1>` | Build and serve BIP 157 compact block filters | `0` |
+| `--txindex=<0\|1>` | Full transaction index (historical `getrawtransaction`); incompatible with `--prune`; catch-up runs at startup when enabled on an existing datadir | `0` |
 | `--peerbloomfilters=<0\|1>` | Enable BIP 37 bloom filters + BIP 35 mempool message | `0` |
 | `--zmqpub<topic>=<tcp://ip:port>` | ZMQ notifications: `hashblock`, `hashtx`, `rawblock`, `rawtx`, `sequence` | off |
 | `--repairutxo` | Maintenance: sweep stale UTXO entries from local block data, report, exit | — |

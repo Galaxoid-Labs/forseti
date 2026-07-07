@@ -1627,3 +1627,62 @@ test_utxo_stats_coinbase_overwrite :: proc(t: ^testing.T) {
 	testing.expect_value(t, cc.stat_count, i64(1))
 	testing.expect_value(t, cc.stat_amount, i64(40))
 }
+
+// --- transaction index ---
+
+@(test)
+test_tx_index :: proc(t: ^testing.T) {
+	dir := make_test_dir("txindex")
+	defer remove_test_dir(dir)
+
+	params := consensus.REGTEST_PARAMS
+	cs: Chain_State
+	err := chain_state_init(&cs, dir, &params)
+	testing.expect_value(t, err, Chain_Error.None)
+	defer chain_state_destroy(&cs)
+
+	// 4 blocks WITHOUT the index, then enable + catch up.
+	blocks: [6]wire.Block
+	prev_hash := HASH_ZERO
+	for i in 0 ..< 4 {
+		blocks[i] = make_chain_block(i, prev_hash, &params)
+		testing.expect_value(t, accept_block(&cs, &blocks[i]), Chain_Error.None)
+		prev_hash = wire.block_header_hash(&blocks[i].header)
+	}
+
+	// Compute before catch-up: it resets the temp allocator that the
+	// test's block txs live in.
+	cb2 := wire.tx_id(&blocks[2].txs[0])
+	blocks2_hash := wire.block_header_hash(&blocks[2].header)
+
+	tdb := new(storage.Tx_Index_DB)
+	tdb_result, tdb_err := storage.tx_index_db_open(dir)
+	testing.expect_value(t, tdb_err, storage.Storage_Error.None)
+	tdb^ = tdb_result
+	cs.tx_index = tdb
+	testing.expect(t, tx_index_catchup(&cs), "catch-up succeeds")
+	tx, bh, h, found := tx_index_lookup(&cs, cb2)
+	testing.expect(t, found, "historical tx found")
+	testing.expect_value(t, h, 2)
+	testing.expect_value(t, bh, blocks2_hash)
+	testing.expect_value(t, wire.tx_id(&tx), cb2)
+
+	// New blocks are indexed live through connect_block.
+	for i in 4 ..< 6 {
+		blocks[i] = make_chain_block(i, prev_hash, &params)
+		testing.expect_value(t, accept_block(&cs, &blocks[i]), Chain_Error.None)
+		prev_hash = wire.block_header_hash(&blocks[i].header)
+	}
+	cb5 := wire.tx_id(&blocks[5].txs[0])
+	_, _, h5, found5 := tx_index_lookup(&cs, cb5)
+	testing.expect(t, found5, "live-indexed tx found")
+	testing.expect_value(t, h5, 5)
+
+	// Disconnect unwinds the index.
+	entry, _ := cs.block_index.entries[wire.block_header_hash(&blocks[5].header)]
+	testing.expect_value(t, disconnect_block(&cs, &blocks[5], entry), Chain_Error.None)
+	_, _, _, gone := tx_index_lookup(&cs, cb5)
+	testing.expect(t, !gone, "disconnected tx no longer indexed")
+	_, best_h, _ := storage.tx_index_best(cs.tx_index)
+	testing.expect_value(t, best_h, 4)
+}

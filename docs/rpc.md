@@ -118,7 +118,7 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `decodescript` | Yes | |
 | `finalizepsbt` | — | PSBT not implemented |
 | `fundrawtransaction` | — | Requires wallet UTXO selection |
-| `getrawtransaction` | Yes | Mempool lookup |
+| `getrawtransaction` | Yes | Mempool + full history with `--txindex` (blockhash/confirmations/blocktime in verbose mode) |
 | `joinpsbts` | — | PSBT not implemented |
 | `sendrawtransaction` | Yes | |
 | `signrawtransactionwithkey` | Yes | P2PKH, P2WPKH, P2SH-P2WPKH |
@@ -133,7 +133,7 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `deriveaddresses` | Yes | pkh/wpkh/sh(wpkh)/tr (BIP86)/multi/sortedmulti/wsh/addr; xpub + wildcard ranges |
 | `estimatesmartfee` | Yes | Confirmation-tracking estimator (Core CBlockPolicyEstimator port, 3 decay horizons, `fee_estimates.dat` persistence); falls back to the mempool floor until it has observed enough history |
 | `getdescriptorinfo` | Yes | Checksum + canonical form; watch-only (xprv/WIF rejected) |
-| `getindexinfo` | Yes | |
+| `getindexinfo` | Yes | Reports block filter index + txindex |
 | `signmessagewithprivkey` | Yes | |
 | `validateaddress` | Yes | |
 | `verifymessage` | Yes | |

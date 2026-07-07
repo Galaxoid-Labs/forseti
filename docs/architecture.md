@@ -45,6 +45,8 @@ The node uses two [LevelDB](https://github.com/google/leveldb) instances for cra
 
 Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split following Bitcoin Core's algorithm: block index DB gets min(total/8, 2 MiB), chainstate DB gets min(remaining/2, 8 MiB), and the remainder goes to the in-memory UTXO coins cache. Both databases use 10-bit bloom filters, 2 MiB write buffers, and no compression. UTXO changes and chain tip metadata are committed atomically via LevelDB WriteBatch. The coins cache flushes in the background (memtable rotation — sync never stalls) when memory usage exceeds the budget, with a durability safety net every 25,000 blocks (every 5,000 for budgets under 1 GiB). Flush WriteBatches are chunked at 16 MB (Core's dbbatchsize) with the tip marker written last in its own synced batch.
 
+**Transaction index** (`--txindex`, `<datadir>/txindex/` LevelDB): txid → (block hash, position), maintained by connect/disconnect and caught up at startup from a persisted best marker (idempotent per-block writes — a crash loses at most the recent tail and the catch-up re-converges). Lookups resolve the block through the block index and read the tx from the flat files, which is why the index refuses to run with pruning (Core parity).
+
 **Block storage** uses flat files (`blk00000.dat`, `rev00000.dat`) with 128MB auto-rollover, matching Bitcoin Core's format. Flat files store the raw block blobs; LevelDB handles the structured key-value data.
 
 **UTXO set contents**: provably-unspendable outputs (OP_RETURN, oversized scripts) are never added as coins (Core parity). `--repairutxo` re-derives spent-ness from local block data as a maintenance sweep.

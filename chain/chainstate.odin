@@ -39,6 +39,8 @@ Chain_State :: struct {
 	arena_pool_mu:     sync.Mutex,
 	// BIP 158 compact block filter index (nil when disabled)
 	filter_db: ^storage.Filter_DB,
+	// Transaction index (--txindex; nil when disabled, prune-incompatible)
+	tx_index: ^storage.Tx_Index_DB,
 	// Performance profiling counters (cumulative, logged every 1000 blocks)
 	prof: Block_Profile,
 	// Pruning: target bytes for blk+rev files (0 = keep everything);
@@ -270,6 +272,11 @@ chain_state_destroy :: proc(cs: ^Chain_State) {
 		storage.filter_db_close(cs.filter_db)
 		free(cs.filter_db)
 		cs.filter_db = nil
+	}
+	if cs.tx_index != nil {
+		storage.tx_index_db_close(cs.tx_index)
+		free(cs.tx_index)
+		cs.tx_index = nil
 	}
 	storage.utxo_db_close(&cs.utxo_db)
 	storage.block_db_close(&cs.block_db)
@@ -608,6 +615,11 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 		_connect_block_filter(cs, block, entry, all_spent_scripts[:])
 	}
 
+	// 9b. Transaction index (if enabled).
+	if cs.tx_index != nil {
+		_tx_index_connect(cs, entry, txids)
+	}
+
 	t_end := time.tick_now()
 
 	// Accumulate profiling data.
@@ -653,6 +665,11 @@ disconnect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Ind
 	// changed it).
 	if cs.dc_mode != .Off {
 		_dc_disconnect(cs, entry)
+	}
+
+	// 4c. Unwind the transaction index (if enabled).
+	if cs.tx_index != nil {
+		_tx_index_disconnect(cs, block, entry)
 	}
 
 	// 5. Update entry status and pop active chain

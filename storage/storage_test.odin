@@ -720,3 +720,30 @@ test_filter_db_delete :: proc(t: ^testing.T) {
 	_, found_header := filter_db_get_header(&fdb, block_hash)
 	testing.expect(t, !found_header, "deleted header should not be found")
 }
+
+@(test)
+test_tx_index_db_roundtrip :: proc(t: ^testing.T) {
+	dir := make_test_dir("txidx")
+	defer remove_test_dir(dir)
+
+	tdb, err := tx_index_db_open(dir)
+	testing.expect_value(t, err, Storage_Error.None)
+	defer tx_index_db_close(&tdb)
+
+	txids := make([]Hash256, 2, context.temp_allocator)
+	txids[0] = Hash256{0 = 0xaa}
+	txids[1] = Hash256{0 = 0xbb}
+	bh := Hash256{0 = 0xcc}
+	perr := tx_index_put_block(&tdb, bh, 7, txids)
+	testing.expect_value(t, perr, Storage_Error.None)
+
+	loc, found := tx_index_get(&tdb, txids[1])
+	testing.expect(t, found, "tx found")
+	testing.expect_value(t, loc.block_hash, bh)
+	testing.expect_value(t, loc.tx_index, u32(1))
+
+	best_hash, best_h, has := tx_index_best(&tdb)
+	testing.expect(t, has, "best set")
+	testing.expect_value(t, best_h, 7)
+	testing.expect_value(t, best_hash, bh)
+}

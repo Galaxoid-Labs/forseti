@@ -275,23 +275,42 @@ _handle_getrawtransaction :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_R
 
 	// Check mempool
 	entry, found := mempool.mempool_get(srv.mp, txid)
-	if !found {
-		// No tx index — can't look up confirmed txs
-		return _make_error(.Misc_Error, "No such mempool transaction. Use -txindex to enable blockchain transaction queries.", srv._current_id)
+	if found {
+		tx := &entry.tx
+		if !verbose {
+			w := wire.writer_init(context.temp_allocator)
+			wire.serialize_tx(&w, tx)
+			raw := wire.writer_bytes(&w)
+			return _make_result(json.Value(json.String(_bytes_to_hex(raw))), srv._current_id)
+		}
+		obj := _tx_to_json(tx, entry, srv.params)
+		return _make_result(json.Value(obj), srv._current_id)
 	}
 
-	tx := &entry.tx
+	// Confirmed txs via the transaction index.
+	if srv.chain.tx_index == nil {
+		return _make_error(.Misc_Error, "No such mempool transaction. Use -txindex to enable blockchain transaction queries.", srv._current_id)
+	}
+	tx, block_hash, height, idx_found := chain.tx_index_lookup(srv.chain, txid)
+	if !idx_found {
+		return _make_error(.Misc_Error, "No such mempool or blockchain transaction", srv._current_id)
+	}
 
 	if !verbose {
-		// Raw hex
 		w := wire.writer_init(context.temp_allocator)
-		wire.serialize_tx(&w, tx)
+		wire.serialize_tx(&w, &tx)
 		raw := wire.writer_bytes(&w)
 		return _make_result(json.Value(json.String(_bytes_to_hex(raw))), srv._current_id)
 	}
 
-	// Verbose: decode to JSON
-	obj := _tx_to_json(tx, entry, srv.params)
+	obj := _tx_to_json(&tx, nil, srv.params)
+	tip_height := chain.chain_height(srv.chain)
+	obj["blockhash"] = json.Value(json.String(_hash_to_hex(block_hash)))
+	obj["confirmations"] = json.Value(json.Integer(i64(tip_height - height + 1)))
+	if blk_entry, e_found := srv.chain.block_index.entries[block_hash]; e_found {
+		obj["time"] = json.Value(json.Integer(i64(blk_entry.timestamp)))
+		obj["blocktime"] = json.Value(json.Integer(i64(blk_entry.timestamp)))
+	}
 	return _make_result(json.Value(obj), srv._current_id)
 }
 
@@ -952,7 +971,9 @@ _get_block_stripped_size :: proc(block: ^wire.Block) -> int {
 
 _tx_to_json :: proc(tx: ^wire.Tx, entry: ^mempool.Mempool_Entry, params: ^consensus.Chain_Params) -> json.Object {
 	obj := _decode_tx_to_json(tx, params)
-	obj["vsize"] = json.Value(json.Integer(entry.vsize))
+	if entry != nil {
+		obj["vsize"] = json.Value(json.Integer(entry.vsize))
+	}
 	return obj
 }
 
@@ -3034,6 +3055,14 @@ _handle_getindexinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respon
 		fi["synced"] = json.Value(json.Boolean(true))
 		fi["best_block_height"] = json.Value(json.Integer(tip_height))
 		obj["basic block filter index"] = json.Value(fi)
+	}
+	if srv.chain.tx_index != nil {
+		ti := make(json.Object, 2, context.temp_allocator)
+		_, best_height, has_best := storage.tx_index_best(srv.chain.tx_index)
+		_, tip_height := chain.chain_tip(srv.chain)
+		ti["synced"] = json.Value(json.Boolean(has_best && best_height >= tip_height))
+		ti["best_block_height"] = json.Value(json.Integer(i64(best_height)))
+		obj["txindex"] = json.Value(ti)
 	}
 	return _make_result(json.Value(obj), srv._current_id)
 }
