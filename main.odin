@@ -1,6 +1,7 @@
 package main
 
 import "base:runtime"
+import "core:c"
 import ini "core:encoding/ini"
 import "core:fmt"
 import "core:log"
@@ -795,6 +796,32 @@ main :: proc() {
 	if has_user != has_pass {
 		fmt.eprintln("Error: must set both rpcuser and rpcpassword")
 		return
+	}
+
+	// Single-instance guard (Bitcoin Core's .lock): an flock held for the
+	// whole process lifetime — including a hung teardown — so a second
+	// instance on the same datadir refuses instantly instead of racing the
+	// first (two GUI windows on one datadir, 2026-07-06).
+	os.make_directory(cfg.data_dir)
+	{
+		lock_path := fmt.ctprintf("%s/.lock", cfg.data_dir)
+		lock_fd := posix.open(lock_path, {.RDWR, .CREAT}, {.IRUSR, .IWUSR})
+		if lock_fd == -1 {
+			fmt.eprintln("Error: cannot open datadir lock file")
+			return
+		}
+		lk := posix.flock {
+			l_type   = .WRLCK,
+			l_whence = c.short(posix.Whence.SET),
+			l_start  = 0,
+			l_len    = 0, // whole file
+		}
+		if posix.fcntl(lock_fd, .SETLK, &lk) == -1 {
+			fmt.eprintfln("Error: another btcnode instance is already running on %s (datadir is locked)", cfg.data_dir)
+			return
+		}
+		// Deliberately never closed/unlocked — the OS releases it at process
+		// exit, however the process ends.
 	}
 
 	// Generate cookie file if no explicit credentials and server is enabled.
