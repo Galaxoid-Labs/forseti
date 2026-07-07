@@ -2212,3 +2212,131 @@ test_verifymessage :: proc(t: ^testing.T) {
 	wrong_result, _ := wrong_resp.result.(json.Boolean)
 	testing.expect(t, !bool(wrong_result), "wrong message should not verify")
 }
+
+// --- mining RPCs ---
+
+@(test)
+test_getblocktemplate :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "gbt", 101)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+	srv._current_id = json.Value(json.Integer(1))
+
+	// Missing segwit rule → error.
+	bad_req := make(json.Object, 1, context.temp_allocator)
+	bad_rules := make(json.Array, 0, context.temp_allocator)
+	bad_req["rules"] = json.Value(bad_rules)
+	resp := _handle_getblocktemplate(srv, _make_params(json.Value(bad_req)))
+	_, bad_err := resp.error.?
+	testing.expect(t, bad_err, "GBT without segwit rule must error")
+
+	// Put a spend in the mempool so the template carries a tx.
+	subsidy := consensus.get_block_subsidy(0, &consensus.REGTEST_PARAMS)
+	tx := _make_spend_tx(wire.Outpoint{hash = _get_coinbase_txid(0), index = 0}, subsidy, subsidy - 5000)
+	merr := mempool.mempool_add(mp, &tx)
+	testing.expect(t, merr == .None, fmt.tprintf("mempool add: %v", merr))
+
+	req := make(json.Object, 1, context.temp_allocator)
+	rules := make(json.Array, 1, context.temp_allocator)
+	rules[0] = json.Value(json.String("segwit"))
+	req["rules"] = json.Value(rules)
+	resp = _handle_getblocktemplate(srv, _make_params(json.Value(req)))
+	err_val, has_err := resp.error.?
+	testing.expect(t, !has_err, fmt.tprintf("GBT error: %v", err_val))
+
+	obj, obj_ok := resp.result.(json.Object)
+	testing.expect(t, obj_ok, "GBT returns object")
+	if !obj_ok { return }
+
+	height, _ := obj["height"].(json.Integer)
+	testing.expect_value(t, int(height), 101)
+	tip_hash, _ := chain.chain_tip(cs)
+	prev, _ := obj["previousblockhash"].(json.String)
+	testing.expect_value(t, string(prev), _hash_to_hex(tip_hash))
+
+	cbv, _ := obj["coinbasevalue"].(json.Integer)
+	testing.expect_value(t, i64(cbv), consensus.get_block_subsidy(101, params) + 5000)
+
+	txs, _ := obj["transactions"].(json.Array)
+	testing.expect_value(t, len(txs), 1)
+	if len(txs) == 1 {
+		entry, _ := txs[0].(json.Object)
+		fee, _ := entry["fee"].(json.Integer)
+		testing.expect_value(t, i64(fee), i64(5000))
+		data, _ := entry["data"].(json.String)
+		testing.expect(t, len(data) > 0, "tx data present")
+	}
+
+	commit, has_commit := obj["default_witness_commitment"].(json.String)
+	testing.expect(t, has_commit && len(commit) == 76, "witness commitment is a 38-byte script")
+}
+
+@(test)
+test_submitblock_and_header :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "submitblk", 3)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+	srv._current_id = json.Value(json.Integer(1))
+
+	tip_hash, tip_height := chain.chain_tip(cs)
+	testing.expect_value(t, tip_height, 2)
+	block := _make_test_block(3, tip_hash, params)
+
+	w := wire.writer_init(context.temp_allocator)
+	wire.serialize_block(&w, &block)
+	hex_str := _bytes_to_hex(wire.writer_bytes(&w))
+
+	// Accepted → null result, chain advances.
+	resp := _handle_submitblock(srv, _make_params(json.Value(json.String(hex_str))))
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "submitblock should not error")
+	_, is_null := resp.result.(json.Null)
+	testing.expect(t, is_null, "accepted block returns null")
+	testing.expect_value(t, chain.chain_height(cs), 3)
+
+	// Resubmit → "duplicate".
+	resp = _handle_submitblock(srv, _make_params(json.Value(json.String(hex_str))))
+	dup, _ := resp.result.(json.String)
+	testing.expect_value(t, string(dup), "duplicate")
+
+	// submitheader: next header on top → null; orphan header → error.
+	next := _make_test_block(4, wire.block_header_hash(&block.header), params)
+	hw := wire.writer_init(context.temp_allocator)
+	wire.serialize_block_header(&hw, &next.header)
+	hdr_hex := _bytes_to_hex(wire.writer_bytes(&hw))
+	resp = _handle_submitheader(srv, _make_params(json.Value(json.String(hdr_hex))))
+	_, has_err = resp.error.?
+	testing.expect(t, !has_err, "valid header accepted")
+	hdr_hash := wire.block_header_hash(&next.header)
+	_, in_index := cs.block_index.entries[hdr_hash]
+	testing.expect(t, in_index, "header added to index")
+
+	orphan := _make_test_block(9, Hash256{0 = 0xde}, params)
+	ow := wire.writer_init(context.temp_allocator)
+	wire.serialize_block_header(&ow, &orphan.header)
+	resp = _handle_submitheader(srv, _make_params(json.Value(json.String(_bytes_to_hex(wire.writer_bytes(&ow))))))
+	_, orphan_err := resp.error.?
+	testing.expect(t, orphan_err, "orphan header errors")
+}
+
+@(test)
+test_prioritisetransaction :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "priori", 101)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+	srv._current_id = json.Value(json.Integer(1))
+
+	subsidy := consensus.get_block_subsidy(0, &consensus.REGTEST_PARAMS)
+	tx := _make_spend_tx(wire.Outpoint{hash = _get_coinbase_txid(0), index = 0}, subsidy, subsidy - 2000)
+	merr := mempool.mempool_add(mp, &tx)
+	testing.expect(t, merr == .None, fmt.tprintf("mempool add: %v", merr))
+	txid := wire.tx_id(&tx)
+
+	resp := _handle_prioritisetransaction(srv, _make_params(
+		json.Value(json.String(_hash_to_hex(txid))),
+		json.Value(json.Integer(0)),
+		json.Value(json.Integer(10_000))))
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "prioritise should not error")
+
+	e, found := mempool.mempool_get(mp, txid)
+	testing.expect(t, found, "entry exists")
+	testing.expect_value(t, mempool.mempool_selection_fee(mp, e), i64(2000 + 10_000))
+}

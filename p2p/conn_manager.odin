@@ -22,10 +22,12 @@ Control_Action :: enum {
 	Set_Network_Active,
 	Precious_Block,
 	Prune_Now,
+	Submit_Block,  // submitblock: validate+connect on the P2P thread, then announce
+	Submit_Header, // submitheader: header-only acceptance into the block index
 }
 
 // Cross-thread node-control request (RPC thread → P2P event loop). Optional
-// completion signaling for synchronous RPCs (pruneblockchain).
+// completion signaling for synchronous RPCs (pruneblockchain, submitblock).
 Control_Request :: struct {
 	action:  Control_Action,
 	peer_id: Peer_Id,
@@ -34,9 +36,14 @@ Control_Request :: struct {
 	active:  bool,
 	hash:    Hash256,
 	height:  int,
+	block:   ^wire.Block,        // Submit_Block/Submit_Header: caller-owned, valid until done posts
 	done:    ^sync.Sema, // optional: posted when the action completes
 	result:  ^i64,       // optional: action-specific result
 }
+
+// Submit_Block result codes (negative values are -Chain_Error ordinals).
+SUBMIT_OK :: i64(0)
+SUBMIT_DUPLICATE :: i64(1)
 
 Conn_Manager :: struct {
 	zmq: ^zmqpkg.Node, // nil unless --zmqpub* configured
@@ -748,6 +755,42 @@ _drain_control_queue :: proc(cm: ^Conn_Manager) {
 			chain.prune_block_files(cm.chain, cm.chain.last_flush_height)
 			if req.result != nil {
 				req.result^ = i64(cm.chain.last_flush_height)
+			}
+		case .Submit_Block:
+			res := SUBMIT_OK
+			hash := wire.block_header_hash(&req.block.header)
+			if entry, known := cm.chain.block_index.entries[hash]; known && .Valid_Chain in entry.status {
+				res = SUBMIT_DUPLICATE
+			} else {
+				aerr := chain.accept_block(cm.chain, req.block)
+				switch {
+				case aerr == .Block_Already_Known:
+					res = SUBMIT_DUPLICATE
+				case aerr != .None:
+					res = -i64(aerr)
+				case:
+					if cm.mp != nil {
+						mempool.mempool_remove_for_block(cm.mp, req.block)
+						mempool.mempool_update_tip(cm.mp)
+					}
+					_announce_block(&cm.sync_mgr, 0, req.block, hash, &cm.peers)
+					log.infof("submitblock: accepted %02x%02x%02x%02x... at height %d",
+						hash[31], hash[30], hash[29], hash[28], chain.chain_height(cm.chain))
+				}
+			}
+			if req.result != nil {
+				req.result^ = res
+			}
+		case .Submit_Header:
+			res := SUBMIT_OK
+			hash := wire.block_header_hash(&req.block.header)
+			if _, known := cm.chain.block_index.entries[hash]; known {
+				res = SUBMIT_DUPLICATE
+			} else if _, aerr := chain.accept_block_header(cm.chain, &req.block.header); aerr != .None {
+				res = -i64(aerr)
+			}
+			if req.result != nil {
+				req.result^ = res
 			}
 		}
 		if req.address != "" {

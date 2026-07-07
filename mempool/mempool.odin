@@ -95,6 +95,24 @@ Mempool :: struct {
 	tip_height:      int,   // Current chain tip height (updated on block connect)
 	tip_mtp:         u32,   // MTP at current tip (updated on block connect)
 	estimator:       Fee_Estimator, // confirmation-tracking fee estimation
+	// prioritisetransaction fee deltas (sats), applied during block-template
+	// selection. Kept for txids not (yet) in the mempool, like Core.
+	fee_deltas:      map[Hash256]i64,
+}
+
+// Set (accumulate) a mining-priority fee delta for a txid.
+mempool_prioritise :: proc(mp: ^Mempool, txid: Hash256, delta_sat: i64) {
+	new_delta := mp.fee_deltas[txid] + delta_sat
+	if new_delta == 0 {
+		delete_key(&mp.fee_deltas, txid)
+	} else {
+		mp.fee_deltas[txid] = new_delta
+	}
+}
+
+// Effective fee for template selection: real fee + any prioritisation delta.
+mempool_selection_fee :: proc(mp: ^Mempool, entry: ^Mempool_Entry) -> i64 {
+	return entry.fee + mp.fee_deltas[entry.txid]
 }
 
 mempool_init :: proc(mp: ^Mempool, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, config: Mempool_Config = {}) {
@@ -110,6 +128,7 @@ mempool_init :: proc(mp: ^Mempool, cs: ^chain.Chain_State, params: ^consensus.Ch
 		mp.config = config
 	}
 	mp.min_fee = mp.config.min_relay_tx_fee
+	mp.fee_deltas = make(map[Hash256]i64, 16)
 	estimator_init(&mp.estimator)
 	mempool_update_tip(mp)
 	mp.estimator.best_height = max(mp.tip_height, 0)
@@ -136,6 +155,7 @@ mempool_destroy :: proc(mp: ^Mempool) {
 	delete(mp.entries)
 	delete(mp.spent_outpoints)
 	delete(mp.wtxid_index)
+	delete(mp.fee_deltas)
 	estimator_destroy(&mp.estimator)
 }
 

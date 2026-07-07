@@ -1833,6 +1833,7 @@ RPC_METHODS := [?]string{
 	"createrawtransaction",
 	"decoderawtransaction",
 	"decodescript",
+	"generateblock",
 	"getbestblockhash",
 	"getblock",
 	"getblockchaininfo",
@@ -1840,6 +1841,7 @@ RPC_METHODS := [?]string{
 	"getblockhash",
 	"getblockheader",
 	"getblockstats",
+	"getblocktemplate",
 	"getchaintips",
 	"getchaintxstats",
 	"getconnectioncount",
@@ -1867,10 +1869,13 @@ RPC_METHODS := [?]string{
 	"listwithdrawalstatus",
 	"logging",
 	"ping",
+	"prioritisetransaction",
 	"savemempool",
 	"sendrawtransaction",
 	"signrawtransactionwithkey",
 	"stop",
+	"submitblock",
+	"submitheader",
 	"testmempoolaccept",
 	"uptime",
 	"validateaddress",
@@ -1956,6 +1961,11 @@ _get_method_help :: proc(method: string) -> string {
 	case "listsidechains":             return "listsidechains\nList active BIP300 sidechains (D1) and pending sidechain proposals. Requires --drivechain=track or enforce."
 	case "getsidechaininfo":           return "getsidechaininfo nsidechain\nReturns information about one active BIP300 sidechain, including its CTIP (treasury UTXO). Requires --drivechain=track or enforce."
 	case "listwithdrawalstatus":       return "listwithdrawalstatus ( nsidechain )\nList BIP300 withdrawal bundles (D2) with their ACK scores and blocks remaining. Requires --drivechain=track or enforce."
+	case "getblocktemplate":           return "getblocktemplate ( {\"rules\":[\"segwit\",...]} )\nReturns data needed to construct a block to work on. Requires the segwit rule; supports mode=proposal."
+	case "submitblock":                return "submitblock \"hexdata\"\nAttempts to submit a new block to the network."
+	case "submitheader":               return "submitheader \"hexdata\"\nDecode the given hexdata as a header and submit it as a candidate chain tip if valid."
+	case "prioritisetransaction":      return "prioritisetransaction \"txid\" ( dummy ) fee_delta\nAccepts the transaction into mined blocks at a higher (or lower) priority."
+	case "generateblock":              return "generateblock \"output\" ( [\"rawtx/txid\",...] )\nMine a block with a set of ordered transactions immediately to a specified address (regtest only)."
 	}
 	return fmt.tprintf("%s\nNo detailed help available.", method)
 }
@@ -3299,24 +3309,8 @@ _handle_generatetoaddress :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_R
 
 	hashes := make(json.Array, 0, context.temp_allocator)
 	for _ in 0 ..< nblocks {
-		// Select mempool txs with no unconfirmed parents (trivial ordering).
-		selected := make([dynamic]chain.Mine_Tx, 0, 64, context.temp_allocator)
-		total_fees: i64
-		if srv.mp != nil {
-			for txid, entry in srv.mp.entries {
-				ok := true
-				for inp in entry.tx.inputs {
-					if mempool.mempool_has(srv.mp, inp.previous_output.hash) {
-						ok = false
-						break
-					}
-				}
-				if ok {
-					append(&selected, chain.Mine_Tx{tx = entry.tx, txid = txid, wtxid = entry.wtxid})
-					total_fees += entry.fee
-				}
-			}
-		}
+		// Feerate-ordered selection with in-mempool parents (same as GBT).
+		selected, _, total_fees := _select_template_txs(srv)
 
 		hash, merr := chain.mine_block(srv.chain, selected[:], total_fees, spk, max_tries)
 		if merr != .None {
@@ -3441,4 +3435,414 @@ _handle_listwithdrawalstatus :: proc(srv: ^RPC_Server, params: json.Value) -> RP
 		append(&bundles, json.Value(obj))
 	}
 	return _make_result(json.Value(bundles), srv._current_id)
+}
+
+// --- mining interface (getblocktemplate / submitblock / submitheader /
+//     prioritisetransaction / generateblock) ---
+
+// Feerate-ordered greedy selection with in-mempool parent dependencies:
+// a tx is eligible once every input is confirmed or spends an already-
+// selected tx. Repeated passes over the feerate-sorted list until no
+// progress (CPFP chains land parent-first in feerate order; true package
+// selection is future work). Weight-capped at 4M minus a coinbase reserve.
+_select_template_txs :: proc(srv: ^RPC_Server) -> (selected: [dynamic]chain.Mine_Tx, entries: [dynamic]^mempool.Mempool_Entry, total_fees: i64) {
+	selected = make([dynamic]chain.Mine_Tx, 0, 256, context.temp_allocator)
+	entries = make([dynamic]^mempool.Mempool_Entry, 0, 256, context.temp_allocator)
+	if srv.mp == nil {
+		return
+	}
+
+	sorted := make([dynamic]^mempool.Mempool_Entry, 0, len(srv.mp.entries), context.temp_allocator)
+	for _, e in srv.mp.entries {
+		append(&sorted, e)
+	}
+	// Sort by effective feerate (fee + prioritisation delta) descending.
+	for i in 1 ..< len(sorted) {
+		j := i
+		for j > 0 {
+			a, b := sorted[j], sorted[j - 1]
+			fa := mempool.mempool_selection_fee(srv.mp, a)
+			fb := mempool.mempool_selection_fee(srv.mp, b)
+			if fa * i64(b.vsize) <= fb * i64(a.vsize) { break }
+			sorted[j], sorted[j - 1] = sorted[j - 1], sorted[j]
+			j -= 1
+		}
+	}
+
+	MAX_TEMPLATE_WEIGHT :: 4_000_000 - 4000 // coinbase reserve
+	weight := 0
+	in_template := make(map[Hash256]bool, len(sorted), context.temp_allocator)
+
+	for {
+		progressed := false
+		for e in sorted {
+			if e.txid in in_template { continue }
+			if weight + e.vsize * 4 > MAX_TEMPLATE_WEIGHT { continue }
+			eligible := true
+			for inp in e.tx.inputs {
+				parent := inp.previous_output.hash
+				if mempool.mempool_has(srv.mp, parent) && !(parent in in_template) {
+					eligible = false
+					break
+				}
+			}
+			if !eligible { continue }
+			in_template[e.txid] = true
+			append(&selected, chain.Mine_Tx{tx = e.tx, txid = e.txid, wtxid = e.wtxid})
+			append(&entries, e)
+			total_fees += e.fee // real fees fund the coinbase, deltas only order
+			weight += e.vsize * 4
+			progressed = true
+		}
+		if !progressed { break }
+	}
+	return
+}
+
+_is_initial_block_download :: proc(srv: ^RPC_Server) -> bool {
+	height := chain.chain_height(srv.chain)
+	header_height := chain.chain_header_height(srv.chain)
+	return header_height - height > 24
+}
+
+_handle_getblocktemplate :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	// Template request object (optional): {"rules":["segwit",...], "mode":"template"}
+	if obj, is_obj := params.(json.Array); is_obj && len(obj) > 0 {
+		if req, req_ok := obj[0].(json.Object); req_ok {
+			if mode, has_mode := req["mode"]; has_mode {
+				if ms, _ := mode.(json.String); ms == "proposal" {
+					return _gbt_proposal(srv, req)
+				}
+			}
+			// Core requires clients to signal the segwit rule.
+			has_segwit := false
+			if rules, has_rules := req["rules"]; has_rules {
+				if arr, arr_ok := rules.(json.Array); arr_ok {
+					for r in arr {
+						if rs, _ := r.(json.String); rs == "segwit" { has_segwit = true }
+					}
+				}
+			}
+			if !has_segwit {
+				return _make_error(.Invalid_Params, "getblocktemplate must be called with the segwit rule set", srv._current_id)
+			}
+		}
+	}
+
+	if srv.params.name != "regtest" && _is_initial_block_download(srv) {
+		return _make_error(.Internal_Error, "Bitcoin is downloading blocks...", srv._current_id)
+	}
+
+	tip_hash, tip_height := chain.chain_tip(srv.chain)
+	tip_entry, tip_found := srv.chain.block_index.entries[tip_hash]
+	if !tip_found {
+		return _make_error(.Internal_Error, "Chain tip not found", srv._current_id)
+	}
+	height := tip_height + 1
+
+	selected, entries, total_fees := _select_template_txs(srv)
+
+	// Witness commitment for the template's tx set.
+	wtxids := make([]crypto.Hash256, len(selected) + 1, context.temp_allocator)
+	for s, i in selected {
+		wtxids[i + 1] = s.wtxid
+	}
+	witness_root := crypto.merkle_root(wtxids)
+	commit_preimage: [64]byte
+	copy(commit_preimage[:32], witness_root[:])
+	commitment := crypto.sha256d(commit_preimage[:]) // reserved value = 32 zero bytes
+	commit_spk: [38]byte
+	commit_spk[0] = 0x6a; commit_spk[1] = 0x24
+	commit_spk[2] = 0xaa; commit_spk[3] = 0x21; commit_spk[4] = 0xa9; commit_spk[5] = 0xed
+	copy(commit_spk[6:], commitment[:])
+
+	// Transactions array with 1-based depends indices.
+	index_of := make(map[Hash256]int, len(selected), context.temp_allocator)
+	for s, i in selected {
+		index_of[s.txid] = i + 1
+	}
+	txs_json := make(json.Array, 0, context.temp_allocator)
+	for s, i in selected {
+		e := entries[i]
+		w := wire.writer_init(context.temp_allocator)
+		wire.serialize_tx(&w, &e.tx)
+		raw := wire.writer_bytes(&w)
+
+		depends := make(json.Array, 0, context.temp_allocator)
+		seen_dep := make(map[int]bool, 4, context.temp_allocator)
+		for inp in e.tx.inputs {
+			if idx, dep := index_of[inp.previous_output.hash]; dep && !seen_dep[idx] {
+				seen_dep[idx] = true
+				append(&depends, json.Value(json.Integer(i64(idx))))
+			}
+		}
+
+		t := make(json.Object, 7, context.temp_allocator)
+		t["data"] = json.Value(json.String(_bytes_to_hex(raw)))
+		t["txid"] = json.Value(json.String(_hash_to_hex(s.txid)))
+		t["hash"] = json.Value(json.String(_hash_to_hex(s.wtxid)))
+		t["depends"] = json.Value(depends)
+		t["fee"] = json.Value(json.Integer(e.fee))
+		t["sigops"] = json.Value(json.Integer(0)) // not tracked per-tx (documented)
+		t["weight"] = json.Value(json.Integer(i64(e.vsize * 4)))
+		append(&txs_json, json.Value(t))
+	}
+
+	now := u32(time.to_unix_seconds(time.now()))
+	mtp := chain.get_median_time_past(tip_entry)
+	cur_time := max(now, mtp + 1)
+	bits := chain.get_next_work_required(srv.chain, tip_entry, cur_time)
+	target := consensus.bits_to_target(bits)
+
+	rules := make(json.Array, 0, context.temp_allocator)
+	for r in ([]string{"csv", "segwit", "taproot"}) {
+		append(&rules, json.Value(json.String(r)))
+	}
+	mutable := make(json.Array, 0, context.temp_allocator)
+	for m in ([]string{"time", "transactions", "prevblock"}) {
+		append(&mutable, json.Value(json.String(m)))
+	}
+
+	obj := make(json.Object, 20, context.temp_allocator)
+	obj["capabilities"] = json.Value(make(json.Array, 0, context.temp_allocator))
+	obj["version"] = json.Value(json.Integer(0x20000000))
+	obj["rules"] = json.Value(rules)
+	obj["vbavailable"] = json.Value(make(json.Object, 0, context.temp_allocator))
+	obj["vbrequired"] = json.Value(json.Integer(0))
+	obj["previousblockhash"] = json.Value(json.String(_hash_to_hex(tip_hash)))
+	obj["transactions"] = json.Value(txs_json)
+	obj["coinbaseaux"] = json.Value(make(json.Object, 0, context.temp_allocator))
+	obj["coinbasevalue"] = json.Value(json.Integer(consensus.get_block_subsidy(height, srv.params) + total_fees))
+	obj["longpollid"] = json.Value(json.String(fmt.tprintf("%s%d", _hash_to_hex(tip_hash), len(selected))))
+	obj["target"] = json.Value(json.String(_bytes_to_hex(target[:])))
+	obj["mintime"] = json.Value(json.Integer(i64(mtp + 1)))
+	obj["mutable"] = json.Value(mutable)
+	obj["noncerange"] = json.Value(json.String("00000000ffffffff"))
+	obj["sigoplimit"] = json.Value(json.Integer(80_000))
+	obj["sizelimit"] = json.Value(json.Integer(4_000_000))
+	obj["weightlimit"] = json.Value(json.Integer(4_000_000))
+	obj["curtime"] = json.Value(json.Integer(i64(cur_time)))
+	obj["bits"] = json.Value(json.String(fmt.tprintf("%08x", bits)))
+	obj["height"] = json.Value(json.Integer(i64(height)))
+	obj["default_witness_commitment"] = json.Value(json.String(_bytes_to_hex(commit_spk[:])))
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// getblocktemplate mode=proposal: context-free validation of a proposed
+// block without connecting it. Returns null when acceptable.
+_gbt_proposal :: proc(srv: ^RPC_Server, req: json.Object) -> RPC_Response {
+	data, has_data := req["data"]
+	ds, ds_ok := data.(json.String)
+	if !has_data || !ds_ok {
+		return _make_error(.Invalid_Params, "proposal mode requires data", srv._current_id)
+	}
+	raw, hex_ok := _hex_decode(string(ds))
+	if !hex_ok {
+		return _make_error(.Tx_Deser_Error, "Block decode failed", srv._current_id)
+	}
+	r := wire.reader_init(raw)
+	block, derr := wire.deserialize_block(&r, context.temp_allocator)
+	if derr != nil {
+		return _make_error(.Tx_Deser_Error, "Block decode failed", srv._current_id)
+	}
+	tip_hash, tip_height := chain.chain_tip(srv.chain)
+	if block.header.prev_hash != tip_hash {
+		return _make_result(json.Value(json.String("inconclusive-not-best-prevblk")), srv._current_id)
+	}
+	if cerr := consensus.check_block(&block, tip_height + 1, srv.params, nil); cerr != .None {
+		return _make_result(json.Value(json.String(fmt.tprintf("rejected: %v", cerr))), srv._current_id)
+	}
+	return _make_result(json.Value(json.Null(nil)), srv._current_id)
+}
+
+// Route a block/header to the P2P thread (chain single-writer) and wait.
+// Falls back to a direct call when P2P is disabled (--no-p2p: the RPC
+// thread is the only chain mutator).
+_submit_via_control :: proc(srv: ^RPC_Server, block: ^wire.Block, action: p2p.Control_Action) -> i64 {
+	if srv.cm == nil {
+		switch action {
+		case .Submit_Block:
+			hash := wire.block_header_hash(&block.header)
+			if entry, known := srv.chain.block_index.entries[hash]; known && .Valid_Chain in entry.status {
+				return p2p.SUBMIT_DUPLICATE
+			}
+			aerr := chain.accept_block(srv.chain, block)
+			if aerr == .Block_Already_Known { return p2p.SUBMIT_DUPLICATE }
+			if aerr != .None { return -i64(aerr) }
+			if srv.mp != nil {
+				mempool.mempool_remove_for_block(srv.mp, block)
+				mempool.mempool_update_tip(srv.mp)
+			}
+			return p2p.SUBMIT_OK
+		case .Submit_Header:
+			hash := wire.block_header_hash(&block.header)
+			if _, known := srv.chain.block_index.entries[hash]; known {
+				return p2p.SUBMIT_DUPLICATE
+			}
+			if _, aerr := chain.accept_block_header(srv.chain, &block.header); aerr != .None {
+				return -i64(aerr)
+			}
+			return p2p.SUBMIT_OK
+		case .Disconnect_Peer, .Connect_Once, .Set_Network_Active, .Precious_Block, .Prune_Now:
+			return -1
+		}
+		return -1
+	}
+	done: sync.Sema
+	result: i64
+	p2p.conn_manager_control(srv.cm, p2p.Control_Request{
+		action = action,
+		block  = block,
+		done   = &done,
+		result = &result,
+	})
+	sync.sema_wait(&done)
+	return result
+}
+
+_submit_result_to_response :: proc(srv: ^RPC_Server, res: i64) -> RPC_Response {
+	switch {
+	case res == p2p.SUBMIT_OK:
+		return _make_result(json.Value(json.Null(nil)), srv._current_id)
+	case res == p2p.SUBMIT_DUPLICATE:
+		return _make_result(json.Value(json.String("duplicate")), srv._current_id)
+	case:
+		cerr := chain.Chain_Error(-res)
+		return _make_result(json.Value(json.String(fmt.tprintf("rejected: %v", cerr))), srv._current_id)
+	}
+}
+
+_handle_submitblock :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	hex_str, ok := _get_string_param(params, 0)
+	if !ok {
+		return _make_error(.Invalid_Params, "Missing hexdata parameter", srv._current_id)
+	}
+	raw, hex_ok := _hex_decode(hex_str)
+	if !hex_ok {
+		return _make_error(.Tx_Deser_Error, "Block decode failed", srv._current_id)
+	}
+	r := wire.reader_init(raw)
+	block, derr := wire.deserialize_block(&r, context.temp_allocator)
+	if derr != nil || len(block.txs) == 0 {
+		return _make_error(.Tx_Deser_Error, "Block decode failed", srv._current_id)
+	}
+	if !consensus.is_coinbase_tx(&block.txs[0]) {
+		return _make_error(.Tx_Deser_Error, "Block does not start with a coinbase", srv._current_id)
+	}
+	res := _submit_via_control(srv, &block, .Submit_Block)
+	return _submit_result_to_response(srv, res)
+}
+
+_handle_submitheader :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	hex_str, ok := _get_string_param(params, 0)
+	if !ok {
+		return _make_error(.Invalid_Params, "Missing hexdata parameter", srv._current_id)
+	}
+	raw, hex_ok := _hex_decode(hex_str)
+	if !hex_ok || len(raw) != 80 {
+		return _make_error(.Tx_Deser_Error, "Block header decode failed", srv._current_id)
+	}
+	r := wire.reader_init(raw)
+	hdr, derr := wire.deserialize_block_header(&r)
+	if derr != nil {
+		return _make_error(.Tx_Deser_Error, "Block header decode failed", srv._current_id)
+	}
+	block := wire.Block{header = hdr}
+	res := _submit_via_control(srv, &block, .Submit_Header)
+	if res == p2p.SUBMIT_OK || res == p2p.SUBMIT_DUPLICATE {
+		return _make_result(json.Value(json.Null(nil)), srv._current_id)
+	}
+	cerr := chain.Chain_Error(-res)
+	if cerr == .Invalid_Prev_Block {
+		return _make_error(.Invalid_Params, "Must submit previous header first", srv._current_id)
+	}
+	return _make_error(.Invalid_Params, fmt.tprintf("Header rejected: %v", cerr), srv._current_id)
+}
+
+_handle_prioritisetransaction :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	txid_hex, ok := _get_string_param(params, 0)
+	if !ok {
+		return _make_error(.Invalid_Params, "Missing txid parameter", srv._current_id)
+	}
+	txid, txid_ok := _hex_to_hash(txid_hex)
+	if !txid_ok {
+		return _make_error(.Invalid_Params, "Invalid txid", srv._current_id)
+	}
+	// Param 1 is the deprecated dummy (priority delta); param 2 is fee delta in sats.
+	delta, delta_ok := _get_int_param(params, 2)
+	if !delta_ok {
+		return _make_error(.Invalid_Params, "Missing fee_delta parameter", srv._current_id)
+	}
+	if srv.mp == nil {
+		return _make_error(.Internal_Error, "Mempool unavailable", srv._current_id)
+	}
+	mempool.mempool_prioritise(srv.mp, txid, i64(delta))
+	return _make_result(json.Value(json.Boolean(true)), srv._current_id)
+}
+
+// generateblock (regtest): mine one block containing the given txs — raw
+// hex or mempool txids — to an address.
+_handle_generateblock :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	if srv.params.name != "regtest" {
+		return _make_error(.Internal_Error, "generateblock is regtest-only", srv._current_id)
+	}
+	addr, addr_ok := _get_string_param(params, 0)
+	if !addr_ok {
+		return _make_error(.Invalid_Params, "Usage: generateblock \"output\" [\"rawtx/txid\",...]", srv._current_id)
+	}
+	spk, spk_ok := _address_to_script_pubkey(addr, srv.params)
+	if !spk_ok {
+		return _make_error(.Invalid_Params, "Invalid address (descriptors not supported)", srv._current_id)
+	}
+
+	selected := make([dynamic]chain.Mine_Tx, 0, 16, context.temp_allocator)
+	total_fees: i64
+	if arr_val, has_arr := _get_array_param(params, 1); has_arr {
+		for item in arr_val {
+			s, s_ok := item.(json.String)
+			if !s_ok {
+				return _make_error(.Invalid_Params, "transactions must be hex strings", srv._current_id)
+			}
+			if len(s) == 64 {
+				// txid — must be in the mempool
+				txid, h_ok := _hex_to_hash(string(s))
+				if !h_ok {
+					return _make_error(.Invalid_Params, "Invalid txid", srv._current_id)
+				}
+				e, found := mempool.mempool_get(srv.mp, txid)
+				if !found {
+					return _make_error(.Invalid_Params, fmt.tprintf("Transaction %s not in mempool", string(s)), srv._current_id)
+				}
+				append(&selected, chain.Mine_Tx{tx = e.tx, txid = e.txid, wtxid = e.wtxid})
+				total_fees += e.fee
+			} else {
+				raw, h_ok := _hex_decode(string(s))
+				if !h_ok {
+					return _make_error(.Tx_Deser_Error, "TX decode failed", srv._current_id)
+				}
+				r := wire.reader_init(raw)
+				tx, derr := wire.deserialize_tx(&r, context.temp_allocator)
+				if derr != nil {
+					return _make_error(.Tx_Deser_Error, "TX decode failed", srv._current_id)
+				}
+				append(&selected, chain.Mine_Tx{tx = tx, txid = wire.tx_id(&tx), wtxid = wire.tx_witness_id(&tx)})
+				// Raw txs: fee unknown without prevout lookup; contributes 0
+				// to the coinbase (undershooting is consensus-safe).
+			}
+		}
+	}
+
+	sync.mutex_lock(&_generate_mutex)
+	defer sync.mutex_unlock(&_generate_mutex)
+
+	hash, merr := chain.mine_block(srv.chain, selected[:], total_fees, spk, 1_000_000)
+	if merr != .None {
+		return _make_error(.Internal_Error, fmt.tprintf("mining failed: %v", merr), srv._current_id)
+	}
+	for sel in selected {
+		mempool.mempool_remove(srv.mp, sel.txid)
+	}
+	obj := make(json.Object, 1, context.temp_allocator)
+	obj["hash"] = json.Value(json.String(_hash_to_hex(hash)))
+	return _make_result(json.Value(obj), srv._current_id)
 }

@@ -315,6 +315,16 @@ _get_string_param :: proc(params: json.Value, idx: int) -> (string, bool) {
 	return s, is_str
 }
 
+// Get an array parameter.
+_get_array_param :: proc(params: json.Value, idx: int) -> (json.Array, bool) {
+	val, ok := _get_param(params, idx)
+	if !ok {
+		return nil, false
+	}
+	arr, is_arr := val.(json.Array)
+	return arr, is_arr
+}
+
 // Get a bool parameter with default value.
 _get_bool_param :: proc(params: json.Value, idx: int, default_val: bool) -> bool {
 	val, ok := _get_param(params, idx)

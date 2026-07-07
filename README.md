@@ -14,7 +14,7 @@ testnet3. 342 tests across 11 packages.
   all deployed soft forks, parallel script verification, assumevalid
 - **Headers-first IBD** with multi-peer download, compact blocks (BIP152),
   and encrypted v2 transport (BIP324) with automatic v1 fallback both ways
-- **Bitcoin Core-compatible surface** — 59 of Core's 78 non-wallet RPCs,
+- **Bitcoin Core-compatible surface** — 64 of Core's 78 non-wallet RPCs,
   cookie auth, `bitcoin.conf`-style config, Core CLI flag names,
   [electrs](https://github.com/romanz/electrs) runs against it unmodified
 - **ZMQ notifications** — Core's `zmqpub*` interface via a native ZMTP 3.0

@@ -459,6 +459,16 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_getmininginfo(srv, req.params)
 	case "getnodestatus":
 		return _handle_getnodestatus(srv, req.params)
+	case "getblocktemplate":
+		return _handle_getblocktemplate(srv, req.params)
+	case "submitblock":
+		return _handle_submitblock(srv, req.params)
+	case "submitheader":
+		return _handle_submitheader(srv, req.params)
+	case "prioritisetransaction":
+		return _handle_prioritisetransaction(srv, req.params)
+	case "generateblock":
+		return _handle_generateblock(srv, req.params)
 	case "listsidechains":
 		return _handle_listsidechains(srv, req.params)
 	case "getsidechaininfo":

@@ -17,7 +17,7 @@ curl -s -u myuser:mypassword \
 bitcoin-cli -rpcport=18443 getblockchaininfo
 ```
 
-## Bitcoin Core RPC Coverage (59 / 78 non-wallet RPCs)
+## Bitcoin Core RPC Coverage (64 / 78 non-wallet RPCs)
 
 Plus four btcnode-specific methods: `getnodestatus` (feeds the GUI/TUI
 dashboards) and the drivechain views `listsidechains`, `getsidechaininfo`,
@@ -66,24 +66,24 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `stop` | Yes | Graceful shutdown |
 | `uptime` | Yes | |
 
-**Generating (1/3):**
+**Generating (2/3):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
-| `generateblock` | — | Regtest block generation |
+| `generateblock` | Yes | Regtest; raw txs and mempool txids (descriptor outputs not supported) |
 | `generatetoaddress` | Yes | Regtest only; mines mempool txs + coinbase |
 | `generatetodescriptor` | — | Regtest mining to descriptor |
 
-**Mining (2/6):**
+**Mining (6/6):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
-| `getblocktemplate` | — | Block template for miners |
+| `getblocktemplate` | Yes | segwit rule required; feerate-ordered selection with in-mempool parents; mode=proposal; per-tx sigops reported as 0; no longpoll |
 | `getmininginfo` | Yes | |
 | `getnetworkhashps` | Yes | |
-| `prioritisetransaction` | — | Manual fee delta |
-| `submitblock` | — | Mined block submission |
-| `submitheader` | — | Header-only submission |
+| `prioritisetransaction` | Yes | Fee delta applied in template selection |
+| `submitblock` | Yes | Routed through the P2P control queue (chain single-writer); announces to peers + ZMQ |
+| `submitheader` | Yes | |
 
 **Network (13/13):**
 
