@@ -2,7 +2,6 @@ package p2p
 
 import "core:fmt"
 import "core:log"
-import "core:math"
 import "core:strings"
 import "core:time"
 
@@ -10,7 +9,6 @@ import "../chain"
 import "../consensus"
 import crypto "../crypto"
 import "../mempool"
-import "../storage"
 import "../wire"
 import zmqpkg "../zmq"
 
@@ -34,8 +32,6 @@ Peer_Sync_State :: struct {
 Compact_Block_State :: struct {
 	header:          wire.Block_Header,
 	block_hash:      Hash256,
-	sipkey_k0:       u64,
-	sipkey_k1:       u64,
 	txs:             []^wire.Tx,  // nil entries = missing
 	txs_owned:       []wire.Tx,   // heap-cloned prefilled txs (owned memory)
 	total_txs:       int,
@@ -1103,8 +1099,6 @@ sync_handle_compact_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, cmpct: ^w
 	state := new(Compact_Block_State)
 	state.header = cmpct.header
 	state.block_hash = block_hash
-	state.sipkey_k0 = k0
-	state.sipkey_k1 = k1
 	state.txs = tx_ptrs
 	state.txs_owned = txs_owned
 	state.total_txs = total_txs

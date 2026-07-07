@@ -1,10 +1,8 @@
 package script
 
-import "core:mem"
 
 // Limits
 MAX_STACK_SIZE    :: 1000
-MAX_ELEMENT_SIZE  :: 520
 MAX_SCRIPT_NUM_SIZE :: 4
 
 Script_Stack :: struct {

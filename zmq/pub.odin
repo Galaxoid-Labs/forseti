@@ -32,7 +32,6 @@ Publisher :: struct {
 	listener: net.TCP_Socket,
 	topics:   map[string]bool, // topics configured for this endpoint
 	seq:      map[string]u32,  // per-topic LE32 publication counters
-	mempool_seq: u64,          // for the 'sequence' topic A/R events
 
 	allocator: mem.Allocator, // owns every queued payload (notify may be called from any thread)
 	mutex:   sync.Mutex,

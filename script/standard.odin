@@ -1,6 +1,5 @@
 package script
 
-import "core:fmt"
 import "core:strings"
 
 // Script classification types.

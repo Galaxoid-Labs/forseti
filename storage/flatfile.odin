@@ -15,7 +15,6 @@ File_Pos :: struct {
 FILE_POS_NULL :: File_Pos{file_num = 0xFFFFFFFF, offset = 0xFFFFFFFF}
 
 Flat_File_Manager :: struct {
-	data_dir:     string,
 	dir:          string, // resolved directory: <data_dir>/blocks (new) or <data_dir> (legacy layout)
 	prefix:       string, // "blk" or "rev"
 	current_file: u32,
@@ -31,7 +30,6 @@ flat_file_path :: proc(mgr: ^Flat_File_Manager, file_num: u32, buf: []byte) -> s
 
 // Open or initialize a flat file manager. Scans existing files to find current write position.
 flat_file_open :: proc(data_dir: string, prefix: string) -> (mgr: Flat_File_Manager, err: Storage_Error) {
-	mgr.data_dir = data_dir
 	mgr.prefix = prefix
 	mgr.current_file = 0
 	mgr.current_pos = 0

@@ -12,8 +12,6 @@ Chain_Error :: enum {
 	Block_Not_Found,
 	Block_Already_Known,
 	Invalid_Prev_Block,
-	Utxo_Not_Found,
-	Utxo_Already_Exists,
 	Duplicate_Tx,
 	Bad_Coinbase_Value,
 	Bad_Script,
@@ -26,7 +24,6 @@ Chain_Error :: enum {
 	Bad_Difficulty,
 	Non_Final_Tx,
 	Consensus_Error,
-	Invalid_State,
 	Drivechain_Violation,
 }
 

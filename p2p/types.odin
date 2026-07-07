@@ -23,7 +23,6 @@ Peer_State :: enum {
 	Version_Sent,
 	Handshake_Complete,
 	Active,
-	Disconnecting,
 	Disconnected,
 }
 

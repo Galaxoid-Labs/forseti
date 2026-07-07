@@ -211,7 +211,6 @@ _write_bytes :: proc(fd: ^os.File, data: []byte) -> bool {
 }
 
 _Persist_Entry :: struct {
-	fee:  i64,
 	time: i64,
 	data: []byte,
 }

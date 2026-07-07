@@ -6,16 +6,11 @@ import "../wire"
 
 // Relay policy constants.
 MAX_STANDARD_TX_WEIGHT :: 400_000          // 100 kvB
-MIN_RELAY_TX_FEE :: i64(1000)              // 1 sat/kvB minimum relay fee
-MAX_MEMPOOL_SIZE :: 300                    // MB
-MAX_MEMPOOL_ENTRIES :: 50_000
 MIN_STANDARD_TX_VERSION :: i32(1)
 MAX_STANDARD_TX_VERSION :: i32(2)
 MAX_STANDARD_SIGOPS :: 4000
-MAX_SCRIPT_SIZE :: 10_000
 MAX_STANDARD_SCRIPTPUBKEY_SIZE :: 10_000
 MAX_OP_RETURN_SIZE :: 83                   // Bitcoin Core -datacarriersize default (OP_RETURN + push + 80 bytes data)
-MAX_RBF_EVICTIONS :: 100                   // BIP125 rule 5: max txs evicted per replacement
 
 // Check transaction against standard relay policy.
 check_tx_policy :: proc(tx: ^wire.Tx, config: ^Mempool_Config = nil) -> Mempool_Error {
@@ -103,10 +98,6 @@ check_tx_policy :: proc(tx: ^wire.Tx, config: ^Mempool_Config = nil) -> Mempool_
 	return .None
 }
 
-// Check if an output is below the dust threshold.
-_is_dust :: proc(output: ^wire.Tx_Out) -> bool {
-	return output.value < get_dust_threshold(output.script_pubkey)
-}
 
 // Check if an output is below the dust threshold with a custom dust relay fee.
 _is_dust_with_fee :: proc(output: ^wire.Tx_Out, dust_relay_fee: i64) -> bool {

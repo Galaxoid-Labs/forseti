@@ -1,6 +1,5 @@
 package storage
 
-import "core:c"
 import "core:log"
 import "core:os"
 
@@ -140,4 +139,3 @@ tx_index_best :: proc(tdb: ^Tx_Index_DB) -> (hash: Hash256, height: int, found: 
 	return hash, height, true
 }
 
-_ :: c

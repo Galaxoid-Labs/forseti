@@ -6,7 +6,6 @@ import "../chain"
 import "../consensus"
 import crypto "../crypto"
 import "../script"
-import "../storage"
 import "../wire"
 
 Hash256 :: crypto.Hash256

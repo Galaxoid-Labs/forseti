@@ -2,7 +2,6 @@ package script
 
 import crypto "../crypto"
 import "../wire"
-import "core:crypto/sha2"
 
 // --- Taproot verification (BIP341/342) ---
 

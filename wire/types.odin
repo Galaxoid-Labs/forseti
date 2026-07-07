@@ -38,7 +38,6 @@ Wire_Error :: enum {
 	Non_Canonical_Compact_Size,
 	Payload_Too_Large,
 	Bad_Checksum,
-	Unknown_Command,
 	Invalid_Witness_Flag,
 	Invalid_Data,
 }

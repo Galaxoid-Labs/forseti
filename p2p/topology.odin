@@ -20,7 +20,6 @@ import "core:log"
 import "core:os"
 import "core:strconv"
 import "core:strings"
-import "core:time"
 
 Connection_Type :: enum u8 {
 	Full_Relay,   // default outbound: blocks + txs + addrs
