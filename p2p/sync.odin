@@ -349,11 +349,17 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 		sm.last_tip_update = time.to_unix_seconds(time.now())
 
 
-		// Budget-based UTXO flush: flush when coins cache exceeds its memory budget,
-		// or every 5000 blocks as a durability safety net (only when budget < 1 GiB,
-		// since large caches benefit from fewer flushes during IBD).
+		// Budget-based UTXO flush: flush when coins cache exceeds its memory
+		// budget, or as a durability safety net — every 5000 blocks for small
+		// caches, and every 25,000 blocks for ANY cache size. Large caches
+		// used to skip the net entirely (flushes once froze sync for
+		// minutes); with the background flush that cost is gone, and an
+		// unbounded gap means unbounded crash recovery — a 16 GiB cache
+		// crashed 79,532 blocks past its last flush (2026-07-06) and paid
+		// ~20 minutes of undo rollback.
 		should_flush := chain.coins_cache_should_flush(&sm.chain.coins)
-		safety_flush := height / 5000 > prev_height / 5000 && sm.chain.coins.budget < 1024 * 1024 * 1024
+		safety_flush := (height / 5000 > prev_height / 5000 && sm.chain.coins.budget < 1024 * 1024 * 1024) ||
+			height / 25_000 > prev_height / 25_000
 		if should_flush || safety_flush {
 			if chain.coins_cache_flush_running(&sm.chain.coins) {
 				// A flush is already in flight. Backpressure safety valve: if
