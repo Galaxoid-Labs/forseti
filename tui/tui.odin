@@ -184,8 +184,9 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 	sync_h := 4
 	sp := _panel(1, 0, sync_h, w, "Sync")
 	if sp != nil {
-		_bar(sp, 1, 2, w - 14, st.verification_pct, P_GREEN)
-		_put(sp, 1, w - 10, pct_label(st.verification_pct), P_GREEN, nc.A_BOLD)
+		display_pct := st.sync_state == .In_Sync ? 1.0 : st.verification_pct
+		_bar(sp, 1, 2, w - 14, display_pct, P_GREEN)
+		_put(sp, 1, w - 10, pct_label(display_pct), P_GREEN, nc.A_BOLD)
 		_put(sp, 2, 2, blocks_line(st), P_DIM)
 		_flip(sp)
 	}

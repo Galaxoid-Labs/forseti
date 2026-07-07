@@ -438,7 +438,9 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	_group_box(rl.Rectangle{pad, 64, WIN_W - 2 * pad, 58}, "Sync Progress")
 	// Bar shows verification progress in transactions — the honest measure of
 	// work — not block count (blocks get ~40x heavier across eras).
-	progress := f32(st.verification_pct)
+	// Tx-based progress asymptotes at ~99.99% (denominator extrapolates to
+	// "now", like Core's verificationprogress) — display 100% once in sync.
+	progress := st.sync_state == .In_Sync ? f32(1) : f32(st.verification_pct)
 	rl.GuiProgressBar(rl.Rectangle{pad + 12, 76, WIN_W - 2 * pad - 90, 18}, nil, fmt.ctprintf("%.2f%%", progress * 100), &progress, 0, 1)
 	eta: string = ""
 	if st.sync_state == .Downloading_Blocks {

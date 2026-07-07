@@ -122,14 +122,15 @@ pct_label :: proc(pct: f64, allocator := context.temp_allocator) -> string {
 }
 
 progress_line :: proc(st: ^p2p.Node_Status, width: int, allocator := context.temp_allocator) -> string {
+	pct := st.sync_state == .In_Sync ? 1.0 : st.verification_pct
 	bar_w := max(width - 10, 10)
-	filled := int(st.verification_pct * f64(bar_w))
+	filled := int(pct * f64(bar_w))
 	b := strings.builder_make(allocator)
 	for i in 0 ..< bar_w {
 		strings.write_rune(&b, i < filled ? '#' : '.')
 	}
 	strings.write_byte(&b, ' ')
-	strings.write_string(&b, pct_label(st.verification_pct))
+	strings.write_string(&b, pct_label(pct))
 	return strings.to_string(b)
 }
 
