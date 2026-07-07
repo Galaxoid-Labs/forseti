@@ -399,7 +399,11 @@ _dashboard_loop :: proc(info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: 
 			_draw_no_p2p(cs, info)
 		} else if have_status {
 			_draw_dashboard(&st, info)
-			if st.flushing {
+			if st.halt_height > 0 {
+				rl.DrawRectangle(0, 0, WIN_W, 26, rl.Color{0x8a, 0x2a, 0x2a, 0xff})
+				_text(fmt.ctprintf("VALIDATION HALTED at height %d (%s) — chain cannot progress; see log",
+					st.halt_height, string(st.halt_reason[:st.halt_reason_len])), 16, 6, 14, rl.WHITE)
+			} else if st.flushing {
 				rl.DrawRectangle(0, 0, WIN_W, 26, rl.Color{0x8a, 0x6d, 0x1a, 0xff})
 				if st.flush_progress < st.flush_total {
 					pct := st.flush_total > 0 ? 100 * st.flush_progress / st.flush_total : 0

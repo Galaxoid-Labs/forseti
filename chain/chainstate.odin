@@ -47,6 +47,8 @@ Chain_State :: struct {
 	prune_height:      int,
 	last_flush_height: int,
 	last_halt_log_height: int, // rate-limits the validation-halt error log
+	halt_height: int,         // 0 = healthy; else validation is stuck at this height
+	halt_error:  Chain_Error, // why
 	recovery_failed: bool, // crash recovery could not reconcile — refuse to run
 }
 
@@ -1031,11 +1033,14 @@ connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 =
 					cs.last_halt_log_height = next_entry.height
 					log.errorf("Block validation FAILED at height %d: %v — halting chain progress", next_entry.height, cerr)
 				}
+				cs.halt_height = next_entry.height
+				cs.halt_error = cerr
 			}
 			return connected, cerr
 		}
 
 		connected += 1
+		cs.halt_height = 0 // progress clears any prior halt state
 
 		// Log profiling data every 1000 blocks.
 		if cs.prof.blocks >= 1000 {

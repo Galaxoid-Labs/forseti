@@ -170,6 +170,9 @@ Node_Status :: struct {
 	total_bytes_sent:  i64, // lifetime P2P traffic (GUI derives rates)
 	total_bytes_recv:  i64,
 	// UTXO flush in progress (snapshot freezes while it runs — see get_status)
+	halt_height:       int,    // >0: block validation is stuck at this height
+	halt_reason:       [24]byte, // error name, fixed buf (snapshot is copied)
+	halt_reason_len:   int,
 	flushing:          bool,
 	flush_total:       int,
 	flush_progress:    int,

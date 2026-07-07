@@ -175,6 +175,9 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 	_put(nc.stdscr, 0, w - len(state_label) - 2, state_label, state_pair, nc.A_BOLD)
 	if !connected {
 		_put(nc.stdscr, 0, 26, "[ CONNECTION LOST — retrying ]", P_RED, nc.A_BOLD)
+	} else if st.halt_height > 0 {
+		_put(nc.stdscr, 0, 26, fmt.tprintf("[ VALIDATION HALTED @ %d: %s ]",
+			st.halt_height, string(st.halt_reason[:st.halt_reason_len])), P_RED, nc.A_BOLD)
 	} else if st.flushing {
 		_put(nc.stdscr, 0, 26, flush_label(st), P_YELLOW, nc.A_BOLD)
 	}
