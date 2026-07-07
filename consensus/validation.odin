@@ -27,7 +27,7 @@ Consensus_Error :: enum {
 	Bad_Witness_Commitment,
 	Bad_Witness_Nonce,
 	Bad_Signet_Signature,
-	// Phase 4 contextual errors (defined now, used later)
+	// Contextual errors produced by chain/chainstate.odin during connect_block
 	Duplicate_Tx,
 	Bad_Coinbase_Value,
 	Inputs_Unavailable,

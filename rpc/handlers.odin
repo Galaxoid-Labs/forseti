@@ -4214,8 +4214,7 @@ _handle_scantxoutset :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respon
 			copy(op.hash[:], key[:32])
 			op.index = u32(key[32]) | u32(key[33]) << 8 | u32(key[34]) << 16 | u32(key[35]) << 24
 			// Skip if the in-memory cache spent or replaced it.
-			if e, in_cache := cc.cache[op]; in_cache {
-				_ = e
+			if _, in_cache := cc.cache[op]; in_cache {
 				continue // live cache entries are handled in pass 2
 			}
 			if cc.frozen != nil {

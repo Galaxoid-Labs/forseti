@@ -66,7 +66,8 @@ command_to_bytes :: proc(cmd: string) -> [COMMAND_SIZE]byte {
 }
 
 // Extracts the command name from a 12-byte field (strips null padding).
-// Returns one of the known CMD_ constants when possible, otherwise allocates via temp_allocator.
+// Returns one of the known CMD_ constants when recognized, else the static
+// CMD_UNKNOWN — never allocates (see the note at the fallthrough below).
 command_from_bytes :: proc(cmd: [COMMAND_SIZE]byte) -> string {
 	n := 0
 	for i in 0 ..< COMMAND_SIZE {

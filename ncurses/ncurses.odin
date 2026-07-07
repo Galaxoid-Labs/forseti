@@ -1,7 +1,8 @@
 // Minimal ncurses bindings — curated for the btcnode TUI dashboard and the
 // future setup wizard. libncurses ships with macOS and every Linux distro;
-// binding style follows crypto/secp256k1.odin. v1 draws on stdscr only
-// (windows/panels/forms deliberately deferred until the wizard needs them).
+// binding style follows crypto/secp256k1.odin. Binds stdscr plus per-panel
+// windows (newwin/box/werase/mvwaddnstr/wnoutrefresh/doupdate); panels/forms
+// remain deferred until the setup wizard needs them.
 package ncurses
 
 import "core:c"

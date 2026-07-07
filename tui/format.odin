@@ -19,8 +19,7 @@ sparkline :: proc(ring: []f32, idx, count, width: int, allocator := context.temp
 	for i in 0 ..< count {
 		peak = max(peak, ring[i])
 	}
-	for pad in 0 ..< width - n {
-		_ = pad
+	for _ in 0 ..< width - n {
 		strings.write_rune(&b, ' ')
 	}
 	for i in 0 ..< n {

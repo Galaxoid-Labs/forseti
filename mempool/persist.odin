@@ -155,7 +155,7 @@ mempool_load :: proc(mp: ^Mempool, data_dir: string) -> (loaded: int, skipped: i
 		deferred = still
 		if progress == 0 { break }
 	}
-	for pe in deferred { _ = pe; err_counts[.Missing_Inputs] += 1 }
+	for _ in deferred { err_counts[.Missing_Inputs] += 1 }
 
 	for err in Mempool_Error {
 		if err == .None { continue }

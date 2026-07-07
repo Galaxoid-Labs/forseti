@@ -361,8 +361,10 @@ coins_cache_restore :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: sto
 	}
 }
 
-// Flush dirty entries to DB atomically. All UTXO changes + metadata are
-// committed in a single WriteBatch for crash consistency.
+// Flush dirty entries to DB. UTXO changes go out in chunked 16MB
+// WriteBatches; the tip marker (+ dc/utxostats) is written LAST in its own
+// synced batch, so a crash mid-flush recovers from the old tip and replays
+// idempotently (see the chunking rationale below and flush_bg.odin).
 coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int, dc_state: []byte = nil) -> Chain_Error {
 	// A concurrently-running background flush would race this one's tip
 	// marker ahead of its own chunks — reap it fully first.

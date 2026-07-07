@@ -713,7 +713,8 @@ get_median_time_past :: proc(entry: ^Block_Index_Entry) -> u32 {
 
 // BIP 68: Check relative lock-time (sequence locks) for a non-coinbase transaction.
 // input_heights contains the height at which each input's coin was mined.
-// parent_entry is the block *before* the block being connected.
+// mtp_current is the median-time-past of the parent (the block before the
+// one being connected), used for time-based sequence locks.
 check_sequence_locks :: proc(cs: ^Chain_State, tx: ^wire.Tx, height: int,
 	input_heights: []int, mtp_current: u32) -> bool {
 	// BIP 68 only applies to version 2+ transactions
@@ -1395,8 +1396,7 @@ _rebuild_undo_locations :: proc(cs: ^Chain_State, meta_height: int, tip: ^Block_
 		confirmed := true
 		e := cand.prev
 		k := len(positions) - 2
-		for c in 0 ..< 8 {
-			_ = c
+		for _ in 0 ..< 8 {
 			if e == nil || e.height <= meta_height || k < 0 {
 				break
 			}

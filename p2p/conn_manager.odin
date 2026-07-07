@@ -368,9 +368,7 @@ _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 	// so sync_handle_block alone might leave a finished worker unreaped).
 	if completed, _ := chain.coins_cache_flush_pump(&cm.chain.coins); completed {
 		cm.chain.last_flush_height = cm.chain.coins.flush_tip_height
-		prune_block_files_cm: {
-			chain.prune_block_files(cm.chain, cm.chain.last_flush_height)
-		}
+		chain.prune_block_files(cm.chain, cm.chain.last_flush_height)
 	}
 
 	// Refresh the GUI status snapshot (reads node state on this thread — the
@@ -1988,24 +1986,10 @@ _conn_manager_handle_getcfilters :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, pa
 			filter_data = nil
 		}
 
-		// Build cfilter with N prefix per BIP158.
-		// We need to prepend CompactSize(N) — but we don't store N separately.
-		// For cfilter, the on-wire filter_data should be the raw stored filter.
-		// BIP157 says: "FilterBytes: the serialized GCS filter for this block".
-		// BIP158: "the serialized GCS has N as CompactSize prefix".
-		// Our gcs_build_filter doesn't include N. Prepend it here.
-		entry, efound := cm.chain.block_index.entries[block_hash]
-		n_elements: u64 = 0
-		if efound {
-			// We don't store n_elements in the index.
-			// Send raw filter without N prefix — matching Bitcoin Core's behavior where
-			// the cfilter message's filter_data IS the BIP158 serialized filter (N + GCS data).
-			// Since we don't store N, send what we have.
-			// TODO: store N alongside filter for proper BIP158 serialization.
-		}
-		_ = n_elements
-		_ = entry
-
+		// TODO(BIP158): the served filter_data should be CompactSize(N) ||
+		// GCS-bytes, but gcs_build_filter emits only the GCS bytes (N is not
+		// stored per block). We send the raw stored filter; a strict BIP157
+		// client would miscount. Store N alongside the filter to fix.
 		cfilter := wire.CFilter_Message{
 			filter_type = chain.FILTER_TYPE_BASIC,
 			block_hash  = block_hash,
@@ -2068,16 +2052,12 @@ _conn_manager_handle_getcfheaders :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, p
 	for i in 0 ..< count {
 		h := start_height + i
 		block_hash := cm.chain.active_chain[h]
-		header, found := storage.filter_db_get_header(cm.chain.filter_db, block_hash)
-		if found {
-			// BIP157: filter_hashes contains the filter *hash* (sha256d of filter bytes),
-			// NOT the filter header. We store filter headers, so we need filter hashes too.
-			// For now, use the filter hash derived from stored filter bytes.
-			filter_data, ff := storage.filter_db_get_filter(cm.chain.filter_db, block_hash, context.temp_allocator)
-			if ff && len(filter_data) > 0 {
-				filter_hashes[i] = crypto.sha256d(filter_data)
-			}
-			_ = header
+		// BIP157 filter_hashes carry the filter *hash* (sha256d of the filter
+		// bytes), not the stored filter header — so read the filter directly
+		// (the prior filter_db_get_header lookup here was wasted I/O).
+		filter_data, ff := storage.filter_db_get_filter(cm.chain.filter_db, block_hash, context.temp_allocator)
+		if ff && len(filter_data) > 0 {
+			filter_hashes[i] = crypto.sha256d(filter_data)
 		}
 	}
 

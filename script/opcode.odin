@@ -99,7 +99,7 @@ Opcode :: enum u8 {
 	OP_MAX                 = 0xa4,
 	OP_WITHIN              = 0xa5,
 	OP_RIPEMD160           = 0xa6,
-	OP_SHA1                = 0xa7, // deferred
+	OP_SHA1                = 0xa7,
 	OP_SHA256              = 0xa8,
 	OP_HASH160             = 0xa9,
 	OP_HASH256             = 0xaa,
