@@ -1116,8 +1116,12 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 		if mp.config.persist_mempool {
 			mempool.mempool_save(mp, cfg.data_dir)
 		}
+		mempool.estimator_save(&mp.estimator, cfg.data_dir)
 	}
 
+	// Fee-estimate history first (cheap), then the mempool itself — loaded
+	// entries re-enter through mempool_add and register with the estimator.
+	mempool.estimator_load(&mp.estimator, cfg.data_dir)
 	if mp.config.persist_mempool {
 		mempool.mempool_load(mp, cfg.data_dir)
 	}

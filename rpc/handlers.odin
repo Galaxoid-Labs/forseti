@@ -1281,19 +1281,35 @@ _bip70_chain_name :: proc(name: string) -> string {
 
 // --- estimatesmartfee ---
 //
-// Minimal Core-shaped estimator: the dynamic mempool floor (or the relay
-// minimum when the mempool is quiet) — honest lower bound, and enough for
-// clients (electrs hard-fails on Method_Not_Found here).
+// Confirmation-tracking estimator (Core CBlockPolicyEstimator port). Until
+// it has observed enough blocks/txs it falls back to the dynamic mempool
+// floor — an honest lower bound, and clients like electrs always get a
+// number (they hard-fail on errors here).
 _handle_estimatesmartfee :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 	conf_target, has_target := _get_int_param(params, 0)
 	if !has_target || conf_target < 1 {
 		conf_target = 6
 	}
+	conservative := false
+	if mode, has_mode := _get_string_param(params, 1); has_mode {
+		switch mode {
+		case "conservative", "CONSERVATIVE":
+			conservative = true
+		case "economical", "ECONOMICAL", "unset", "UNSET":
+			conservative = false
+		case:
+			return _make_error(.Invalid_Params, "Invalid estimate_mode parameter", srv._current_id)
+		}
+	}
 
 	floor_sat := max(srv.mp.min_fee, srv.mp.config.min_relay_tx_fee)
+	feerate_sat := floor_sat
+	if est, found := mempool.estimator_smart_fee(&srv.mp.estimator, conf_target, conservative); found {
+		feerate_sat = max(est, floor_sat)
+	}
 
 	obj := make(json.Object, 2, context.temp_allocator)
-	obj["feerate"] = json.Value(json.Float(_satoshi_to_btc(floor_sat)))
+	obj["feerate"] = json.Value(json.Float(_satoshi_to_btc(feerate_sat)))
 	obj["blocks"] = json.Value(json.Integer(i64(conf_target)))
 	return _make_result(json.Value(obj), srv._current_id)
 }

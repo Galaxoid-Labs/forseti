@@ -80,6 +80,7 @@ Mempool_Entry :: struct {
 	vsize:    int,
 	fee_rate: Fee_Rate,
 	time:     i64,
+	height:   int, // chain tip height when accepted
 }
 
 Mempool :: struct {
@@ -93,6 +94,7 @@ Mempool :: struct {
 	min_fee:         i64,   // Dynamic minimum fee (sat/kvB) when mempool is full
 	tip_height:      int,   // Current chain tip height (updated on block connect)
 	tip_mtp:         u32,   // MTP at current tip (updated on block connect)
+	estimator:       Fee_Estimator, // confirmation-tracking fee estimation
 }
 
 mempool_init :: proc(mp: ^Mempool, cs: ^chain.Chain_State, params: ^consensus.Chain_Params, config: Mempool_Config = {}) {
@@ -108,7 +110,9 @@ mempool_init :: proc(mp: ^Mempool, cs: ^chain.Chain_State, params: ^consensus.Ch
 		mp.config = config
 	}
 	mp.min_fee = mp.config.min_relay_tx_fee
+	estimator_init(&mp.estimator)
 	mempool_update_tip(mp)
+	mp.estimator.best_height = max(mp.tip_height, 0)
 }
 
 // Update tip_height and tip_mtp from current chain state. Call after connecting/disconnecting blocks.
@@ -132,6 +136,7 @@ mempool_destroy :: proc(mp: ^Mempool) {
 	delete(mp.entries)
 	delete(mp.spent_outpoints)
 	delete(mp.wtxid_index)
+	estimator_destroy(&mp.estimator)
 }
 
 // Dry-run validation of a transaction against mempool rules (steps 1-8).
@@ -338,6 +343,9 @@ mempool_add :: proc(mp: ^Mempool, tx: ^wire.Tx) -> Mempool_Error {
 	entry.vsize = vsize
 	entry.fee_rate = fr
 	entry.time = time.to_unix_seconds(time.now())
+	entry.height = mp.tip_height
+
+	estimator_process_tx(&mp.estimator, txid, mp.tip_height, fee_rate_per_kvb(fr))
 
 	mp.entries[txid] = entry
 	mp.wtxid_index[wtxid] = txid
@@ -361,6 +369,11 @@ mempool_remove :: proc(mp: ^Mempool, txid: Hash256) {
 		return
 	}
 
+	// Failure accounting: this path is eviction/expiry/replacement/conflict.
+	// Block confirmations are untracked by estimator_process_block BEFORE
+	// mempool_remove_for_block gets here, so they never register as failures.
+	estimator_remove_tx(&mp.estimator, txid)
+
 	// Remove spent outpoints
 	for in_idx in 0 ..< len(entry.tx.inputs) {
 		delete_key(&mp.spent_outpoints, entry.tx.inputs[in_idx].previous_output)
@@ -377,6 +390,17 @@ mempool_remove :: proc(mp: ^Mempool, txid: Hash256) {
 
 // Remove all confirmed transactions and any conflicting transactions.
 mempool_remove_for_block :: proc(mp: ^Mempool, block: ^wire.Block) {
+	// Fee estimation: record confirmations at the block's height (the chain
+	// has already connected it) before the entries disappear.
+	{
+		confirmed := make([dynamic]Hash256, 0, len(block.txs), context.temp_allocator)
+		for tx_idx in 1 ..< len(block.txs) {
+			tx := block.txs[tx_idx]
+			append(&confirmed, wire.tx_id(&tx))
+		}
+		estimator_process_block(&mp.estimator, chain.chain_height(mp.chain), confirmed[:])
+	}
+
 	// Collect txids to remove (confirmed + conflicting)
 	to_remove := make([dynamic]Hash256, 0, len(block.txs), context.temp_allocator)
 

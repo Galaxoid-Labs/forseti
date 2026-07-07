@@ -131,7 +131,7 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 |--------|--------|-------|
 | `createmultisig` | Yes | legacy / p2sh-segwit / bech32 |
 | `deriveaddresses` | — | Descriptor address derivation |
-| `estimatesmartfee` | Yes | Mempool-floor estimator |
+| `estimatesmartfee` | Yes | Confirmation-tracking estimator (Core CBlockPolicyEstimator port, 3 decay horizons, `fee_estimates.dat` persistence); falls back to the mempool floor until it has observed enough history |
 | `getdescriptorinfo` | — | Output descriptor analysis |
 | `getindexinfo` | Yes | |
 | `signmessagewithprivkey` | Yes | |
