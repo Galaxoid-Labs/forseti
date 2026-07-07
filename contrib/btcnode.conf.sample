@@ -1,0 +1,109 @@
+# Sample btcnode configuration file.
+#
+# Copy this to <datadir>/btcnode.conf (e.g. ~/.btcnode/btcnode.conf or the
+# path you pass with --datadir) and uncomment the settings you want.
+#
+# Format: INI-style, mirroring Bitcoin Core's bitcoin.conf. Lines beginning
+# with '#' are comments. A bare `key=value` sits in the global section and
+# applies to every network; a `[network]` header scopes the keys under it to
+# that network only (mainnet, testnet3, testnet4, signet, regtest).
+#
+# Precedence: command-line flags > config file > built-in defaults. Every
+# key below corresponds to a --flag of the same name; see `btcnode --help`.
+
+# ── Global settings (apply to all networks) ─────────────────────────────
+
+# network = mainnet          # mainnet | testnet3 | testnet4 | signet | regtest
+# datadir = /home/you/.btcnode
+
+# Database cache in MiB. Use a large value for initial sync (e.g. 8192+),
+# then a smaller one for steady-state at the tip.
+# dbcache = 1024
+
+# Script-verification threads: 0 = auto-detect, 1 = serial, N = N threads.
+# par = 0
+
+# Prune to keep block files under this many MiB (min 550, 0 = keep all).
+# Incompatible with txindex.
+# prune = 2000
+
+# Full transaction index for historical getrawtransaction (needs full blocks;
+# incompatible with prune).
+# txindex = 0
+
+# Skip script verification below this height (0 = verify everything).
+# assumevalid = 0
+
+# ── RPC ─────────────────────────────────────────────────────────────────
+
+# server = 1                 # 0 disables the RPC server entirely
+# rpcport = 8332             # default is network-appropriate
+# rpcuser = youruser         # omit both to use cookie auth (<datadir>/.cookie)
+# rpcpassword = yourpassword
+
+# Bind RPC beyond loopback (e.g. a trusted LAN). A non-loopback rpcbind
+# REQUIRES at least one rpcallowip entry. rpcallowip accepts IPv4/CIDR and
+# may be a comma-separated list; loopback is always allowed.
+# rpcbind = 0.0.0.0
+# rpcallowip = 192.168.1.0/24,10.0.0.5
+
+# ── P2P / networking ────────────────────────────────────────────────────
+
+# connect = 127.0.0.1:8333   # dial only this peer instead of DNS discovery
+# listen = 1                 # accept inbound connections
+# maxconnections = 125       # 8 outbound + block-relay/feeler + inbound
+# v2transport = 1            # BIP324 encrypted transport (default on)
+# peerbloomfilters = 0       # BIP37 bloom filters + BIP35 mempool message
+
+# Cap daily upload in MiB; when exceeded, blocks older than a week are not
+# served to inbound peers (tip relay + headers unaffected). 0 = unlimited.
+# maxuploadtarget = 0
+
+# Route ALL outbound P2P through a SOCKS5 proxy (e.g. Tor). Hostnames and
+# .onion targets resolve at the proxy; inbound is auto-disabled.
+# proxy = 127.0.0.1:9050
+
+# BIP157/158 compact block filter index (serve light clients).
+# blockfilterindex = 0
+
+# ── Mempool policy (Bitcoin Core defaults shown) ────────────────────────
+
+# maxmempool = 300            # MiB
+# mempoolexpiry = 336         # hours (14 days)
+# mempoolfullrbf = 1
+# blocksonly = 0              # disable tx relay, only sync blocks
+# persistmempool = 1
+# minrelaytxfee = 0.00001000
+# incrementalrelayfee = 0.00001000
+# dustrelayfee = 0.00003000
+# datacarrier = 1             # allow OP_RETURN outputs
+# datacarriersize = 83
+# permitbaremultisig = 1
+# limitancestorcount = 25
+# limitancestorsize = 101     # kvB
+# limitdescendantcount = 25
+# limitdescendantsize = 101   # kvB
+
+# ── ZMQ notifications (LND / indexer integrations) ──────────────────────
+
+# zmqpubhashblock = tcp://127.0.0.1:28332
+# zmqpubhashtx = tcp://127.0.0.1:28332
+# zmqpubrawblock = tcp://127.0.0.1:28332
+# zmqpubrawtx = tcp://127.0.0.1:28332
+# zmqpubsequence = tcp://127.0.0.1:28332
+
+# ── Drivechain (BIP300/301, opt-in) ─────────────────────────────────────
+
+# off | track (observe, reject nothing) | enforce (reject violations —
+# CUSF-style, can fork you off the network; see docs/bips.md).
+# drivechain = off
+
+# ── Per-network overrides ───────────────────────────────────────────────
+# Keys under a [network] header apply only to that network and win over the
+# global section when that network is selected.
+
+# [signet]
+# dbcache = 512
+
+# [regtest]
+# server = 1

@@ -152,41 +152,32 @@ The node reads an optional `btcnode.conf` from the data directory (`<datadir>/bt
 
 **Precedence:** CLI flags > config file > defaults
 
-```ini
-# /tmp/btcnode-data/btcnode.conf
+A fully-commented [`contrib/btcnode.conf.sample`](../contrib/btcnode.conf.sample) in the repo lists every supported key with its default. Copy it to your data directory to get started:
 
-network=regtest
-rpcport=18443
+```bash
+cp contrib/btcnode.conf.sample ~/btcnode/btcnode.conf
+./btcnode --datadir=~/btcnode        # reads ~/btcnode/btcnode.conf
+```
+
+Each config key matches a `--flag` of the same name (drop the `--`). Example:
+
+```ini
+# ~/btcnode/btcnode.conf
+
+network=mainnet
+dbcache=1024
+prune=2000
 rpcuser=myuser
 rpcpassword=mypassword
-server=1
-connect=127.0.0.1:18444
-no-p2p=1
-dbcache=450
-par=0
-assumevalid=880000
-maxconnections=125
-listen=1
-blockfilterindex=0
-peerbloomfilters=0
-
-# Mempool settings (Bitcoin Core compatible)
-maxmempool=300
-mempoolexpiry=336
-mempoolfullrbf=1
-limitancestorcount=25
-limitdescendantcount=25
-minrelaytxfee=0.00001000
-dustrelayfee=0.00003000
-datacarrier=1
-datacarriersize=83
-persistmempool=1
-# blocksonly=1
+txindex=1
+maxuploadtarget=5000
 
 # Network-specific sections override global values
-[regtest]
-rpcport=19443
+[signet]
+dbcache=512
 ```
+
+`rpcallowip` accepts a comma-separated list. The following are CLI-only and are *not* read from the config file: `--no-p2p`, `--repairutxo`, `--gui`, `--tui`, `--debug`, `--help`.
 
 Keys match CLI flag names without the `--` prefix. Boolean values accept `1`, `true`, or `yes` for on.
 

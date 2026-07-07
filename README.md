@@ -6,7 +6,7 @@ with only C dependencies Bitcoin Core itself uses (libsecp256k1, LevelDB).
 
 **Fully synced and verified on mainnet** — tip hash and UTXO totals
 cross-checked against the public network — plus signet, testnet4, and
-testnet3. 342 tests across 11 packages.
+testnet3. 362 tests across 12 packages.
 
 ## Highlights
 
@@ -44,6 +44,34 @@ cd bitcoin-node-odin && make
 
 Requires the Odin compiler, LLVM 15+, and `make` — full details in
 [docs/build.md](docs/build.md).
+
+### Configuration file
+
+Instead of passing everything on the command line, drop a `btcnode.conf` in
+your data directory — the node reads `<datadir>/btcnode.conf` at startup. The
+format is INI-style, mirroring Bitcoin Core's `bitcoin.conf` (`#` comments,
+`key=value`, optional `[network]` sections). CLI flags override the file.
+
+```bash
+# ~/btcnode/btcnode.conf
+network=mainnet
+dbcache=1024
+prune=2000
+rpcuser=alice
+rpcpassword=hunter2
+```
+
+```bash
+./btcnode --datadir=~/btcnode --gui        # everything else comes from the conf
+```
+
+A fully-commented [`contrib/btcnode.conf.sample`](contrib/btcnode.conf.sample)
+lists every supported key with its default. Copy it and uncomment what you
+need:
+
+```bash
+cp contrib/btcnode.conf.sample ~/btcnode/btcnode.conf
+```
 
 ## Documentation
 

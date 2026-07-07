@@ -543,13 +543,13 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 	// Apply config values only where CLI flags were NOT explicitly set.
 	if .Network not_in flags_set {
 		if val, found := _ini_get(&m, cfg.network, "network"); found {
-			cfg.network = val
+			cfg.network = strings.clone(val)
 		}
 	}
 
 	if .Data_Dir not_in flags_set {
 		if val, found := _ini_get(&m, cfg.network, "datadir"); found {
-			cfg.data_dir = val
+			cfg.data_dir = strings.clone(val)
 		}
 	}
 
@@ -563,7 +563,7 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 
 	if .Connect not_in flags_set {
 		if val, found := _ini_get(&m, cfg.network, "connect"); found {
-			cfg.connect = val
+			cfg.connect = strings.clone(val)
 		}
 	}
 
@@ -613,6 +613,13 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 			cfg.proxy = strings.clone(val)
 		}
 	}
+	if cfg.max_upload_target_mb == 0 {
+		if val, found := _ini_get(&m, cfg.network, "maxuploadtarget"); found {
+			if n, ok := strconv.parse_int(val); ok && n >= 0 {
+				cfg.max_upload_target_mb = n
+			}
+		}
+	}
 	if len(cfg.rpc_allow_ips) == 0 {
 		if val, found := _ini_get(&m, cfg.network, "rpcallowip"); found {
 			// Comma-separated list in the config file.
@@ -628,7 +635,7 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 	if .Drivechain not_in flags_set {
 		if val, found := _ini_get(&m, cfg.network, "drivechain"); found {
 			if val == "off" || val == "track" || val == "enforce" {
-				cfg.drivechain = val
+				cfg.drivechain = strings.clone(val)
 			} else {
 				log.warnf("Config: invalid drivechain value %q (must be off, track, or enforce) — ignored", val)
 			}
@@ -757,13 +764,13 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 
 	if .Rpc_User not_in flags_set {
 		if val, found := _ini_get(&m, cfg.network, "rpcuser"); found {
-			cfg.rpc_user = val
+			cfg.rpc_user = strings.clone(val)
 		}
 	}
 
 	if .Rpc_Password not_in flags_set {
 		if val, found := _ini_get(&m, cfg.network, "rpcpassword"); found {
-			cfg.rpc_password = val
+			cfg.rpc_password = strings.clone(val)
 		}
 	}
 

@@ -4,7 +4,7 @@
 
 ```bash
 make              # Build deps + binary
-make test         # Run all tests (12 packages, ~370)
+make test         # Run all tests (12 packages, ~362)
 make gui          # Build standalone remote dashboard (btcnode-gui)
 make debug        # Build with debug symbols
 odin build . -out:btcnode   # Build binary only

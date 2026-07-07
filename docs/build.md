@@ -48,16 +48,18 @@ The binary is output as `btcnode` in the project root.
 ## Testing
 
 ```bash
-make test         # all 328 tests across 10 packages
+make test         # all 362 tests across 12 packages
 ```
 
 | Package | Tests | | Package | Tests |
 |---|---|---|---|---|
-| crypto | 40 | | chain | 29 |
-| wire | 44 | | p2p | 34 |
-| script | 54 | | mempool | 32 |
-| consensus | 23 | | rpc | 53 |
-| storage | 18 | | zmq | 1 |
+| crypto | 40 | | mempool | 36 |
+| wire | 44 | | rpc | 59 |
+| script | 54 | | zmq | 1 |
+| consensus | 23 | | drivechain | 11 |
+| storage | 19 | | descriptor | 5 |
+| chain | 35 | | | |
+| p2p | 36 | | | |
 
 Script tests have a known flaky secp256k1 thread-safety issue under parallel
 test threads — use `odin test script -define:ODIN_TEST_THREADS=1` if they crash.

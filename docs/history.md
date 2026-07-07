@@ -62,7 +62,19 @@ Every build phase in order. See the [README](../README.md) for the current summa
 | 53 | UTXO Hygiene (skip unspendable outputs, --repairutxo sweep) | Complete |
 | 54 | Dashboard Halt Banners + 100%-at-tip | Complete |
 | 55 | Drivechain BIP300/301 (--drivechain=off\|track\|enforce, D1/D2 + CTIP + BMM, 3 RPCs) | Complete |
+| 56 | v2transport default-on; release CI (macOS arm64 + Linux x64/arm64 binaries) | Complete |
+| 57 | Fee estimator (Core CBlockPolicyEstimator port, 3 horizons, fee_estimates.dat) | Complete |
+| 58 | Rolling UTXO stats (instant gettxoutsetinfo) | Complete |
+| 59 | Mining interface (getblocktemplate/submitblock/submitheader/prioritisetransaction/generateblock) | Complete |
+| 60 | --rpcbind/--rpcallowip + verifychain | Complete |
+| 61 | SOCKS5 --proxy (Tor-ready outbound) | Complete |
+| 62 | Descriptor engine (getdescriptorinfo/deriveaddresses/scantxoutset/generatetodescriptor) | Complete |
+| 63 | txindex (--txindex, historical getrawtransaction) | Complete |
+| 64 | P2P topology hardening (block-relay-only, anchors, feelers, --maxuploadtarget) | Complete |
 
+**RPC coverage: 69/78 Core non-wallet RPCs** (73 methods total). Remaining
+Core RPCs are the PSBT family (9) + `fundrawtransaction`, and the package-relay
+RPC `submitpackage`.
 
 ## What's Left to Build
 
@@ -76,5 +88,7 @@ Every build phase in order. See the [README](../README.md) for the current summa
 
 ### Features
 
-
-- **getblocktemplate / submitblock** — mining interface
+- **Package relay / TRUC (v3)** — `submitpackage`, 1-parent-1-child acceptance
+- **PSBT family** — the 9 BIP174 RPCs + `fundrawtransaction` (wallet-adjacent)
+- **assumeutxo** — `dumptxoutset`/`loadtxoutset` fast bootstrap
+- **REST interface** (`-rest`), `-reindex`
