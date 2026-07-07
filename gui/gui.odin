@@ -161,21 +161,6 @@ _sync_state_label :: proc(s: p2p.Sync_State) -> (string, rl.Color) {
 // last snapshot on screen with a disconnected banner.
 Status_Fetch :: proc(ud: rawptr) -> (st: p2p.Node_Status, ok: bool)
 
-// Run the GUI render loop on the calling (main) thread against a local node.
-// Returns when the window is closed or the node shuts down. cm may be nil
-// (--no-p2p): a minimal chain-only view is shown. Returns false if no window
-// could be created (no display session) so the caller can stay headless.
-run :: proc(cm: ^p2p.Conn_Manager, cs: ^chain.Chain_State, info: Static_Info) -> bool {
-	if cm == nil {
-		return _run_window("bitcoin-node-odin", info, nil, nil, cs, local = true)
-	}
-	fetch :: proc(ud: rawptr) -> (p2p.Node_Status, bool) {
-		cm := cast(^p2p.Conn_Manager)ud
-		if cm.shutdown { return {}, false }
-		return p2p.conn_manager_get_status(cm), true
-	}
-	return _run_window("bitcoin-node-odin", info, fetch, cm, nil, local = true)
-}
 
 // Run the dashboard against any status source (e.g. a remote node polled over
 // RPC). fetch is called about once a second; on failure the last snapshot

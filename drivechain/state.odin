@@ -79,11 +79,6 @@ state_destroy :: proc(st: ^State) {
 	delete(st.last_m4)
 }
 
-// Undo record: the full prior snapshot. D1+D2 are tiny (≤256 slots + a few
-// bundles), so snapshot-undo is simpler and safer than operation logs.
-Undo :: struct {
-	snapshot: []byte, // serialized State
-}
 
 active_count :: proc(st: ^State) -> int {
 	n := 0

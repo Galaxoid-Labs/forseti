@@ -81,8 +81,3 @@ hash_to_display :: proc(h: Hash256) -> Hash256 {
 	return result
 }
 
-// Parallel double-SHA256 of 64-byte blocks (for Merkle tree optimization).
-// output must be blocks*32 bytes, input must be blocks*64 bytes.
-sha256d64 :: proc(output: []byte, input: []byte, blocks: uint) {
-	sha256_ffi_d64(raw_data(output), raw_data(input), blocks)
-}
