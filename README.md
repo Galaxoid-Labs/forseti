@@ -6,7 +6,7 @@ with only C dependencies Bitcoin Core itself uses (libsecp256k1, LevelDB).
 
 **Fully synced and verified on mainnet** — tip hash and UTXO totals
 cross-checked against the public network — plus signet, testnet4, and
-testnet3. 362 tests across 12 packages.
+testnet3. 364 tests across 12 packages.
 
 ## Highlights
 

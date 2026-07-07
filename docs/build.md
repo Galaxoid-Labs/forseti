@@ -48,13 +48,13 @@ The binary is output as `btcnode` in the project root.
 ## Testing
 
 ```bash
-make test         # all 362 tests across 12 packages
+make test         # all 364 tests across 12 packages
 ```
 
 | Package | Tests | | Package | Tests |
 |---|---|---|---|---|
-| crypto | 40 | | mempool | 36 |
-| wire | 44 | | rpc | 59 |
+| crypto | 41 | | mempool | 36 |
+| wire | 45 | | rpc | 59 |
 | script | 54 | | zmq | 1 |
 | consensus | 23 | | drivechain | 11 |
 | storage | 19 | | descriptor | 5 |

@@ -4,8 +4,9 @@
 
 ```
 bitcoin-node-odin/
-├── main.odin              # Entry point, CLI parsing, config file, thread orchestration
+├── main.odin              # Entry point, CLI parsing (core:flags), config file, thread orchestration
 ├── Makefile               # Build system
+├── contrib/               # btcnode.conf.sample (commented reference config)
 ├── crypto/                # SHA-256d, RIPEMD-160, HASH160, secp256k1 (verify+sign+ElligatorSwift), Merkle root, address encoding, WIF, SipHash-2-4, GCS (BIP158)
 ├── wire/                  # Protocol types, CompactSize, tx/block serialization, message framing, compact blocks (BIP152), addrv2 (BIP155), filter messages (BIP157)
 ├── script/                # Script interpreter, opcodes, standard types, Taproot (BIP341/342)
