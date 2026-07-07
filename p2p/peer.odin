@@ -58,6 +58,10 @@ Peer :: struct {
 
 // Start an async connect to a peer. Allocates Peer, adds to cm.peers, kicks off nbio.dial_poly.
 peer_start_connect :: proc(cm: ^Conn_Manager, address: string, port: int, peer_id: Peer_Id) {
+	// setnetworkactive gate + ban list (RPC-controlled).
+	if !cm.network_active || conn_manager_is_banned(cm, address) {
+		return
+	}
 	// Resolve address to endpoint (DNS is blocking — happens once at startup, acceptable).
 	ip4, ip4_ok := tcp.parse_ip4_address(address)
 	if !ip4_ok {

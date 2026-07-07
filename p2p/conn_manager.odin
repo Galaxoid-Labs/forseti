@@ -16,8 +16,37 @@ import "../storage"
 import "../wire"
 import zmqpkg "../zmq"
 
+Control_Action :: enum {
+	Disconnect_Peer,
+	Connect_Once,      // addnode onetry/add
+	Set_Network_Active,
+	Precious_Block,
+	Prune_Now,
+}
+
+// Cross-thread node-control request (RPC thread → P2P event loop). Optional
+// completion signaling for synchronous RPCs (pruneblockchain).
+Control_Request :: struct {
+	action:  Control_Action,
+	peer_id: Peer_Id,
+	address: string, // heap clone, freed by the drain
+	port:    int,
+	active:  bool,
+	hash:    Hash256,
+	height:  int,
+	done:    ^sync.Sema, // optional: posted when the action completes
+	result:  ^i64,       // optional: action-specific result
+}
+
 Conn_Manager :: struct {
 	zmq: ^zmqpkg.Node, // nil unless --zmqpub* configured
+	control_mutex: sync.Mutex,
+	control_queue: [dynamic]Control_Request,
+	ban_mutex:     sync.Mutex,
+	banned:        map[string]i64, // address → banned-until unix ts
+	added_mutex:   sync.Mutex,
+	added_nodes:   [dynamic]string, // addnode add list (heap clones)
+	network_active: bool, // setnetworkactive; connects/reconnects gated
 	peers:              map[Peer_Id]^Peer,
 	sync_mgr:           Sync_Manager,
 	chain:              ^chain.Chain_State,
@@ -112,6 +141,10 @@ conn_manager_init :: proc(cm: ^Conn_Manager, cs: ^chain.Chain_State, params: ^co
 	}
 
 	cm.peers = make(map[Peer_Id]^Peer, 256)
+	cm.control_queue = make([dynamic]Control_Request, 0, 4)
+	cm.banned = make(map[string]i64)
+	cm.added_nodes = make([dynamic]string, 0, 4)
+	cm.network_active = true
 	cm.zombie_peers = make([dynamic]^Peer, 0, 8)
 	cm.v2_failed_addrs = make(map[string]bool, 32)
 	cm.relay_queue = make([dynamic]Relay_Item, 0, 16)
@@ -264,6 +297,7 @@ conn_manager_shutdown :: proc(cm: ^Conn_Manager) {
 
 // Periodic timer callback — handles ping, header refresh, stall checks.
 _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
+	_drain_control_queue(cm)
 	if cm.shutdown {
 		return
 	}
@@ -476,6 +510,11 @@ _on_accept :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 	}
 	peer.port = ep.port
 
+	if !cm.network_active || conn_manager_is_banned(cm, peer.address) {
+		tcp.close(peer.socket)
+		_peer_free(peer)
+		return
+	}
 	cm.peers[peer.id] = peer
 
 	log.debugf("Inbound connection from %s:%d (peer %d)", peer.address, peer.port, peer.id)
@@ -608,6 +647,117 @@ _conn_manager_peer_connected :: proc(cm: ^Conn_Manager, peer: ^Peer) {
 	peer_send_version(peer, cm.params, chain_height, cm.local_services)
 	peer.state = .Version_Sent
 	_peer_start_recv(peer)
+}
+
+// Enqueue a control request from any thread; the P2P event loop drains it
+// on its periodic tick.
+conn_manager_control :: proc(cm: ^Conn_Manager, req: Control_Request) {
+	sync.mutex_lock(&cm.control_mutex)
+	append(&cm.control_queue, req)
+	sync.mutex_unlock(&cm.control_mutex)
+}
+
+conn_manager_is_banned :: proc(cm: ^Conn_Manager, address: string) -> bool {
+	sync.mutex_lock(&cm.ban_mutex)
+	defer sync.mutex_unlock(&cm.ban_mutex)
+	until, found := cm.banned[address]
+	if !found {
+		return false
+	}
+	if time.to_unix_seconds(time.now()) >= until {
+		delete_key(&cm.banned, address)
+		return false
+	}
+	return true
+}
+
+conn_manager_set_ban :: proc(cm: ^Conn_Manager, address: string, until: i64) {
+	sync.mutex_lock(&cm.ban_mutex)
+	cm.banned[strings.clone(address)] = until
+	sync.mutex_unlock(&cm.ban_mutex)
+}
+
+conn_manager_remove_ban :: proc(cm: ^Conn_Manager, address: string) -> bool {
+	sync.mutex_lock(&cm.ban_mutex)
+	defer sync.mutex_unlock(&cm.ban_mutex)
+	if address in cm.banned {
+		delete_key(&cm.banned, address)
+		return true
+	}
+	return false
+}
+
+conn_manager_clear_bans :: proc(cm: ^Conn_Manager) {
+	sync.mutex_lock(&cm.ban_mutex)
+	clear(&cm.banned)
+	sync.mutex_unlock(&cm.ban_mutex)
+}
+
+// Drain pending control requests — runs on the P2P thread only.
+_drain_control_queue :: proc(cm: ^Conn_Manager) {
+	sync.mutex_lock(&cm.control_mutex)
+	pending := cm.control_queue
+	cm.control_queue = make([dynamic]Control_Request, 0, 4)
+	sync.mutex_unlock(&cm.control_mutex)
+
+	for req in pending {
+		switch req.action {
+		case .Disconnect_Peer:
+			target := req.peer_id
+			if target == 0 && req.address != "" {
+				for id, peer in cm.peers {
+					if peer.address == req.address {
+						target = id
+						break
+					}
+				}
+			}
+			if peer, found := cm.peers[target]; found {
+				log.infof("RPC disconnect of peer %d (%s)", target, peer.address)
+				sync_handle_disconnect(&cm.sync_mgr, target, &cm.peers)
+				conn_manager_remove_peer(cm, target)
+			}
+		case .Connect_Once:
+			if cm.network_active && !conn_manager_is_banned(cm, req.address) {
+				peer_start_connect(cm, req.address, req.port, cm.next_peer_id)
+				cm.next_peer_id += 1
+			}
+		case .Set_Network_Active:
+			cm.network_active = req.active
+			if !req.active {
+				ids := make([dynamic]Peer_Id, 0, len(cm.peers), context.temp_allocator)
+				for id in cm.peers {
+					append(&ids, id)
+				}
+				for id in ids {
+					sync_handle_disconnect(&cm.sync_mgr, id, &cm.peers)
+					conn_manager_remove_peer(cm, id)
+				}
+				log.info("Network deactivated via RPC (setnetworkactive false)")
+			} else {
+				log.info("Network reactivated via RPC")
+			}
+		case .Precious_Block:
+			if entry, found := cm.chain.block_index.entries[req.hash]; found {
+				cm.chain.block_index.best_header = entry
+				if cerr := chain.activate_best_chain(cm.chain, allow_tie = true); cerr != .None {
+					log.warnf("preciousblock: activation failed: %v", cerr)
+				}
+			}
+		case .Prune_Now:
+			chain.prune_block_files(cm.chain, cm.chain.last_flush_height)
+			if req.result != nil {
+				req.result^ = i64(cm.chain.last_flush_height)
+			}
+		}
+		if req.address != "" {
+			delete(req.address)
+		}
+		if req.done != nil {
+			sync.sema_post(req.done)
+		}
+	}
+	delete(pending)
 }
 
 // Dispatch inbound message by command (called inline from recv callback).

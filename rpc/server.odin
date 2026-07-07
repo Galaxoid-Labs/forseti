@@ -391,6 +391,30 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_getmempoolinfo(srv, req.params)
 	case "estimatesmartfee":
 		return _handle_estimatesmartfee(srv, req.params)
+	case "createmultisig":
+		return _handle_createmultisig(srv, req.params)
+	case "getindexinfo":
+		return _handle_getindexinfo(srv, req.params)
+	case "pruneblockchain":
+		return _handle_pruneblockchain(srv, req.params)
+	case "preciousblock":
+		return _handle_preciousblock(srv, req.params)
+	case "addnode":
+		return _handle_addnode(srv, req.params)
+	case "getaddednodeinfo":
+		return _handle_getaddednodeinfo(srv, req.params)
+	case "disconnectnode":
+		return _handle_disconnectnode(srv, req.params)
+	case "setban":
+		return _handle_setban(srv, req.params)
+	case "listbanned":
+		return _handle_listbanned(srv, req.params)
+	case "clearbanned":
+		return _handle_clearbanned(srv, req.params)
+	case "setnetworkactive":
+		return _handle_setnetworkactive(srv, req.params)
+	case "getnodeaddresses":
+		return _handle_getnodeaddresses(srv, req.params)
 	case "getrawmempool":
 		return _handle_getrawmempool(srv, req.params)
 	case "gettxout":

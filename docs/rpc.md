@@ -17,13 +17,13 @@ curl -s -u myuser:mypassword \
 bitcoin-cli -rpcport=18443 getblockchaininfo
 ```
 
-## Bitcoin Core RPC Coverage (46 / 78 non-wallet RPCs)
+## Bitcoin Core RPC Coverage (58 / 78 non-wallet RPCs)
 
 Plus one btcnode-specific method: `getnodestatus` (feeds the GUI/TUI dashboards).
 
 The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are intentionally excluded.
 
-**Blockchain (21/25):**
+**Blockchain (23/25):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
@@ -46,8 +46,8 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `gettxout` | Yes | |
 | `gettxoutproof` | Yes | Partial merkle tree proof |
 | `gettxoutsetinfo` | Yes | UTXO count + total amount |
-| `preciousblock` | — | Manual best-chain override |
-| `pruneblockchain` | — | Pruning exists (`--prune`), RPC trigger does not |
+| `preciousblock` | Yes | Routed through the P2P control queue |
+| `pruneblockchain` | Yes | Requires `--prune` mode |
 | `savemempool` | Yes | |
 | `scantxoutset` | — | UTXO set descriptor scan |
 | `verifychain` | — | Block-by-block re-verification |
@@ -83,23 +83,23 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `submitblock` | — | Mined block submission |
 | `submitheader` | — | Header-only submission |
 
-**Network (5/13):**
+**Network (13/13):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
-| `addnode` | — | Manual peer management |
-| `clearbanned` | — | No ban list |
-| `disconnectnode` | — | Manual peer disconnect |
-| `getaddednodeinfo` | — | Manual peer list info |
+| `addnode` | Yes | add / remove / onetry |
+| `clearbanned` | Yes | |
+| `disconnectnode` | Yes | By address or nodeid |
+| `getaddednodeinfo` | Yes | |
 | `getconnectioncount` | Yes | |
 | `getnettotals` | Yes | |
 | `getnetworkinfo` | Yes | |
-| `getnodeaddresses` | — | Known address gossip |
+| `getnodeaddresses` | Yes | IPv4 from the address manager |
 | `getpeerinfo` | Yes | 18 fields |
-| `listbanned` | — | No ban list |
+| `listbanned` | Yes | Address-level bans |
 | `ping` | Yes | |
-| `setban` | — | No ban list |
-| `setnetworkactive` | — | No network toggle |
+| `setban` | Yes | Address-level (subnets: /32 only) |
+| `setnetworkactive` | Yes | Disconnects all peers when false |
 
 **Raw Transactions (8/17):**
 
@@ -123,15 +123,15 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `testmempoolaccept` | Yes | |
 | `utxoupdatepsbt` | — | PSBT not implemented |
 
-**Util (4/8):**
+**Util (6/8):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
-| `createmultisig` | — | Multisig script construction |
+| `createmultisig` | Yes | legacy / p2sh-segwit / bech32 |
 | `deriveaddresses` | — | Descriptor address derivation |
 | `estimatesmartfee` | Yes | Mempool-floor estimator |
 | `getdescriptorinfo` | — | Output descriptor analysis |
-| `getindexinfo` | — | Optional index status |
+| `getindexinfo` | Yes | |
 | `signmessagewithprivkey` | Yes | |
 | `validateaddress` | Yes | |
 | `verifymessage` | Yes | |

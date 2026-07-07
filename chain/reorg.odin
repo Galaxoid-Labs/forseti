@@ -20,7 +20,7 @@ import "../wire"
 //     Failed and the original chain is reconnected from disk.
 //   - All UTXO changes stay in the write-back cache: a crash mid-reorg
 //     recovers to the last flush point exactly like any other crash.
-activate_best_chain :: proc(cs: ^Chain_State) -> Chain_Error {
+activate_best_chain :: proc(cs: ^Chain_State, allow_tie := false) -> Chain_Error {
 	candidate := cs.block_index.best_header
 	if candidate == nil || len(cs.active_chain) == 0 {
 		return .None
@@ -30,7 +30,8 @@ activate_best_chain :: proc(cs: ^Chain_State) -> Chain_Error {
 	if !tip_found || candidate == tip {
 		return .None
 	}
-	if consensus.u256_compare(candidate.chain_work, tip.chain_work) <= 0 {
+	cmp := consensus.u256_compare(candidate.chain_work, tip.chain_work)
+	if cmp < 0 || (cmp == 0 && !allow_tie) {
 		return .None // active chain is already (at least tied for) best
 	}
 

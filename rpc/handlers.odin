@@ -3,7 +3,9 @@ package rpc
 import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
+import "core:strconv"
 import "core:strings"
+import "core:sync"
 import "core:time"
 import "../chain"
 import "../consensus"
@@ -2900,4 +2902,331 @@ _handle_getnodestatus :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respo
 	obj["peers"] = json.Value(peers)
 
 	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// --- createmultisig ---
+
+_handle_createmultisig :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	nreq_i, nreq_ok := _get_int_param(params, 0)
+	if !nreq_ok || nreq_i < 1 || nreq_i > 16 {
+		return _make_error(.Invalid_Params, "nrequired must be 1-16", srv._current_id)
+	}
+	keys_val, keys_ok := _get_param(params, 1)
+	keys_arr, is_arr := keys_val.(json.Array)
+	if !keys_ok || !is_arr || len(keys_arr) < nreq_i || len(keys_arr) > 16 {
+		return _make_error(.Invalid_Params, "keys must be an array of nrequired..16 public keys", srv._current_id)
+	}
+	addr_type := "legacy"
+	if at, at_ok := _get_string_param(params, 2); at_ok {
+		addr_type = at
+	}
+
+	// Build OP_n <pubkeys...> OP_m OP_CHECKMULTISIG. OP_1 = 0x51.
+	redeem := make([dynamic]byte, 0, 8 + len(keys_arr) * 34, context.temp_allocator)
+	append(&redeem, byte(0x50 + nreq_i))
+	for kv in keys_arr {
+		key_hex, is_str := kv.(json.String)
+		if !is_str {
+			return _make_error(.Invalid_Params, "key must be a hex string", srv._current_id)
+		}
+		key_bytes, hex_ok := _hex_decode(key_hex)
+		if !hex_ok || (len(key_bytes) != 33 && len(key_bytes) != 65) {
+			return _make_error(.Invalid_Params, "keys must be 33- or 65-byte hex public keys", srv._current_id)
+		}
+		append(&redeem, byte(len(key_bytes)))
+		append(&redeem, ..key_bytes)
+	}
+	append(&redeem, byte(0x50 + len(keys_arr)))
+	append(&redeem, byte(0xae)) // OP_CHECKMULTISIG
+	if len(redeem) > 520 && addr_type == "legacy" {
+		return _make_error(.Invalid_Params, "redeemScript exceeds 520-byte P2SH limit (use bech32)", srv._current_id)
+	}
+
+	address: string
+	switch addr_type {
+	case "legacy":
+		h160 := crypto.hash160(redeem[:])
+		address = crypto.base58check_encode(srv.params.p2sh_prefix, h160[:])
+	case "bech32":
+		wsh := crypto.sha256_hash(redeem[:])
+		address = crypto.bech32_encode(srv.params.bech32_hrp, 0, wsh[:])
+	case "p2sh-segwit":
+		wsh := crypto.sha256_hash(redeem[:])
+		wsh_script := make([dynamic]byte, 0, 34, context.temp_allocator)
+		append(&wsh_script, 0x00, 0x20)
+		append(&wsh_script, ..wsh[:])
+		h160 := crypto.hash160(wsh_script[:])
+		address = crypto.base58check_encode(srv.params.p2sh_prefix, h160[:])
+	case:
+		return _make_error(.Invalid_Params, "address_type must be legacy, p2sh-segwit, or bech32", srv._current_id)
+	}
+
+	obj := make(json.Object, 2, context.temp_allocator)
+	obj["address"] = json.Value(json.String(address))
+	obj["redeemScript"] = json.Value(json.String(_bytes_to_hex(redeem[:])))
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// --- getindexinfo ---
+
+_handle_getindexinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	obj := make(json.Object, 1, context.temp_allocator)
+	if srv.chain.filter_db != nil {
+		_, tip_height := chain.chain_tip(srv.chain)
+		fi := make(json.Object, 3, context.temp_allocator)
+		fi["synced"] = json.Value(json.Boolean(true))
+		fi["best_block_height"] = json.Value(json.Integer(tip_height))
+		obj["basic block filter index"] = json.Value(fi)
+	}
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// --- node-control RPCs (routed through the P2P control queue) ---
+
+_require_cm :: proc(srv: ^RPC_Server) -> (^p2p.Conn_Manager, bool) {
+	return srv.cm, srv.cm != nil
+}
+
+_handle_pruneblockchain :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	if srv.chain.prune_target <= 0 {
+		return _make_error(.Internal_Error, "Cannot prune: node is not in prune mode (--prune)", srv._current_id)
+	}
+	cm, has_cm := _require_cm(srv)
+	if !has_cm {
+		return _make_error(.Internal_Error, "P2P disabled", srv._current_id)
+	}
+	done: sync.Sema
+	result: i64
+	p2p.conn_manager_control(cm, p2p.Control_Request{action = .Prune_Now, done = &done, result = &result})
+	if !sync.sema_wait_with_timeout(&done, 30 * time.Second) {
+		return _make_error(.Internal_Error, "Prune timed out", srv._current_id)
+	}
+	return _make_result(json.Value(json.Integer(result)), srv._current_id)
+}
+
+_handle_preciousblock :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	hash_hex, ok := _get_string_param(params, 0)
+	hash, hash_ok := _hex_to_hash(hash_hex)
+	if !ok || !hash_ok {
+		return _make_error(.Invalid_Params, "Invalid block hash", srv._current_id)
+	}
+	if _, found := srv.chain.block_index.entries[hash]; !found {
+		return _make_error(.Block_Not_Found, "Block not found", srv._current_id)
+	}
+	cm, has_cm := _require_cm(srv)
+	if !has_cm {
+		return _make_error(.Internal_Error, "P2P disabled", srv._current_id)
+	}
+	p2p.conn_manager_control(cm, p2p.Control_Request{action = .Precious_Block, hash = hash})
+	return _make_result(json.Value(nil), srv._current_id)
+}
+
+_split_host_port :: proc(node: string, default_port: int) -> (host: string, port: int) {
+	port = default_port
+	host = node
+	if colon := strings.last_index_byte(node, ':'); colon > 0 {
+		if p, p_ok := strconv.parse_int(node[colon + 1:]); p_ok {
+			host = node[:colon]
+			port = p
+		}
+	}
+	return
+}
+
+_handle_addnode :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	node, node_ok := _get_string_param(params, 0)
+	command, cmd_ok := _get_string_param(params, 1)
+	if !node_ok || !cmd_ok {
+		return _make_error(.Invalid_Params, "Usage: addnode \"ip:port\" \"add|remove|onetry\"", srv._current_id)
+	}
+	cm, has_cm := _require_cm(srv)
+	if !has_cm {
+		return _make_error(.Internal_Error, "P2P disabled", srv._current_id)
+	}
+	host, port := _split_host_port(node, cm.default_port)
+
+	switch command {
+	case "onetry", "add":
+		if command == "add" {
+			sync.mutex_lock(&cm.added_mutex)
+			exists := false
+			for a in cm.added_nodes {
+				if a == node {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				append(&cm.added_nodes, strings.clone(node))
+			}
+			sync.mutex_unlock(&cm.added_mutex)
+		}
+		p2p.conn_manager_control(cm, p2p.Control_Request{action = .Connect_Once, address = strings.clone(host), port = port})
+	case "remove":
+		sync.mutex_lock(&cm.added_mutex)
+		for a, i in cm.added_nodes {
+			if a == node {
+				delete(a)
+				ordered_remove(&cm.added_nodes, i)
+				break
+			}
+		}
+		sync.mutex_unlock(&cm.added_mutex)
+	case:
+		return _make_error(.Invalid_Params, "command must be add, remove, or onetry", srv._current_id)
+	}
+	return _make_result(json.Value(nil), srv._current_id)
+}
+
+_handle_getaddednodeinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	cm, has_cm := _require_cm(srv)
+	if !has_cm {
+		return _make_error(.Internal_Error, "P2P disabled", srv._current_id)
+	}
+	sync.mutex_lock(&cm.added_mutex)
+	arr := make(json.Array, len(cm.added_nodes), context.temp_allocator)
+	for node, i in cm.added_nodes {
+		host, _ := _split_host_port(node, cm.default_port)
+		connected := false
+		for _, peer in cm.peers { // same read-race tolerance as getpeerinfo
+			if peer.address == host {
+				connected = true
+				break
+			}
+		}
+		obj := make(json.Object, 3, context.temp_allocator)
+		obj["addednode"] = json.Value(json.String(node))
+		obj["connected"] = json.Value(json.Boolean(connected))
+		arr[i] = json.Value(obj)
+	}
+	sync.mutex_unlock(&cm.added_mutex)
+	return _make_result(json.Value(arr), srv._current_id)
+}
+
+_handle_disconnectnode :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	cm, has_cm := _require_cm(srv)
+	if !has_cm {
+		return _make_error(.Internal_Error, "P2P disabled", srv._current_id)
+	}
+	req := p2p.Control_Request{action = .Disconnect_Peer}
+	if addr, addr_ok := _get_string_param(params, 0); addr_ok && addr != "" {
+		host, _ := _split_host_port(addr, cm.default_port)
+		req.address = strings.clone(host)
+	} else if id, id_ok := _get_int_param(params, 1); id_ok {
+		req.peer_id = p2p.Peer_Id(id)
+	} else {
+		return _make_error(.Invalid_Params, "Provide address or nodeid", srv._current_id)
+	}
+	p2p.conn_manager_control(cm, req)
+	return _make_result(json.Value(nil), srv._current_id)
+}
+
+_handle_setban :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	subnet, subnet_ok := _get_string_param(params, 0)
+	command, cmd_ok := _get_string_param(params, 1)
+	if !subnet_ok || !cmd_ok {
+		return _make_error(.Invalid_Params, "Usage: setban \"ip\" \"add|remove\" [bantime]", srv._current_id)
+	}
+	cm, has_cm := _require_cm(srv)
+	if !has_cm {
+		return _make_error(.Internal_Error, "P2P disabled", srv._current_id)
+	}
+	// Address-level bans only; accept and strip a /32 suffix.
+	addr := strings.trim_suffix(subnet, "/32")
+
+	switch command {
+	case "add":
+		bantime := i64(0)
+		if bt, bt_ok := _get_int_param(params, 2); bt_ok {
+			bantime = i64(bt)
+		}
+		if bantime == 0 {
+			bantime = 24 * 60 * 60 // Core default: 24h
+		}
+		until := time.to_unix_seconds(time.now()) + bantime
+		p2p.conn_manager_set_ban(cm, addr, until)
+		// Also disconnect if currently connected.
+		p2p.conn_manager_control(cm, p2p.Control_Request{action = .Disconnect_Peer, address = strings.clone(addr)})
+	case "remove":
+		if !p2p.conn_manager_remove_ban(cm, addr) {
+			return _make_error(.Invalid_Params, "Address not banned", srv._current_id)
+		}
+	case:
+		return _make_error(.Invalid_Params, "command must be add or remove", srv._current_id)
+	}
+	return _make_result(json.Value(nil), srv._current_id)
+}
+
+_handle_listbanned :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	cm, has_cm := _require_cm(srv)
+	if !has_cm {
+		return _make_error(.Internal_Error, "P2P disabled", srv._current_id)
+	}
+	sync.mutex_lock(&cm.ban_mutex)
+	arr := make(json.Array, 0, context.temp_allocator)
+	now := time.to_unix_seconds(time.now())
+	for addr, until in cm.banned {
+		if until <= now {
+			continue
+		}
+		obj := make(json.Object, 3, context.temp_allocator)
+		obj["address"] = json.Value(json.String(addr))
+		obj["banned_until"] = json.Value(json.Integer(until))
+		obj["ban_created"] = json.Value(json.Integer(0))
+		append(&arr, json.Value(obj))
+	}
+	sync.mutex_unlock(&cm.ban_mutex)
+	return _make_result(json.Value(arr), srv._current_id)
+}
+
+_handle_clearbanned :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	cm, has_cm := _require_cm(srv)
+	if !has_cm {
+		return _make_error(.Internal_Error, "P2P disabled", srv._current_id)
+	}
+	p2p.conn_manager_clear_bans(cm)
+	return _make_result(json.Value(nil), srv._current_id)
+}
+
+_handle_setnetworkactive :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	state_val, ok := _get_param(params, 0)
+	state, is_bool := state_val.(json.Boolean)
+	if !ok || !is_bool {
+		return _make_error(.Invalid_Params, "Usage: setnetworkactive true|false", srv._current_id)
+	}
+	cm, has_cm := _require_cm(srv)
+	if !has_cm {
+		return _make_error(.Internal_Error, "P2P disabled", srv._current_id)
+	}
+	p2p.conn_manager_control(cm, p2p.Control_Request{action = .Set_Network_Active, active = bool(state)})
+	return _make_result(json.Value(json.Boolean(state)), srv._current_id)
+}
+
+_handle_getnodeaddresses :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	cm, has_cm := _require_cm(srv)
+	if !has_cm {
+		return _make_error(.Internal_Error, "P2P disabled", srv._current_id)
+	}
+	count := 1
+	if c, c_ok := _get_int_param(params, 0); c_ok {
+		count = c
+	}
+	if count == 0 {
+		count = 2500 // Core: 0 = all (capped)
+	}
+	kas := p2p.addr_manager_get_random(&cm.addr_mgr, count, context.temp_allocator)
+	arr := make(json.Array, 0, context.temp_allocator)
+	for ka in kas {
+		if ka.net != .IPv4 || len(ka.addr) != 4 {
+			continue // v1: report IPv4 only
+		}
+		obj := make(json.Object, 5, context.temp_allocator)
+		obj["time"] = json.Value(json.Integer(i64(ka.timestamp)))
+		obj["services"] = json.Value(json.Integer(i64(ka.services)))
+		obj["address"] = json.Value(json.String(fmt.tprintf("%d.%d.%d.%d", ka.addr[0], ka.addr[1], ka.addr[2], ka.addr[3])))
+		obj["port"] = json.Value(json.Integer(int(ka.port)))
+		obj["network"] = json.Value(json.String("ipv4"))
+		append(&arr, json.Value(obj))
+	}
+	return _make_result(json.Value(arr), srv._current_id)
 }

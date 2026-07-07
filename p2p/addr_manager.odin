@@ -3,6 +3,7 @@ package p2p
 import "core:fmt"
 import "core:math/rand"
 
+import "core:sync"
 import "../wire"
 
 MAX_KNOWN_ADDRESSES :: 5000
@@ -16,6 +17,7 @@ Known_Address :: struct {
 }
 
 Addr_Manager :: struct {
+	mutex:     sync.Mutex, // RPC threads read (getnodeaddresses) while P2P mutates
 	addresses: [dynamic]^Known_Address,
 	seen:      map[u64]int,   // hash(net,addr,port) → index in addresses
 }
@@ -37,6 +39,8 @@ addr_manager_destroy :: proc(am: ^Addr_Manager) {
 // Add an address. Deduplicates by (net, addr, port). Updates timestamp if exists.
 // Returns true if newly added.
 addr_manager_add :: proc(am: ^Addr_Manager, ka: ^Known_Address) -> bool {
+	sync.mutex_lock(&am.mutex)
+	defer sync.mutex_unlock(&am.mutex)
 	h := _addr_hash(ka.net, ka.addr, ka.port)
 
 	idx, found := am.seen[h]
@@ -83,6 +87,8 @@ addr_manager_add :: proc(am: ^Addr_Manager, ka: ^Known_Address) -> bool {
 
 // Return up to `count` random addresses (Fisher-Yates partial shuffle).
 addr_manager_get_random :: proc(am: ^Addr_Manager, count: int, allocator := context.allocator) -> []^Known_Address {
+	sync.mutex_lock(&am.mutex)
+	defer sync.mutex_unlock(&am.mutex)
 	n := min(count, len(am.addresses))
 	if n == 0 {
 		return nil
@@ -110,6 +116,8 @@ addr_manager_get_random :: proc(am: ^Addr_Manager, count: int, allocator := cont
 // Get next connectable IPv4 address as "ip:port" string + port int.
 // Iterates from a random offset to avoid always connecting to the same peers.
 addr_manager_get_connectable :: proc(am: ^Addr_Manager) -> (addr_str: string, port: int, ok: bool) {
+	sync.mutex_lock(&am.mutex)
+	defer sync.mutex_unlock(&am.mutex)
 	if len(am.addresses) == 0 {
 		return "", 0, false
 	}
