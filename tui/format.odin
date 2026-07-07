@@ -207,11 +207,17 @@ utxo_line :: proc(st: ^p2p.Node_Status, allocator := context.temp_allocator) -> 
 }
 
 profile_line :: proc(st: ^p2p.Node_Status, allocator := context.temp_allocator) -> string {
-	if st.prof_blocks == 0 || st.prof_ms_per_block < 0.5 {
-		return fmt.aprintf("Profile: (idle)", allocator = allocator)
+	if st.prof_blocks == 0 {
+		return fmt.aprintf("Profile: (waiting for first block)", allocator = allocator)
 	}
-	return fmt.aprintf("Profile %.1f ms/blk | read %.0f%% prefetch %.0f%% validate %.0f%% utxo %.0f%% scripts %.0f%% undo %.0f%%",
-		st.prof_ms_per_block, st.prof_read_pct, st.prof_prefetch_pct,
+	rate := st.blocks_per_sec > 0 ? fmt.tprintf(" %.1f blk/s |", st.blocks_per_sec) : ""
+	if st.prof_ms_per_block < 0.5 {
+		// Sub-ms early-chain blocks are too fast for a meaningful phase split.
+		return fmt.aprintf("Profile %.2f ms/blk |%s (too fast to break down by phase)",
+			st.prof_ms_per_block, rate, allocator = allocator)
+	}
+	return fmt.aprintf("Profile %.2f ms/blk |%s read %.0f%% prefetch %.0f%% validate %.0f%% utxo %.0f%% scripts %.0f%% undo %.0f%%",
+		st.prof_ms_per_block, rate, st.prof_read_pct, st.prof_prefetch_pct,
 		st.prof_valid_pct, st.prof_utxo_pct, st.prof_scripts_pct, st.prof_undo_pct, allocator = allocator)
 }
 

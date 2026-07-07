@@ -2964,6 +2964,7 @@ _handle_getnodestatus :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respo
 	obj["blocks_in_flight"] = json.Value(json.Integer(i64(st.blocks_in_flight)))
 	obj["verification_pct"] = json.Value(json.Float(st.verification_pct))
 	obj["eta_secs"] = json.Value(json.Integer(st.eta_secs))
+	obj["blocks_per_sec"] = json.Value(json.Float(st.blocks_per_sec))
 	obj["mempool_count"] = json.Value(json.Integer(i64(st.mempool_count)))
 	obj["mempool_vbytes"] = json.Value(json.Integer(i64(st.mempool_vbytes)))
 	obj["utxo_cache_count"] = json.Value(json.Integer(i64(st.utxo_cache_count)))

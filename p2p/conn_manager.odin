@@ -123,9 +123,16 @@ Conn_Manager :: struct {
 	started_at:     i64, // unix timestamp, for uptime display
 	// Ring of (chain_tx, time) samples from the 1 Hz status tick; ETA divides
 	// estimated remaining txs by throughput measured over this window.
-	txput_ring:     [120]struct{ chain_tx: i64, t: i64 },
+	txput_ring:     [120]struct{ chain_tx: i64, height: int, t: i64 },
 	txput_idx:      int,
 	txput_count:    int,
+	// Last completed profile window, held on the status when the live window is
+	// momentarily empty (it resets to 0 every 1000 blocks for the log line, else
+	// the dashboard panel blanks for a tick mid-sync).
+	last_prof:      struct{
+		blocks:                                                        int,
+		ms_per_block, read, prefetch, valid, utxo, scripts, undo:      f64,
+	},
 	disk_usage:     i64, // cached datadir usage (walking files is too heavy per tick)
 	disk_check_at:  i64,
 	// Lifetime traffic counters (P2P thread only) — the GUI derives per-second
@@ -2146,13 +2153,19 @@ _update_node_status :: proc(cm: ^Conn_Manager, now: i64) {
 	// misestimate remaining work by ~40x across chain eras).
 	st.verification_pct = chain.verification_progress(cm.chain, now)
 	tip_tx := chain.chain_tx_at_tip(cm.chain)
-	cm.txput_ring[cm.txput_idx] = {tip_tx, now}
+	cm.txput_ring[cm.txput_idx] = {tip_tx, tip_height, now}
 	cm.txput_idx = (cm.txput_idx + 1) % len(cm.txput_ring)
 	if cm.txput_count < len(cm.txput_ring) { cm.txput_count += 1 }
 	if st.sync_state != .In_Sync && cm.txput_count > 10 {
 		oldest := cm.txput_ring[(cm.txput_idx + len(cm.txput_ring) - cm.txput_count) % len(cm.txput_ring)]
 		dt := now - oldest.t
 		dtx := tip_tx - oldest.chain_tx
+		// Wall-clock block throughput over the same window (includes download +
+		// idle time, so it's the actual sync speed — distinct from the profile's
+		// pure processing ms/block).
+		if dblk := tip_height - oldest.height; dt > 0 && dblk > 0 {
+			st.blocks_per_sec = f64(dblk) / f64(dt)
+		}
 		if dt > 0 && dtx > 0 {
 			rate := f64(dtx) / f64(dt) // txs/sec
 			// Remaining transactions. When the anchor underestimates the chain
@@ -2219,7 +2232,9 @@ _update_node_status :: proc(cm: ^Conn_Manager, now: i64) {
 	st.utxo_cache_bytes = cm.chain.coins.mem_usage
 	st.utxo_cache_budget = cm.chain.coins.budget
 
-	// Profile window (cumulative counters since the last 1000-block log)
+	// Profile window (cumulative counters since the last 1000-block log). The
+	// window resets to 0 every 1000 blocks; hold the last completed window when
+	// it's momentarily empty so the panel doesn't blank mid-sync.
 	prof := cm.chain.prof
 	if prof.blocks > 0 {
 		total_ms := f64(time.duration_milliseconds(prof.t_total))
@@ -2233,6 +2248,19 @@ _update_node_status :: proc(cm: ^Conn_Manager, now: i64) {
 			st.prof_scripts_pct = 100 * f64(time.duration_milliseconds(prof.t_scripts)) / total_ms
 			st.prof_undo_pct = 100 * f64(time.duration_milliseconds(prof.t_undo)) / total_ms
 		}
+		cm.last_prof = {
+			st.prof_blocks, st.prof_ms_per_block, st.prof_read_pct, st.prof_prefetch_pct,
+			st.prof_valid_pct, st.prof_utxo_pct, st.prof_scripts_pct, st.prof_undo_pct,
+		}
+	} else if cm.last_prof.blocks > 0 {
+		st.prof_blocks = cm.last_prof.blocks
+		st.prof_ms_per_block = cm.last_prof.ms_per_block
+		st.prof_read_pct = cm.last_prof.read
+		st.prof_prefetch_pct = cm.last_prof.prefetch
+		st.prof_valid_pct = cm.last_prof.valid
+		st.prof_utxo_pct = cm.last_prof.utxo
+		st.prof_scripts_pct = cm.last_prof.scripts
+		st.prof_undo_pct = cm.last_prof.undo
 	}
 
 	sync.mutex_lock(&cm.status_mutex)

@@ -204,6 +204,7 @@ _fetch_status :: proc(c: ^Client) -> (st: p2p.Node_Status, ok: bool) {
 	st.blocks_in_flight = int(_jint(result, "blocks_in_flight"))
 	st.verification_pct = _jfloat(result, "verification_pct")
 	st.eta_secs = _jint(result, "eta_secs")
+	st.blocks_per_sec = _jfloat(result, "blocks_per_sec")
 	st.mempool_count = int(_jint(result, "mempool_count"))
 	st.mempool_vbytes = int(_jint(result, "mempool_vbytes"))
 	st.utxo_cache_count = int(_jint(result, "utxo_cache_count"))

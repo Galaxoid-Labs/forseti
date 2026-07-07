@@ -1667,12 +1667,14 @@ estimated_total_chain_tx :: proc(params: ^consensus.Chain_Params, now: i64) -> f
 	return f64(params.assumed_chain_tx) + extra
 }
 
-// Verification progress in [0,1], measured in transactions verified vs the
-// estimated chain total — block counts misestimate work by ~40x across eras.
-// Falls back to the block/header ratio when there's no tx anchor (regtest) or
-// when the anchor UNDERESTIMATES the chain: spam-heavy signet/testnet can hold
-// more txs at the tip than the hardcoded anchor claims for the whole chain,
-// which would otherwise clamp progress to 100% mid-download.
+// Verification progress in [0,1]. Uses the transaction-based estimate (block
+// counts misestimate work by ~40x across eras) but caps it at the fraction of
+// blocks actually connected: you can never be "more done" than the blocks
+// you've downloaded. That cap keeps the bar honest for mainnet (where tx_p is
+// the smaller, work-weighted value) AND smooth for spam-heavy testnet4/signet
+// (where the tip holds more txs than the hardcoded anchor claims for the whole
+// chain, so tx_p would otherwise race to 100% and snap back). Both terms are
+// monotonic, so their min never moves backward. No anchor (regtest) → blocks.
 verification_progress :: proc(cs: ^Chain_State, now: i64) -> f64 {
 	tip_hash, tip_height := chain_tip(cs)
 	if tip_height < 0 { return 0 }
@@ -1683,12 +1685,8 @@ verification_progress :: proc(cs: ^Chain_State, now: i64) -> f64 {
 	if total <= 0 { return block_ratio }
 	entry, found := cs.block_index.entries[tip_hash]
 	if !found { return block_ratio }
-	tx_p := f64(entry.chain_tx) / total
-	// tx ratio saturated while blocks remain → anchor is too low; trust blocks.
-	if tx_p >= 1.0 && tip_height < header_h {
-		return block_ratio
-	}
-	return clamp(tx_p, 0, 1)
+	tx_p := clamp(f64(entry.chain_tx) / total, 0, 1)
+	return min(tx_p, block_ratio)
 }
 
 // Cumulative txs at the current tip (0 if unavailable).

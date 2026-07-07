@@ -568,17 +568,22 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	// --- Block profile ---
 	prof_y: f32 = 554
 	_group_box(rl.Rectangle{pad, prof_y, WIN_W - 2 * pad, 84}, fmt.ctprintf("Block Profile (last %d blocks)", st.prof_blocks))
-	if st.prof_blocks > 0 && st.prof_ms_per_block >= 0.5 {
-		// Sub-millisecond blocks (empty early chain / single blocks at tip)
-		// make the percentage breakdown a divide-by-nothing.
-		_text(fmt.ctprintf("Total: %.1f ms/block", st.prof_ms_per_block), pad + 12, i32(prof_y) + 18, 15, COL_ACCENT)
-		_text(
-			fmt.ctprintf("Read: %.0f%%   Prefetch: %.0f%%   Validate: %.0f%%   UTXO: %.0f%%   Scripts: %.0f%%   Undo: %.0f%%",
-				st.prof_read_pct, st.prof_prefetch_pct, st.prof_valid_pct,
-				st.prof_utxo_pct, st.prof_scripts_pct, st.prof_undo_pct),
-			pad + 12, i32(prof_y) + 46, 14, COL_TEXT)
+	if st.prof_blocks > 0 {
+		rate_part := st.blocks_per_sec > 0 ? fmt.ctprintf("   |   %.1f blocks/sec", st.blocks_per_sec) : ""
+		_text(fmt.ctprintf("Total: %.2f ms/block%s", st.prof_ms_per_block, rate_part), pad + 12, i32(prof_y) + 18, 15, COL_ACCENT)
+		if st.prof_ms_per_block >= 0.5 {
+			_text(
+				fmt.ctprintf("Read: %.0f%%   Prefetch: %.0f%%   Validate: %.0f%%   UTXO: %.0f%%   Scripts: %.0f%%   Undo: %.0f%%",
+					st.prof_read_pct, st.prof_prefetch_pct, st.prof_valid_pct,
+					st.prof_utxo_pct, st.prof_scripts_pct, st.prof_undo_pct),
+				pad + 12, i32(prof_y) + 46, 14, COL_TEXT)
+		} else {
+			// Sub-millisecond blocks (empty early chain) are too fast for a
+			// meaningful per-phase split — show the rate, skip the breakdown.
+			_text("Blocks too fast to break down by phase (early chain)", pad + 12, i32(prof_y) + 46, 14, COL_DIM)
+		}
 	} else {
-		_text("No blocks connected in the current window yet", pad + 12, i32(prof_y) + 32, 14, COL_DIM)
+		_text("Waiting for the first block to profile...", pad + 12, i32(prof_y) + 32, 14, COL_DIM)
 	}
 
 	// --- Status bar ---

@@ -35,6 +35,16 @@ background thread while the loading screen shows live stages (database open,
 block index build, crash recovery progress). Closing the window holds it open
 with a "shutting down" status until the final flush completes.
 
+During sync the **block profile** reports two complementary numbers:
+`ms/block` is pure validation time (how fast the machine *can* process a
+block), while `blocks/sec` is wall-clock throughput over a ~2-minute window
+(actual sync speed, including download and time spent waiting on peers). Early
+in a chain, blocks are near-empty and validate sub-millisecond, so the panel
+shows the rate and skips the per-phase breakdown until blocks are large enough
+to split meaningfully. Sync progress is measured in transactions verified
+(Bitcoin Core's `chainTxData` model), capped at the fraction of blocks
+downloaded so it stays monotonic on every network.
+
 Both dashboards show a red **VALIDATION HALTED at height N (reason)** banner
 if block validation ever wedges (cleared automatically on the next
 successful connect), and display 100% once the node is in sync.
