@@ -41,7 +41,6 @@ Wiz_State :: struct {
 	rpc_cookie: bool,   // true = cookie auth, false = user/pass
 	rpc_user:   string,
 	rpc_pass:   string,
-	dashboard:  string, // "gui" / "tui" / "" (headless)
 	// Advanced toggles (defaults match the node's built-ins).
 	adv_server:      bool, // RPC server on
 	adv_listen:      bool, // accept inbound connections
@@ -92,7 +91,6 @@ run_wizard :: proc() -> bool {
 		datadir       = _default_datadir(),
 		dbcache_mb    = 2048,
 		rpc_cookie    = true,
-		dashboard     = "gui",
 		adv_server    = true,
 		adv_listen    = true,
 		adv_v2        = true,
@@ -114,21 +112,47 @@ run_wizard :: proc() -> bool {
 		fmt.eprintln("Failed to write configuration.")
 		return false
 	}
+	_print_next_steps(&st, conf_path)
+	return true
+}
+
+// Printed to stdout after the wizard exits (terminal already restored, so it
+// stays in the scrollback). Shows every way to start the node and every way to
+// watch it — the run mode is a launch-time flag, not a config setting, so we
+// list them all rather than bake one in.
+_print_next_steps :: proc(st: ^Wiz_State, conf_path: string) {
+	dd := st.datadir
+	port := _rpc_port(st.network)
+	// btcnode-gui auth args, matching the RPC auth chosen in the wizard.
+	auth := st.rpc_cookie \
+		? fmt.tprintf("--cookie=%s/.cookie", dd) \
+		: fmt.tprintf("--rpcuser=%s --rpcpassword=%s", st.rpc_user, st.rpc_pass)
+
 	fmt.println()
-	fmt.printfln("  Created  %s", st.datadir)
+	fmt.printfln("  Created  %s", dd)
 	fmt.printfln("  Wrote    %s", conf_path)
 	fmt.println()
-	fmt.println("  Start your node:")
-	fmt.printfln("      ./btcnode%s", _start_command_args(&st))
+	fmt.println("  Start the node (everything else comes from the conf):")
+	fmt.printfln("      ./btcnode --datadir=%s              # foreground, logs to terminal", dd)
+	fmt.printfln("      ./btcnode --datadir=%s --gui        # desktop dashboard window", dd)
+	fmt.printfln("      ./btcnode --datadir=%s --tui        # terminal dashboard (SSH-friendly)", dd)
+	fmt.printfln("      ./btcnode --datadir=%s --daemon     # background, logs to %s/debug.log", dd, dd)
 	fmt.println()
-	return true
+	fmt.println("  Watch a running node from here or another machine (build once: make gui):")
+	fmt.printfln("      ./btcnode-gui --connect=127.0.0.1:%d %s        # desktop window", port, auth)
+	fmt.printfln("      ./btcnode-gui --tui --connect=127.0.0.1:%d %s  # terminal", port, auth)
+	fmt.println()
+	fmt.println("  RPC binds localhost by default. To reach it from another host, either")
+	fmt.printfln("  tunnel it:   ssh -L %d:localhost:%d <server>", port, port)
+	fmt.println("  or open it with --rpcbind/--rpcallowip (see docs/usage.md).")
+	fmt.println()
 }
 
 // --- step machine ---
 
 _run_steps :: proc(st: ^Wiz_State) -> bool {
 	step := 0
-	TOTAL :: 7
+	TOTAL :: 6
 	for {
 		act: Wiz_Action
 		switch step {
@@ -137,12 +161,11 @@ _run_steps :: proc(st: ^Wiz_State) -> bool {
 		case 2: act = _step_disk(st, step + 1, TOTAL)
 		case 3: act = _step_dbcache(st, step + 1, TOTAL)
 		case 4: act = _step_rpc(st, step + 1, TOTAL)
-		case 5: act = _step_dashboard(st, step + 1, TOTAL)
-		case 6: act = _step_review(st, step + 1, TOTAL)
+		case 5: act = _step_review(st, step + 1, TOTAL)
 		}
 		switch act {
 		case .Next:
-			if step == 6 { return true } // review confirmed → write
+			if step == 5 { return true } // review confirmed → write
 			step += 1
 		case .Back:
 			if step > 0 { step -= 1 }
@@ -283,21 +306,6 @@ _step_rpc :: proc(st: ^Wiz_State, step, total: int) -> Wiz_Action {
 	return .Next
 }
 
-_step_dashboard :: proc(st: ^Wiz_State, step, total: int) -> Wiz_Action {
-	opts := []string{
-		"GUI window (raylib)",
-		"Terminal dashboard (TUI, SSH-friendly)",
-		"Headless (no dashboard)",
-	}
-	sel := st.dashboard == "gui" ? 0 : (st.dashboard == "tui" ? 1 : 2)
-	idx, act := _menu(step, total, "Dashboard",
-		"How do you want to watch the node? (goes in the start command)", opts, sel)
-	if act == .Next {
-		st.dashboard = idx == 0 ? "gui" : (idx == 1 ? "tui" : "")
-	}
-	return act
-}
-
 _step_review :: proc(st: ^Wiz_State, step, total: int) -> Wiz_Action {
 	btn := 0 // focused button: 0 Write, 1 Advanced, 2 Back, 3 Quit
 	for {
@@ -307,7 +315,6 @@ _step_review :: proc(st: ^Wiz_State, step, total: int) -> Wiz_Action {
 			{"Disk", st.prune_mb > 0 ? fmt.tprintf("pruned to ~%.2f GB", f64(st.prune_mb) / 1000) : "full node"},
 			{"dbcache", fmt.tprintf("%d MB", st.dbcache_mb)},
 			{"RPC auth", st.rpc_cookie ? "cookie file" : fmt.tprintf("user %q", st.rpc_user)},
-			{"Dashboard", st.dashboard == "" ? "headless" : st.dashboard},
 			{"Advanced", _advanced_summary(st)},
 		}
 		f := _frame_open(step, total, "Review", "Confirm your setup, then write the config:", len(rows))
@@ -629,15 +636,15 @@ _write_config :: proc(st: ^Wiz_State) -> (string, bool) {
 	return path, true
 }
 
-// The args appended to `./btcnode` in the printed start command. datadir is
-// required (that's where the conf is read from); dashboard flag as chosen.
-_start_command_args :: proc(st: ^Wiz_State) -> string {
-	dash := ""
-	switch st.dashboard {
-	case "gui": dash = " --gui"
-	case "tui": dash = " --tui"
+// Default RPC port for a network (mirrors main._select_params).
+_rpc_port :: proc(network: string) -> int {
+	switch network {
+	case "mainnet":  return 8332
+	case "testnet3": return 18332
+	case "testnet4": return 48332
+	case "signet":   return 38332
+	case:            return 18443 // regtest
 	}
-	return fmt.tprintf(" --datadir=%s%s", st.datadir, dash)
 }
 
 // --- small utilities ---

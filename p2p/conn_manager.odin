@@ -600,7 +600,12 @@ _on_accept :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 
 // Main event loop. Discovers peers, connects, processes messages via nbio callbacks.
 conn_manager_run :: proc(cm: ^Conn_Manager) {
-	context.logger = log.create_console_logger(cm.log_level, {.Level, .Time, .Terminal_Color})
+	// Console logger writes to os.stdout/os.stderr. In --tui/--daemon those fds
+	// are redirected to <datadir>/debug.log at the OS level (see main). We use
+	// the console logger (os.stdout) rather than a file logger because os2's
+	// stream write on a freshly-opened file handle silently drops writes on
+	// worker threads — only os.stdout works reliably across threads.
+	context.logger = log.create_console_logger(cm.log_level, {.Level, .Time})
 
 	log.infof("Starting connection manager (network: %s)", cm.params.name)
 

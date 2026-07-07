@@ -45,11 +45,18 @@ KEY_RIGHT     :: c.int(0o405)
 KEY_BACKSPACE :: c.int(0o407)
 KEY_ENTER     :: c.int(0o527)
 
+FILE :: struct {}   // opaque libc FILE
+SCREEN :: struct {} // opaque ncurses SCREEN
+
 @(default_calling_convention = "c")
 foreign ncurses {
 	stdscr: ^WINDOW
 
 	initscr :: proc() -> ^WINDOW ---
+	// Like initscr but draws to explicit output/input streams. Used with
+	// /dev/tty so the dashboard renders on the terminal even when stdout/stderr
+	// are redirected to a log file.
+	newterm :: proc(type: cstring, outfd: ^FILE, infd: ^FILE) -> ^SCREEN ---
 	endwin :: proc() -> c.int ---
 	cbreak :: proc() -> c.int ---
 	noecho :: proc() -> c.int ---
@@ -97,4 +104,5 @@ when ODIN_OS == .Darwin {
 @(default_calling_convention = "c")
 foreign libc_ {
 	setlocale :: proc(category: c.int, locale: cstring) -> cstring ---
+	fopen :: proc(path: cstring, mode: cstring) -> ^FILE ---
 }

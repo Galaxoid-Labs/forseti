@@ -30,6 +30,37 @@ DEFAULT_DATA_DIR :: "/tmp/btcnode-data"
 _g_rpc_server: ^rpc.RPC_Server
 _g_conn_manager: ^p2p.Conn_Manager
 
+// True when logging goes to a file (--tui/--daemon): the console loggers still
+// write to os.stdout/os.stderr, but those fds are dup2'd onto <datadir>/debug.log
+// at the OS level (see main). We deliberately do NOT use log.create_file_logger:
+// os2's stream write on a freshly-opened file handle silently drops writes on
+// worker threads (the P2P thread), while os.stdout works reliably everywhere.
+// So all threads use a plain console logger and the OS redirect does the rest.
+_g_log_to_file: bool = false
+
+// Build a console logger. Terminal colors only when logging to the actual
+// terminal (not when redirected to debug.log). Callers assign to
+// context.logger themselves — `context` has value semantics per scope.
+_make_logger :: proc(level: log.Level) -> log.Logger {
+	opts: log.Options = {.Level, .Date, .Time}
+	if !_g_log_to_file { opts += {.Terminal_Color} }
+	return log.create_console_logger(level, opts)
+}
+
+// Redirect the stdout+stderr fds onto <datadir>/debug.log (append) at the OS
+// level so every thread's console-logger output lands in the file. Returns
+// false if the file could not be opened.
+_redirect_stdio_to_log :: proc(data_dir: string) -> bool {
+	os.make_directory(data_dir)
+	path := fmt.ctprintf("%s/debug.log", data_dir)
+	fd := posix.open(path, {.WRONLY, .CREAT, .APPEND}, {.IRUSR, .IWUSR, .IRGRP, .IROTH})
+	if fd < 0 { return false }
+	posix.dup2(fd, posix.STDOUT_FILENO)
+	posix.dup2(fd, posix.STDERR_FILENO)
+	if i32(fd) > 2 { posix.close(fd) }
+	return true
+}
+
 _Rpc_Thread_Data :: struct {
 	srv:       ^rpc.RPC_Server,
 	log_level: log.Level,
@@ -119,6 +150,7 @@ CLI_Config :: struct {
 	repair_utxo: bool `args:"name=repairutxo" usage:"Sweep stale UTXO entries from local block data, then exit."`,
 	gui:         bool `args:"name=gui" usage:"Show GUI dashboard window (default: headless)."`,
 	tui:         bool `args:"name=tui" usage:"Terminal dashboard (for SSH sessions; q quits)."`,
+	daemon:      bool `args:"name=daemon" usage:"Run in the background (fork, detach from the terminal, log to <datadir>/debug.log)."`,
 	debug:       bool `args:"name=debug" usage:"Enable debug logging (default: off)."`,
 }
 
@@ -664,6 +696,51 @@ main :: proc() {
 		return
 	}
 
+	// --daemon: detach from the terminal and run in the background (like
+	// `bitcoind -daemon`). A dashboard needs the terminal/window, so it's
+	// mutually exclusive with --gui/--tui. Fork BEFORE the single-instance lock
+	// and any threads so the child owns them cleanly.
+	if cfg.daemon {
+		if cfg.gui || cfg.tui {
+			fmt.eprintln("Error: --daemon cannot be combined with --gui or --tui (it detaches from the terminal)")
+			return
+		}
+		os.make_directory(cfg.data_dir) // so the child can open the log file
+		pid := posix.fork()
+		if pid < 0 {
+			fmt.eprintln("Error: fork() failed, cannot daemonize")
+			return
+		}
+		if pid > 0 {
+			// Parent: report where the node went and exit immediately.
+			fmt.printfln("btcnode started in the background (PID %d)", pid)
+			fmt.printfln("Logging to %s/debug.log", cfg.data_dir)
+			fmt.printfln("Stop it with:  kill %d   (or the `stop` RPC)", pid)
+			os.exit(0)
+		}
+		// Child: session leader, stdin → /dev/null (terminal released), then
+		// stdout+stderr → debug.log below.
+		posix.setsid()
+		if devnull := posix.open("/dev/null", {}); devnull >= 0 { // {} = O_RDONLY
+			posix.dup2(devnull, posix.STDIN_FILENO)
+			if i32(devnull) > 2 { posix.close(devnull) }
+		}
+	}
+
+	// Send logging to <datadir>/debug.log for --tui (keeps the ncurses screen
+	// clean) and --daemon (detached). We redirect the stdout/stderr fds at the
+	// OS level and keep using console loggers — os2's file-logger stream write
+	// silently drops writes from worker threads, but os.stdout works from all
+	// threads. So the redirect below is what actually routes logs to the file.
+	if cfg.tui || cfg.daemon {
+		if !_redirect_stdio_to_log(cfg.data_dir) {
+			fmt.eprintfln("Warning: could not redirect logging to %s/debug.log", cfg.data_dir)
+		} else {
+			_g_log_to_file = true
+		}
+	}
+	context.logger = _make_logger(log_level)
+
 	// Single-instance guard (Bitcoin Core's .lock): an flock held for the
 	// whole process lifetime — including a hung teardown — so a second
 	// instance on the same datadir refuses instantly instead of racing the
@@ -762,7 +839,7 @@ main :: proc() {
 		nd.boot = boot
 		node_thread := thread.create_and_start_with_data(rawptr(nd), proc(data: rawptr) {
 			nd := cast(^_Node_Thread_Data)data
-			context.logger = log.create_console_logger(nd.log_level, {.Level, .Time, .Terminal_Color})
+			context.logger = _make_logger(nd.log_level)
 			_node_main(nd.cfg, nd.log_level, nd.boot)
 		})
 		// run_boot triggers shutdown itself and holds the window open until
@@ -972,7 +1049,7 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 			rawptr(rpc_data),
 			proc(data: rawptr) {
 				td := cast(^_Rpc_Thread_Data)data
-				context.logger = log.create_console_logger(td.log_level, {.Level, .Time, .Terminal_Color})
+				context.logger = _make_logger(td.log_level)
 				rpc.rpc_server_run(td.srv)
 				free(td)
 			},
@@ -1074,8 +1151,11 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 				}
 			}
 
-			// GUI reads a 1 Hz status snapshot; only populate it when needed.
-			cm.status_enabled = cfg.gui
+			// Publish the 1 Hz status snapshot always: the in-process GUI/TUI read
+			// it, AND the getnodestatus RPC serves it to remote dashboards
+			// (btcnode-gui, --tui over RPC). Gating on cfg.gui left headless/daemon
+			// nodes reporting an all-zero status. The map walk is cheap.
+			cm.status_enabled = true
 
 			// Wire connection manager into RPC server.
 			if srv != nil {

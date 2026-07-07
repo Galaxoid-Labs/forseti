@@ -30,6 +30,8 @@ testnet3. 364 tests across 12 packages.
   (ncurses), and a standalone remote client (`btcnode-gui`)
 - **First-run setup wizard** (`--wizard`) — a `menuconfig`-style ncurses flow
   that writes your `btcnode.conf` and prints the exact command to start
+- **Runs headless or as a daemon** (`--daemon`) — forks, detaches, and logs to
+  `<datadir>/debug.log`, like `bitcoind -daemon`
 
 ## Quick Start
 

@@ -59,7 +59,14 @@ _net_sample :: proc(st: ^p2p.Node_Status) {
 // headless. quit_on_q result via return — caller decides shutdown.
 run_with_source :: proc(info: Static_Info, fetch: Status_Fetch, ud: rawptr, local := false) -> bool {
 	nc.setlocale(nc.LC_ALL, "")
-	if nc.initscr() == nil {
+	// Render to /dev/tty via newterm so the dashboard shows on the terminal even
+	// when stdout/stderr are redirected to <datadir>/debug.log (in-process
+	// --tui). Fall back to initscr (stdout) if /dev/tty isn't available.
+	if tty := nc.fopen("/dev/tty", "r+"); tty != nil {
+		if nc.newterm(nil, tty, tty) == nil {
+			return false
+		}
+	} else if nc.initscr() == nil {
 		return false
 	}
 	defer nc.endwin()

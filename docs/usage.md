@@ -27,17 +27,45 @@ actually vary per user, then does the setup for you:
 3. **Disk usage** — full node or pruned (choose a size)
 4. **Cache** — `dbcache` in MB
 5. **RPC auth** — cookie file (default) or an explicit user/password
-6. **Dashboard** — GUI window, terminal TUI, or headless
-7. **Review** — confirm and write; an **Advanced** screen here toggles
+6. **Review** — confirm and write; an **Advanced** screen here toggles
    `server`, `listen`, `v2transport`, `txindex`, `blockfilterindex`,
    `mempoolfullrbf`, `persistmempool`, `peerbloomfilters`, and `blocksonly`
 
 Navigate with the arrow keys, `Space` toggles checkboxes, `←/→` move between
 the bottom buttons, and `Enter` activates the focused one. On finish it creates
 the data directory, writes `<datadir>/btcnode.conf` (only keys that differ from
-the defaults), and prints the exact command to start the node. It never touches
-the network — everything it doesn't ask keeps its default and can be edited in
-the conf afterward. Requires an interactive terminal (a TTY).
+the defaults), and prints a cheat sheet of **every way to start the node**
+(foreground, `--gui`, `--tui`, `--daemon`) and **every way to watch it**
+(`btcnode-gui` desktop/TUI over RPC, with the right auth flags and port filled
+in for your network). The run mode is a launch-time flag, not a config setting,
+so nothing is baked in — you pick when you start. It never touches the network;
+everything it doesn't ask keeps its default and can be edited in the conf
+afterward. Requires an interactive terminal (a TTY).
+
+### Running on a Server (daemon / background)
+
+`--daemon` runs the node detached, like `bitcoind -daemon`: it forks, releases
+the terminal, and redirects all logging to `<datadir>/debug.log`. The launching
+command prints the child PID and returns immediately.
+
+```bash
+./btcnode --network=mainnet --datadir=~/btcnode --prune=2000 --daemon
+# btcnode started in the background (PID 12345)
+# Logging to /home/you/btcnode/debug.log
+# Stop it with:  kill 12345   (or the `stop` RPC)
+
+tail -f ~/btcnode/debug.log                          # follow the log
+./btcnode-gui --tui --cookie=~/btcnode/.cookie       # or watch it live over RPC
+```
+
+Because a daemon has no terminal, `--daemon` is mutually exclusive with
+`--gui`/`--tui`. Stop it with the `stop` RPC (graceful — flushes the UTXO cache)
+or `kill <pid>`.
+
+**Logging note:** whenever the terminal is owned by the dashboard (`--tui`) or
+detached (`--daemon`), logs go to `<datadir>/debug.log` instead of the console,
+so they never corrupt the TUI or vanish into a detached session. In normal
+foreground mode logs still print to the terminal as before.
 
 ### Syncing a Network
 
@@ -126,6 +154,7 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 |------|-------------|---------|
 | `--network=<name>` | `mainnet`, `testnet3`, `testnet4`, `signet`, `regtest` | `regtest` |
 | `--wizard` | Interactive first-run setup: write a `btcnode.conf`, then exit (see above) | — |
+| `--daemon` | Run in the background: fork, detach from the terminal, log to `<datadir>/debug.log`. Prints the PID and exits. Mutually exclusive with `--gui`/`--tui` | foreground |
 | `--gui` | GUI dashboard window (raylib; node stays headless without it) | headless |
 | `--tui` | Terminal dashboard (ncurses, SSH-friendly; `q` quits gracefully) | headless |
 | `--prune=<MB>` | Delete old block files, keep blk+rev usage under target (min 550, 0=off). Pruned nodes advertise `NODE_NETWORK_LIMITED` only | 0 (keep all) |
@@ -206,7 +235,7 @@ maxuploadtarget=5000
 dbcache=512
 ```
 
-`rpcallowip` accepts a comma-separated list. The following are CLI-only and are *not* read from the config file: `--no-p2p`, `--repairutxo`, `--gui`, `--tui`, `--wizard`, `--debug`, `--help`.
+`rpcallowip` accepts a comma-separated list. The following are CLI-only and are *not* read from the config file: `--no-p2p`, `--repairutxo`, `--gui`, `--tui`, `--wizard`, `--daemon`, `--debug`, `--help`.
 
 Keys match CLI flag names without the `--` prefix. Boolean values accept `1`, `true`, or `yes` for on.
 
