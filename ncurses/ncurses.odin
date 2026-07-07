@@ -37,6 +37,14 @@ COLOR_DEFAULT :: c.short(-1) // with use_default_colors
 ERR :: c.int(-1)
 KEY_RESIZE :: c.int(0o632)
 
+// Keypad codes (with keypad(win, true)) used by the setup wizard's input.
+KEY_DOWN      :: c.int(0o402)
+KEY_UP        :: c.int(0o403)
+KEY_LEFT      :: c.int(0o404)
+KEY_RIGHT     :: c.int(0o405)
+KEY_BACKSPACE :: c.int(0o407)
+KEY_ENTER     :: c.int(0o527)
+
 @(default_calling_convention = "c")
 foreign ncurses {
 	stdscr: ^WINDOW

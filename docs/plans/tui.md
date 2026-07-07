@@ -1,8 +1,9 @@
 # TUI Plan for bitcoin-node-odin
 
-> **STATUS: DASHBOARD SHIPPED** — `tui/` renders Node_Status over ncurses
-> (`--tui`, plus `btcnode-gui --tui` remotely). The setup-wizard section
-> below remains unbuilt.
+> **STATUS: DASHBOARD + WIZARD SHIPPED** — `tui/` renders Node_Status over
+> ncurses (`--tui`, plus `btcnode-gui --tui` remotely), and `btcnode --wizard`
+> runs the interactive first-run setup (tui/wizard.odin: menu + text-field
+> widgets, 7 screens, RAM-aware dbcache, writes btcnode.conf).
 
 ## Goal
 

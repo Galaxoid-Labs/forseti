@@ -115,6 +115,7 @@ CLI_Config :: struct {
 	drivechain: string `args:"name=drivechain" usage:"BIP 300/301: off (default), track, or enforce.\ntrack: parse M1-M6/BMM messages and maintain the sidechain + withdrawal\ndatabases without rejecting anything (zero risk).\nenforce: additionally reject blocks violating BIP300/301 rules.\nWARNING: enforce is a CUSF-style voluntary soft fork — while the rest of\nthe network does not enforce these rules, a violating block would be\nrejected by this node but accepted by everyone else, forking this node\noff the network."`,
 
 	// Maintenance / UI
+	wizard:      bool `args:"name=wizard" usage:"Interactive first-run setup: write a btcnode.conf, then exit."`,
 	repair_utxo: bool `args:"name=repairutxo" usage:"Sweep stale UTXO entries from local block data, then exit."`,
 	gui:         bool `args:"name=gui" usage:"Show GUI dashboard window (default: headless)."`,
 	tui:         bool `args:"name=tui" usage:"Terminal dashboard (for SSH sessions; q quits)."`,
@@ -631,6 +632,13 @@ main :: proc() {
 
 	// Parse CLI flags.
 	cfg, cli_seen := _parse_cli()
+
+	// First-run setup wizard: writes a config and exits, before any of the
+	// normal config-load / chain-init machinery.
+	if cfg.wizard {
+		tui.run_wizard()
+		return
+	}
 
 	// Apply debug log level if requested.
 	log_level: log.Level = cfg.debug ? .Debug : .Info
