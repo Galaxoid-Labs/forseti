@@ -17,7 +17,7 @@ curl -s -u myuser:mypassword \
 bitcoin-cli -rpcport=18443 getblockchaininfo
 ```
 
-## Bitcoin Core RPC Coverage (65 / 78 non-wallet RPCs)
+## Bitcoin Core RPC Coverage (68 / 78 non-wallet RPCs)
 
 Plus four btcnode-specific methods: `getnodestatus` (feeds the GUI/TUI
 dashboards) and the drivechain views `listsidechains`, `getsidechaininfo`,
@@ -25,7 +25,7 @@ and `listwithdrawalstatus` (see below).
 
 The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are intentionally excluded.
 
-**Blockchain (24/25):**
+**Blockchain (25/25):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
@@ -51,7 +51,7 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `preciousblock` | Yes | Routed through the P2P control queue |
 | `pruneblockchain` | Yes | Requires `--prune` mode |
 | `savemempool` | Yes | |
-| `scantxoutset` | — | UTXO set descriptor scan |
+| `scantxoutset` | Yes | Synchronous scan of DB + cache; descriptor expansion with default range 1000 |
 | `verifychain` | Yes | Levels 0-2 (data reads, context-free validity, undo data); 3/4 run the level-2 checks |
 | `verifytxoutproof` | Yes | Merkle proof verification |
 
@@ -125,14 +125,14 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `testmempoolaccept` | Yes | |
 | `utxoupdatepsbt` | — | PSBT not implemented |
 
-**Util (6/8):**
+**Util (8/8):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
 | `createmultisig` | Yes | legacy / p2sh-segwit / bech32 |
-| `deriveaddresses` | — | Descriptor address derivation |
+| `deriveaddresses` | Yes | pkh/wpkh/sh(wpkh)/tr (BIP86)/multi/sortedmulti/wsh/addr; xpub + wildcard ranges |
 | `estimatesmartfee` | Yes | Confirmation-tracking estimator (Core CBlockPolicyEstimator port, 3 decay horizons, `fee_estimates.dat` persistence); falls back to the mempool floor until it has observed enough history |
-| `getdescriptorinfo` | — | Output descriptor analysis |
+| `getdescriptorinfo` | Yes | Checksum + canonical form; watch-only (xprv/WIF rejected) |
 | `getindexinfo` | Yes | |
 | `signmessagewithprivkey` | Yes | |
 | `validateaddress` | Yes | |

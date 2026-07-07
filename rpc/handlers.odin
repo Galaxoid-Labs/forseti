@@ -1,5 +1,6 @@
 package rpc
 
+import "core:c"
 import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
@@ -11,6 +12,7 @@ import "core:time"
 import "../chain"
 import "../consensus"
 import crypto "../crypto"
+import "../descriptor"
 import "../mempool"
 import "../p2p"
 import "../script"
@@ -1834,6 +1836,7 @@ RPC_METHODS := [?]string{
 	"createrawtransaction",
 	"decoderawtransaction",
 	"decodescript",
+	"deriveaddresses",
 	"generateblock",
 	"getbestblockhash",
 	"getblock",
@@ -1846,6 +1849,7 @@ RPC_METHODS := [?]string{
 	"getchaintips",
 	"getchaintxstats",
 	"getconnectioncount",
+	"getdescriptorinfo",
 	"getdifficulty",
 	"getmempoolancestors",
 	"getmempooldescendants",
@@ -1872,6 +1876,7 @@ RPC_METHODS := [?]string{
 	"ping",
 	"prioritisetransaction",
 	"savemempool",
+	"scantxoutset",
 	"sendrawtransaction",
 	"signrawtransactionwithkey",
 	"stop",
@@ -1968,6 +1973,9 @@ _get_method_help :: proc(method: string) -> string {
 	case "submitheader":               return "submitheader \"hexdata\"\nDecode the given hexdata as a header and submit it as a candidate chain tip if valid."
 	case "prioritisetransaction":      return "prioritisetransaction \"txid\" ( dummy ) fee_delta\nAccepts the transaction into mined blocks at a higher (or lower) priority."
 	case "generateblock":              return "generateblock \"output\" ( [\"rawtx/txid\",...] )\nMine a block with a set of ordered transactions immediately to a specified address (regtest only)."
+	case "getdescriptorinfo":          return "getdescriptorinfo \"descriptor\"\nAnalyses a descriptor: canonical form with checksum, isrange, issolvable."
+	case "deriveaddresses":            return "deriveaddresses \"descriptor\" ( range )\nDerives one or more addresses corresponding to an output descriptor."
+	case "scantxoutset":               return "scantxoutset \"action\" ( [scanobjects,...] )\nScans the unspent transaction output set for entries that match certain output descriptors."
 	case "verifychain":                return "verifychain ( checklevel nblocks )\nVerifies blockchain database: block data reads/deserializes (0), context-free validity (1), undo data (2+)."
 	}
 	return fmt.tprintf("%s\nNo detailed help available.", method)
@@ -3925,4 +3933,245 @@ _handle_verifychain :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respons
 	}
 
 	return _make_result(json.Value(json.Boolean(ok_result)), srv._current_id)
+}
+
+// --- descriptors: getdescriptorinfo / deriveaddresses / scantxoutset ---
+
+_desc_net :: proc(srv: ^RPC_Server) -> descriptor.Net_Params {
+	return descriptor.Net_Params{
+		p2pkh_version = srv.params.p2pkh_prefix,
+		p2sh_version  = srv.params.p2sh_prefix,
+		hrp           = srv.params.bech32_hrp,
+	}
+}
+
+_handle_getdescriptorinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	desc_str, ok := _get_string_param(params, 0)
+	if !ok {
+		return _make_error(.Invalid_Params, "Missing descriptor parameter", srv._current_id)
+	}
+	d, derr := descriptor.parse(desc_str, _desc_net(srv), context.temp_allocator)
+	if derr != "" {
+		return _make_error(.Invalid_Params, derr, srv._current_id)
+	}
+
+	canonical := descriptor.to_string_with_checksum(&d)
+	sum, _ := descriptor.checksum_create(d.body)
+	obj := make(json.Object, 5, context.temp_allocator)
+	obj["descriptor"] = json.Value(json.String(canonical))
+	obj["checksum"] = json.Value(json.String(sum))
+	obj["isrange"] = json.Value(json.Boolean(d.is_range))
+	obj["issolvable"] = json.Value(json.Boolean(d.type != .Addr && d.type != .Raw))
+	obj["hasprivatekeys"] = json.Value(json.Boolean(false))
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// Parse a range argument: n → [0,n], [begin,end] → as-is.
+_parse_range :: proc(v: json.Value) -> (begin: int, end: int, ok: bool) {
+	#partial switch r in v {
+	case json.Integer:
+		if r < 0 { return }
+		return 0, int(r), true
+	case json.Float:
+		if r < 0 { return }
+		return 0, int(r), true
+	case json.Array:
+		if len(r) != 2 { return }
+		b, b_ok := r[0].(json.Integer)
+		e, e_ok := r[1].(json.Integer)
+		if !b_ok || !e_ok || b < 0 || e < b { return }
+		return int(b), int(e), true
+	}
+	return
+}
+
+_handle_deriveaddresses :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	desc_str, ok := _get_string_param(params, 0)
+	if !ok {
+		return _make_error(.Invalid_Params, "Missing descriptor parameter", srv._current_id)
+	}
+	net := _desc_net(srv)
+	d, derr := descriptor.parse(desc_str, net, context.temp_allocator)
+	if derr != "" {
+		return _make_error(.Invalid_Params, derr, srv._current_id)
+	}
+
+	begin, end := 0, 0
+	if range_val, has_range := _get_param(params, 1); has_range {
+		if !d.is_range {
+			return _make_error(.Invalid_Params, "Range should not be specified for an un-ranged descriptor", srv._current_id)
+		}
+		b, e, r_ok := _parse_range(range_val)
+		if !r_ok || e - b + 1 > 10_000 {
+			return _make_error(.Invalid_Params, "Invalid range", srv._current_id)
+		}
+		begin, end = b, e
+	} else if d.is_range {
+		return _make_error(.Invalid_Params, "Range must be specified for a ranged descriptor", srv._current_id)
+	}
+
+	out := make(json.Array, 0, context.temp_allocator)
+	for i in begin ..= end {
+		addr, a_ok := descriptor.address(&d, i, net)
+		if !a_ok {
+			return _make_error(.Invalid_Params, "Descriptor has no address form (raw scripts)", srv._current_id)
+		}
+		append(&out, json.Value(json.String(addr)))
+	}
+	return _make_result(json.Value(out), srv._current_id)
+}
+
+SCAN_DEFAULT_RANGE :: 1000
+
+_handle_scantxoutset :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	action, ok := _get_string_param(params, 0)
+	if !ok {
+		return _make_error(.Invalid_Params, "Missing action parameter", srv._current_id)
+	}
+	switch action {
+	case "status", "abort":
+		// Scans here are synchronous — there is never an in-progress scan.
+		return _make_result(json.Value(json.Boolean(false)), srv._current_id)
+	case "start":
+	case:
+		return _make_error(.Invalid_Params, "Invalid action", srv._current_id)
+	}
+
+	objs, objs_ok := _get_array_param(params, 1)
+	if !objs_ok || len(objs) == 0 {
+		return _make_error(.Invalid_Params, "scanobjects argument is required", srv._current_id)
+	}
+
+	// Expand every scan object into scriptPubKey → descriptor-string.
+	net := _desc_net(srv)
+	want := make(map[string]string, 64, context.temp_allocator)
+	for so in objs {
+		desc_str: string
+		begin, end := 0, 0
+		range_given := false
+		#partial switch v in so {
+		case json.String:
+			desc_str = string(v)
+		case json.Object:
+			ds, ds_ok := v["desc"].(json.String)
+			if !ds_ok {
+				return _make_error(.Invalid_Params, "Scan object missing desc", srv._current_id)
+			}
+			desc_str = string(ds)
+			if rv, has_rv := v["range"]; has_rv {
+				b, e, r_ok := _parse_range(rv)
+				if !r_ok {
+					return _make_error(.Invalid_Params, "Invalid range", srv._current_id)
+				}
+				begin, end = b, e
+				range_given = true
+			}
+		case:
+			return _make_error(.Invalid_Params, "Invalid scan object", srv._current_id)
+		}
+
+		d, derr := descriptor.parse(desc_str, net, context.temp_allocator)
+		if derr != "" {
+			return _make_error(.Invalid_Params, fmt.tprintf("%s: %s", desc_str, derr), srv._current_id)
+		}
+		if d.is_range && !range_given {
+			end = SCAN_DEFAULT_RANGE
+		}
+		if !d.is_range {
+			begin, end = 0, 0
+		}
+		if end - begin + 1 > 100_000 {
+			return _make_error(.Invalid_Params, "Range too large", srv._current_id)
+		}
+		for i in begin ..= end {
+			spk, s_ok := descriptor.script_pubkey(&d, i, context.temp_allocator)
+			if !s_ok {
+				return _make_error(.Invalid_Params, "Cannot derive script", srv._current_id)
+			}
+			want[string(spk)] = desc_str
+		}
+	}
+
+	tip_hash, tip_height := chain.chain_tip(srv.chain)
+	unspents := make(json.Array, 0, context.temp_allocator)
+	total: i64 = 0
+	scanned := 0
+
+	add_unspent := proc(unspents: ^json.Array, total: ^i64, op: wire.Outpoint, coin: storage.UTXO_Coin, desc: string) {
+		u := make(json.Object, 6, context.temp_allocator)
+		u["txid"] = json.Value(json.String(_hash_to_hex(op.hash)))
+		u["vout"] = json.Value(json.Integer(i64(op.index)))
+		u["scriptPubKey"] = json.Value(json.String(_bytes_to_hex(coin.script)))
+		u["desc"] = json.Value(json.String(desc))
+		u["amount"] = json.Value(json.Float(_satoshi_to_btc(coin.amount)))
+		u["height"] = json.Value(json.Integer(i64(coin.height)))
+		append(unspents, json.Value(u))
+		total^ += coin.amount
+	}
+
+	// 1) Flushed UTXOs from LevelDB, skipping entries the cache has spent.
+	{
+		cc := &srv.chain.coins
+		iter := storage.leveldb_create_iterator(cc.db.store.chainstate_db, cc.db.store.read_opts)
+		defer storage.leveldb_iter_destroy(iter)
+		storage.leveldb_iter_seek_to_first(iter)
+		for storage.leveldb_iter_valid(iter) != 0 {
+			defer storage.leveldb_iter_next(iter)
+			klen: c.size_t
+			kptr := storage.leveldb_iter_key(iter, &klen)
+			if klen != 36 { continue }
+			scanned += 1
+			vlen: c.size_t
+			vptr := storage.leveldb_iter_value(iter, &vlen)
+			if vptr == nil { continue }
+			val := ([^]byte)(vptr)[:vlen]
+			coin, dec_ok := storage.utxo_db_decode_value(val, context.temp_allocator)
+			if !dec_ok { continue }
+			desc, hit := want[string(coin.script)]
+			if !hit { continue }
+			key := ([^]byte)(kptr)[:klen]
+			op: wire.Outpoint
+			copy(op.hash[:], key[:32])
+			op.index = u32(key[32]) | u32(key[33]) << 8 | u32(key[34]) << 16 | u32(key[35]) << 24
+			// Skip if the in-memory cache spent or replaced it.
+			if e, in_cache := cc.cache[op]; in_cache {
+				_ = e
+				continue // live cache entries are handled in pass 2
+			}
+			if cc.frozen != nil {
+				if _, in_frozen := cc.frozen[op]; in_frozen {
+					continue
+				}
+			}
+			add_unspent(&unspents, &total, op, coin, desc)
+		}
+	}
+	// 2) In-memory cache entries (live coins only — sentinels are spends).
+	{
+		cc := &srv.chain.coins
+		for op, entry in cc.cache {
+			if entry.coin.amount == 0 && len(entry.coin.script) == 0 { continue } // spent sentinel
+			if desc, hit := want[string(entry.coin.script)]; hit {
+				add_unspent(&unspents, &total, op, entry.coin, desc)
+			}
+		}
+		if cc.frozen != nil {
+			for op, entry in cc.frozen {
+				if entry.coin.amount == 0 && len(entry.coin.script) == 0 { continue }
+				if _, shadowed := cc.cache[op]; shadowed { continue }
+				if desc, hit := want[string(entry.coin.script)]; hit {
+					add_unspent(&unspents, &total, op, entry.coin, desc)
+				}
+			}
+		}
+	}
+
+	obj := make(json.Object, 7, context.temp_allocator)
+	obj["success"] = json.Value(json.Boolean(true))
+	obj["txouts"] = json.Value(json.Integer(i64(scanned)))
+	obj["height"] = json.Value(json.Integer(i64(tip_height)))
+	obj["bestblock"] = json.Value(json.String(_hash_to_hex(tip_hash)))
+	obj["unspents"] = json.Value(unspents)
+	obj["total_amount"] = json.Value(json.Float(_satoshi_to_btc(total)))
+	return _make_result(json.Value(obj), srv._current_id)
 }

@@ -231,3 +231,9 @@ _utxo_decode_value :: proc(data: []byte, allocator := context.allocator) -> (coi
 
 	return coin, true
 }
+
+// Public wrapper for decoding a raw UTXO DB value (used by scantxoutset's
+// direct LevelDB iteration).
+utxo_db_decode_value :: proc(data: []byte, allocator := context.allocator) -> (coin: UTXO_Coin, ok: bool) {
+	return _utxo_decode_value(data, allocator)
+}

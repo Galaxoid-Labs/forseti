@@ -129,6 +129,12 @@ foreign secp256k1_lib {
 		seckey: [^]u8,
 	) -> c.int ---
 
+	secp256k1_ec_pubkey_tweak_add :: proc(
+		ctx: Secp256k1_Context,
+		pubkey: ^Secp256k1_Pubkey,
+		tweak32: [^]u8,
+	) -> c.int ---
+
 	secp256k1_ec_pubkey_serialize :: proc(
 		ctx: Secp256k1_Context,
 		output: [^]u8,
@@ -547,4 +553,45 @@ verify_taproot_tweak :: proc(internal_key: []u8, tweak: []u8, output_key: []u8, 
 		if tweaked_bytes[i] != output_key[i] { return false }
 	}
 	return true
+}
+
+// EC point addition of tweak*G to a compressed public key (BIP32 CKDpub).
+// Returns the tweaked key in compressed form.
+pubkey_tweak_add :: proc(pubkey33: []u8, tweak32: []u8) -> (out: [33]u8, ok: bool) {
+	ctx := _global_secp256k1_ctx
+	if ctx == nil || len(pubkey33) != 33 || len(tweak32) != 32 { return }
+	pubkey: Secp256k1_Pubkey
+	if secp256k1_ec_pubkey_parse(ctx, &pubkey, raw_data(pubkey33), 33) != 1 {
+		return
+	}
+	if secp256k1_ec_pubkey_tweak_add(ctx, &pubkey, raw_data(tweak32)) != 1 {
+		return
+	}
+	out_len := c.size_t(33)
+	if secp256k1_ec_pubkey_serialize(ctx, &out[0], &out_len, &pubkey, SECP256K1_EC_COMPRESSED) != 1 {
+		return
+	}
+	return out, true
+}
+
+// BIP341/BIP86 key-path-only output key: xonly(internal + H_TapTweak(internal)*G).
+taproot_output_key :: proc(internal_xonly32: []u8) -> (out: [32]u8, ok: bool) {
+	ctx := _global_secp256k1_ctx
+	if ctx == nil || len(internal_xonly32) != 32 { return }
+	internal: Secp256k1_XOnly_Pubkey
+	if secp256k1_xonly_pubkey_parse(ctx, &internal, raw_data(internal_xonly32)) != 1 {
+		return
+	}
+	tweak := tagged_hash("TapTweak", internal_xonly32)
+	tweaked: Secp256k1_Pubkey
+	if secp256k1_xonly_pubkey_tweak_add(ctx, &tweaked, &internal, raw_data(tweak[:])) != 1 {
+		return
+	}
+	tweaked_xonly: Secp256k1_XOnly_Pubkey
+	parity: c.int
+	if secp256k1_xonly_pubkey_from_pubkey(ctx, &tweaked_xonly, &parity, &tweaked) != 1 {
+		return
+	}
+	secp256k1_xonly_pubkey_serialize(ctx, &out[0], &tweaked_xonly)
+	return out, true
 }

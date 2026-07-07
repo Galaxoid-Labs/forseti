@@ -558,6 +558,12 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_generateblock(srv, req.params)
 	case "verifychain":
 		return _handle_verifychain(srv, req.params)
+	case "getdescriptorinfo":
+		return _handle_getdescriptorinfo(srv, req.params)
+	case "deriveaddresses":
+		return _handle_deriveaddresses(srv, req.params)
+	case "scantxoutset":
+		return _handle_scantxoutset(srv, req.params)
 	case "listsidechains":
 		return _handle_listsidechains(srv, req.params)
 	case "getsidechaininfo":

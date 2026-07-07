@@ -4,6 +4,7 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:math/rand"
 import "core:os"
+import "core:strings"
 import "core:testing"
 import tcp "core:net"
 
@@ -2382,4 +2383,57 @@ test_verifychain :: proc(t: ^testing.T) {
 	resp = _handle_verifychain(srv, _make_params(json.Value(json.Integer(9))))
 	_, range_err := resp.error.?
 	testing.expect(t, range_err, "checklevel > 4 errors")
+}
+
+// --- descriptor RPCs ---
+
+@(test)
+test_descriptor_rpcs :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "descrpc", 12)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+	srv._current_id = json.Value(json.Integer(1))
+
+	// getdescriptorinfo: canonicalizes and reports range-ness.
+	resp := _handle_getdescriptorinfo(srv, _make_params(json.Value(json.String("raw(51)"))))
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "getdescriptorinfo ok")
+	info, _ := resp.result.(json.Object)
+	desc_out, _ := info["descriptor"].(json.String)
+	testing.expect(t, len(desc_out) == len("raw(51)") + 9, "checksum appended")
+	isrange, _ := info["isrange"].(json.Boolean)
+	testing.expect(t, !bool(isrange), "raw() is not ranged")
+
+	// deriveaddresses on a fixed key (regtest hrp).
+	resp = _handle_deriveaddresses(srv, _make_params(
+		json.Value(json.String("wpkh(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)"))))
+	_, has_err = resp.error.?
+	testing.expect(t, !has_err, "deriveaddresses ok")
+	addrs, _ := resp.result.(json.Array)
+	testing.expect_value(t, len(addrs), 1)
+	if len(addrs) == 1 {
+		a, _ := addrs[0].(json.String)
+		testing.expect(t, strings.has_prefix(string(a), "bcrt1q"), "regtest bech32 address")
+	}
+
+	// scantxoutset: raw(51) matches every OP_1 coinbase output in the
+	// test chain (12 blocks, all subsidies unspent).
+	scanobj := make(json.Object, 1, context.temp_allocator)
+	scanobj["desc"] = json.Value(json.String("raw(51)"))
+	objs := make(json.Array, 1, context.temp_allocator)
+	objs[0] = json.Value(scanobj)
+	resp = _handle_scantxoutset(srv, _make_params(json.Value(json.String("start")), json.Value(objs)))
+	err_val, scan_err := resp.error.?
+	testing.expect(t, !scan_err, fmt.tprintf("scantxoutset error: %v", err_val))
+	res, _ := resp.result.(json.Object)
+	success, _ := res["success"].(json.Boolean)
+	testing.expect(t, bool(success), "scan succeeds")
+	unspents, _ := res["unspents"].(json.Array)
+	testing.expect_value(t, len(unspents), 12)
+
+	expected: i64 = 0
+	for h in 0 ..< 12 {
+		expected += consensus.get_block_subsidy(h, params)
+	}
+	total, _ := res["total_amount"].(json.Float)
+	testing.expect_value(t, i64(f64(total) * 100_000_000 + 0.5), expected)
 }

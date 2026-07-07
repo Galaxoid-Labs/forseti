@@ -413,3 +413,51 @@ bech32_encode :: proc(hrp: string, version: int, program: []byte, allocator := c
 
 	return strings.to_string(b)
 }
+
+// Generic Base58Check decode for multi-byte-version payloads (BIP32 xpubs:
+// 78-byte payload). Returns version bytes + payload with the 4-byte
+// checksum verified and stripped.
+base58check_decode_raw :: proc(s: string, allocator := context.temp_allocator) -> (payload: []byte, ok: bool) {
+	if len(s) == 0 || len(s) > 120 {
+		return nil, false
+	}
+	rev: [128]i8
+	for i in 0 ..< 128 { rev[i] = -1 }
+	alpha := BASE58_ALPHABET
+	for i in 0 ..< 58 { rev[alpha[i]] = i8(i) }
+
+	BUF :: 96
+	decoded: [BUF]byte
+	for i in 0 ..< len(s) {
+		c := s[i]
+		if c >= 128 { return nil, false }
+		val := rev[c]
+		if val < 0 { return nil, false }
+		carry := u32(val)
+		for j := BUF - 1; j >= 0; j -= 1 {
+			carry += u32(decoded[j]) * 58
+			decoded[j] = u8(carry & 0xff)
+			carry >>= 8
+		}
+		if carry != 0 { return nil, false }
+	}
+	start := 0
+	for start < BUF && decoded[start] == 0 { start += 1 }
+	leading := 0
+	for i in 0 ..< len(s) {
+		if s[i] != '1' { break }
+		leading += 1
+	}
+	start -= leading
+	if start < 0 || BUF - start < 5 { return nil, false }
+
+	body := decoded[start:BUF - 4]
+	check := sha256d(body)
+	if decoded[BUF - 4] != check[0] || decoded[BUF - 3] != check[1] ||
+	   decoded[BUF - 2] != check[2] || decoded[BUF - 1] != check[3] {
+		return nil, false
+	}
+	out := make([]byte, len(body), allocator)
+	copy(out, body)
+	return out, true
+}
