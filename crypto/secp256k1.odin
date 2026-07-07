@@ -435,10 +435,16 @@ ellswift_ecdh_bip324 :: proc(our_ell64, their_ell64: [64]u8, our_seckey: []u8, i
 
 // Compute Bitcoin message hash: SHA256d(varint(len(magic)) + magic + varint(len(msg)) + msg)
 // Magic string: "Bitcoin Signed Message:\n"
+// The buffer is sized from the message — the previous fixed [512]u8 made any
+// message over ~486 bytes an out-of-range slice (RPC-triggerable panic via
+// verifymessage) and silently truncated shorter overruns.
 message_hash :: proc(message: string) -> Hash256 {
 	MAGIC :: "Bitcoin Signed Message:\n"
-	// Build buffer: varint(24) + magic(24) + varint(msg_len) + msg
-	buf: [512]u8
+	msg_len := len(message)
+	if msg_len > 0xFFFF {
+		return {} // beyond the format's varint support here; reject
+	}
+	buf := make([]u8, 1 + len(MAGIC) + 3 + msg_len, context.temp_allocator)
 	pos := 0
 	// Magic prefix length as varint (24 = 0x18, fits in 1 byte)
 	buf[pos] = 24
@@ -446,18 +452,14 @@ message_hash :: proc(message: string) -> Hash256 {
 	copy(buf[pos:], MAGIC)
 	pos += len(MAGIC)
 	// Message length as varint
-	msg_len := len(message)
 	if msg_len < 253 {
 		buf[pos] = u8(msg_len)
 		pos += 1
-	} else if msg_len <= 0xFFFF {
+	} else {
 		buf[pos] = 0xFD
 		buf[pos + 1] = u8(msg_len & 0xFF)
 		buf[pos + 2] = u8((msg_len >> 8) & 0xFF)
 		pos += 3
-	} else {
-		// Shouldn't happen for reasonable messages
-		return {}
 	}
 	copy(buf[pos:], message)
 	pos += msg_len

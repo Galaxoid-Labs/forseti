@@ -1142,3 +1142,37 @@ test_sendaddrv2_command :: proc(t: ^testing.T) {
 	back := command_from_bytes(bytes)
 	testing.expect_value(t, back, CMD_SENDADDRV2)
 }
+
+// Regression: a tiny payload claiming a huge element count must be rejected
+// (Invalid_Data), not drive make() to allocate gigabytes. See audit
+// "remote-input robustness" finding.
+@(test)
+test_count_bomb_rejected :: proc(t: ^testing.T) {
+	// getheaders body: version(4) + compact_size(0xFF, 2^40) + ... — claims a
+	// trillion locator hashes with only a few bytes present.
+	buf: [dynamic]byte
+	defer delete(buf)
+	append(&buf, 0x00, 0x00, 0x00, 0x00) // version
+	append(&buf, 0xFF)                    // compact_size u64 follows
+	append(&buf, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00) // 2^40
+	r := reader_init(buf[:])
+	_, err := deserialize_getheaders(&r, context.temp_allocator)
+	testing.expect(t, err == .Invalid_Data, "count bomb must be rejected")
+
+	// headers message with an implausible count.
+	buf2: [dynamic]byte
+	defer delete(buf2)
+	append(&buf2, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF) // compact_size u32 = 4 billion
+	r2 := reader_init(buf2[:])
+	_, err2 := deserialize_headers(&r2, context.temp_allocator)
+	testing.expect(t, err2 == .Invalid_Data, "header count bomb must be rejected")
+
+	// A tx claiming a huge input count.
+	buf3: [dynamic]byte
+	defer delete(buf3)
+	append(&buf3, 0x01, 0x00, 0x00, 0x00) // version
+	append(&buf3, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF) // input count = 4 billion
+	r3 := reader_init(buf3[:])
+	_, err3 := deserialize_tx(&r3, context.temp_allocator)
+	testing.expect(t, err3 == .Invalid_Data, "tx input count bomb must be rejected")
+}

@@ -374,9 +374,26 @@ estimator_smart_fee :: proc(est: ^Fee_Estimator, conf_target_in: int, conservati
 	if actual := _estimate_combined(est, conf_target, SUCCESS_PCT); actual > median {
 		median = actual
 	}
-	if conservative || conf_target * 2 <= LONG_SCALE * LONG_PERIODS {
-		if double := _estimate_combined(est, conf_target * 2, DOUBLE_SUCCESS_PCT); conservative && double > median {
+	// Core includes the double-target estimate in the max UNCONDITIONALLY
+	// (the audit caught the economical path computing and discarding it,
+	// which made economical estimates lower than Core's).
+	if conf_target * 2 <= LONG_SCALE * LONG_PERIODS {
+		if double := _estimate_combined(est, conf_target * 2, DOUBLE_SUCCESS_PCT); double > median {
 			median = double
+		}
+	}
+	// Conservative mode additionally consults every LONGER horizon at the
+	// doubled target (Core's EstimateConservativeFee): a short-horizon dip
+	// can't undercut what the long history says is needed.
+	if conservative {
+		double_target := conf_target * 2
+		horizons := [2]^Confirm_Stats{&est.med, &est.long}
+		for st in horizons {
+			if double_target > st.scale * st.periods { continue }
+			if st == _horizon_for_target(est, double_target) { continue } // natural horizon already counted
+			if v := _estimate_median(est, st, double_target, SUFFICIENT_FEETXS, DOUBLE_SUCCESS_PCT); v > median {
+				median = v
+			}
 		}
 	}
 	if median < 0 {

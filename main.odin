@@ -496,22 +496,36 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, cli_seen: map[string]b
 		}
 	}
 
-	if "v2transport" not_in cli_seen {
-		if val, found := _ini_get(&m, cfg.network, "zmqpubhashblock"); found && cfg.zmq_hashblock == "" {
+	// Each key gets its OWN cli_seen guard — the zmq keys were once nested
+	// under the v2transport guard, so any --v2transport on the CLI silently
+	// disabled every zmqpub* config entry (same guard-mismatch family as the
+	// 2cf544c ZMQ CLI bug).
+	if "zmqpubhashblock" not_in cli_seen {
+		if val, found := _ini_get(&m, cfg.network, "zmqpubhashblock"); found {
 			cfg.zmq_hashblock = strings.clone(val)
 		}
-		if val, found := _ini_get(&m, cfg.network, "zmqpubhashtx"); found && cfg.zmq_hashtx == "" {
+	}
+	if "zmqpubhashtx" not_in cli_seen {
+		if val, found := _ini_get(&m, cfg.network, "zmqpubhashtx"); found {
 			cfg.zmq_hashtx = strings.clone(val)
 		}
-		if val, found := _ini_get(&m, cfg.network, "zmqpubrawblock"); found && cfg.zmq_rawblock == "" {
+	}
+	if "zmqpubrawblock" not_in cli_seen {
+		if val, found := _ini_get(&m, cfg.network, "zmqpubrawblock"); found {
 			cfg.zmq_rawblock = strings.clone(val)
 		}
-		if val, found := _ini_get(&m, cfg.network, "zmqpubrawtx"); found && cfg.zmq_rawtx == "" {
+	}
+	if "zmqpubrawtx" not_in cli_seen {
+		if val, found := _ini_get(&m, cfg.network, "zmqpubrawtx"); found {
 			cfg.zmq_rawtx = strings.clone(val)
 		}
-		if val, found := _ini_get(&m, cfg.network, "zmqpubsequence"); found && cfg.zmq_sequence == "" {
+	}
+	if "zmqpubsequence" not_in cli_seen {
+		if val, found := _ini_get(&m, cfg.network, "zmqpubsequence"); found {
 			cfg.zmq_sequence = strings.clone(val)
 		}
+	}
+	if "v2transport" not_in cli_seen {
 		if val, found := _ini_get(&m, cfg.network, "v2transport"); found {
 			cfg.v2_transport = val == "1" || val == "true" || val == "yes"
 		}

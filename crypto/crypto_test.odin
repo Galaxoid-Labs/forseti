@@ -693,3 +693,22 @@ test_sign_recover_roundtrip :: proc(t: ^testing.T) {
 	testing.expect(t, compressed_pub == expected_pub, "recovered pubkey should match derived pubkey")
 }
 
+
+// Regression: message_hash must not overrun on long messages (was a fixed
+// [512]u8 buffer — a >486-byte message via verifymessage panicked the RPC
+// thread). See audit finding.
+@(test)
+test_message_hash_long :: proc(t: ^testing.T) {
+	init_secp256k1()
+	defer destroy_secp256k1()
+	// 2000-byte message: previously an out-of-range slice.
+	long := make([]byte, 2000, context.temp_allocator)
+	for i in 0 ..< len(long) { long[i] = byte('a' + i % 26) }
+	h := message_hash(string(long))
+	testing.expect(t, h != Hash256{}, "long message hashes without panic")
+
+	// A short message still produces a stable, non-zero hash.
+	h2 := message_hash("hello")
+	testing.expect(t, h2 != Hash256{}, "short message hashes")
+	testing.expect(t, h != h2, "different messages hash differently")
+}

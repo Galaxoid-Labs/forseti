@@ -1,5 +1,9 @@
 # Chain Reorganization Plan for bitcoin-node-odin
 
+> **STATUS: IMPLEMENTED** — `chain/reorg.odin` (`activate_best_chain`):
+> work-based fork choice, pre-flight data checks, newest-first disconnects
+> via undo records, failed-branch restore. Kept for design rationale.
+
 ## Problem
 
 The node cannot reorganize. The primitives exist — undo data per block,

@@ -17,6 +17,17 @@ reader_remaining :: proc(r: ^Wire_Reader) -> int {
 	return len(r.data) - r.pos
 }
 
+// Guard for deserializers that pre-allocate from a wire-supplied count: a
+// count is only plausible if the remaining bytes could hold that many
+// elements at min_element_size each. Without this, a 9-byte payload claiming
+// 2^40 entries drives make() to allocate terabytes (remote-input DoS).
+check_element_count :: proc(r: ^Wire_Reader, count: u64, min_element_size: int) -> Wire_Error {
+	if count > u64(reader_remaining(r) / min_element_size) {
+		return .Invalid_Data
+	}
+	return nil
+}
+
 reader_has :: proc(r: ^Wire_Reader, n: int) -> bool {
 	return r.pos + n <= len(r.data)
 }
@@ -393,6 +404,7 @@ deserialize_tx :: proc(r: ^Wire_Reader, allocator := context.allocator) -> (tx: 
 	}
 
 	// Inputs
+	check_element_count(r, input_count, 41) or_return
 	tx.inputs = make([]Tx_In, int(input_count), allocator)
 	for i in 0 ..< int(input_count) {
 		tx.inputs[i] = deserialize_tx_in(r, allocator) or_return
@@ -400,6 +412,7 @@ deserialize_tx :: proc(r: ^Wire_Reader, allocator := context.allocator) -> (tx: 
 
 	// Outputs
 	output_count := read_compact_size(r) or_return
+	check_element_count(r, output_count, 9) or_return
 	tx.outputs = make([]Tx_Out, int(output_count), allocator)
 	for i in 0 ..< int(output_count) {
 		tx.outputs[i] = deserialize_tx_out(r, allocator) or_return
@@ -441,6 +454,7 @@ serialize_block :: proc(w: ^Wire_Writer, blk: ^Block) {
 deserialize_block :: proc(r: ^Wire_Reader, allocator := context.allocator) -> (blk: Block, err: Wire_Error) {
 	blk.header = deserialize_block_header(r) or_return
 	tx_count := read_compact_size(r) or_return
+	check_element_count(r, tx_count, 10) or_return
 	blk.txs = make([]Tx, int(tx_count), allocator)
 	for i in 0 ..< int(tx_count) {
 		blk.txs[i] = deserialize_tx(r, allocator) or_return
@@ -453,6 +467,7 @@ deserialize_block :: proc(r: ^Wire_Reader, allocator := context.allocator) -> (b
 deserialize_block_with_txids :: proc(r: ^Wire_Reader, allocator := context.allocator) -> (blk: Block, txids: []crypto.Hash256, err: Wire_Error) {
 	blk.header = deserialize_block_header(r) or_return
 	tx_count := read_compact_size(r) or_return
+	check_element_count(r, tx_count, 10) or_return
 	blk.txs = make([]Tx, int(tx_count), allocator)
 	txids = make([]crypto.Hash256, int(tx_count), allocator)
 	for i in 0 ..< int(tx_count) {
@@ -511,12 +526,14 @@ _deserialize_tx_with_txid :: proc(r: ^Wire_Reader, tx: ^Tx, allocator := context
 		}
 	}
 
+	check_element_count(r, input_count, 41) or_return
 	tx.inputs = make([]Tx_In, int(input_count), allocator)
 	for i in 0 ..< int(input_count) {
 		tx.inputs[i] = deserialize_tx_in(r, allocator) or_return
 	}
 
 	output_count := read_compact_size(r) or_return
+	check_element_count(r, output_count, 9) or_return
 	tx.outputs = make([]Tx_Out, int(output_count), allocator)
 	for i in 0 ..< int(output_count) {
 		tx.outputs[i] = deserialize_tx_out(r, allocator) or_return

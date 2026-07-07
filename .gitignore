@@ -13,4 +13,4 @@ deps/ripemd160/*.o
 *.o
 *.a
 *.dSYM/
-tsconfig.json
+*.bin

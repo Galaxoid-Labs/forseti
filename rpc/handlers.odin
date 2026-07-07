@@ -1852,18 +1852,29 @@ _script_to_address :: proc(spk: []byte, params: ^consensus.Chain_Params) -> (str
 
 // --- help ---
 
+// Master method list for `help` — REGENERATED FROM THE DISPATCH TABLE in
+// server.odin (audit found 16 dispatched methods missing here). If you add
+// a `case` to _dispatch, add it here, sorted.
 RPC_METHODS := [?]string{
+	"addnode",
+	"clearbanned",
 	"combinerawtransaction",
+	"createmultisig",
 	"createrawtransaction",
 	"decoderawtransaction",
 	"decodescript",
 	"deriveaddresses",
+	"disconnectnode",
+	"estimatesmartfee",
 	"generateblock",
+	"generatetoaddress",
 	"generatetodescriptor",
+	"getaddednodeinfo",
 	"getbestblockhash",
 	"getblock",
 	"getblockchaininfo",
 	"getblockcount",
+	"getblockfilter",
 	"getblockhash",
 	"getblockheader",
 	"getblockstats",
@@ -1873,16 +1884,18 @@ RPC_METHODS := [?]string{
 	"getconnectioncount",
 	"getdescriptorinfo",
 	"getdifficulty",
+	"getindexinfo",
+	"getmemoryinfo",
 	"getmempoolancestors",
 	"getmempooldescendants",
 	"getmempoolentry",
 	"getmempoolinfo",
-	"getmemoryinfo",
 	"getmininginfo",
-	"getnodestatus",
 	"getnettotals",
 	"getnetworkhashps",
 	"getnetworkinfo",
+	"getnodeaddresses",
+	"getnodestatus",
 	"getpeerinfo",
 	"getrawmempool",
 	"getrawtransaction",
@@ -1892,14 +1905,20 @@ RPC_METHODS := [?]string{
 	"gettxoutproof",
 	"gettxoutsetinfo",
 	"help",
+	"listbanned",
 	"listsidechains",
 	"listwithdrawalstatus",
 	"logging",
 	"ping",
+	"preciousblock",
 	"prioritisetransaction",
+	"pruneblockchain",
 	"savemempool",
 	"scantxoutset",
 	"sendrawtransaction",
+	"setban",
+	"setnetworkactive",
+	"signmessagewithprivkey",
 	"signrawtransactionwithkey",
 	"stop",
 	"submitblock",
@@ -1908,8 +1927,8 @@ RPC_METHODS := [?]string{
 	"uptime",
 	"validateaddress",
 	"verifychain",
+	"verifymessage",
 	"verifytxoutproof",
-	"getblockfilter",
 }
 
 _handle_help :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
@@ -2937,6 +2956,10 @@ _handle_getnodestatus :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respo
 	obj["chain_height"] = json.Value(json.Integer(i64(st.chain_height)))
 	obj["best_header"] = json.Value(json.Integer(i64(st.best_header)))
 	obj["sync_state"] = json.Value(json.Integer(i64(st.sync_state)))
+	// Validation-halt banner data — without these the remote dashboard
+	// (btcnode-gui) can never show the red HALTED banner.
+	obj["halt_height"] = json.Value(json.Integer(i64(st.halt_height)))
+	obj["halt_reason"] = json.Value(json.String(string(st.halt_reason[:st.halt_reason_len])))
 	obj["blocks_remaining"] = json.Value(json.Integer(i64(st.blocks_remaining)))
 	obj["blocks_in_flight"] = json.Value(json.Integer(i64(st.blocks_in_flight)))
 	obj["verification_pct"] = json.Value(json.Float(st.verification_pct))

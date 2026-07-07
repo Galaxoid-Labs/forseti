@@ -102,6 +102,7 @@ deserialize_cfheaders :: proc(r: ^Wire_Reader, allocator := context.allocator) -
 	msg.stop_hash = read_hash(r) or_return
 	msg.prev_filter_header = read_hash(r) or_return
 	count := read_compact_size(r) or_return
+	check_element_count(r, count, 32) or_return
 	msg.filter_hashes = make([]Hash256, int(count), allocator)
 	for i in 0 ..< int(count) {
 		msg.filter_hashes[i] = read_hash(r) or_return
@@ -133,6 +134,7 @@ deserialize_cfcheckpt :: proc(r: ^Wire_Reader, allocator := context.allocator) -
 	msg.filter_type = read_byte(r) or_return
 	msg.stop_hash = read_hash(r) or_return
 	count := read_compact_size(r) or_return
+	check_element_count(r, count, 32) or_return
 	msg.filter_headers = make([]Hash256, int(count), allocator)
 	for i in 0 ..< int(count) {
 		msg.filter_headers[i] = read_hash(r) or_return

@@ -150,12 +150,6 @@ Get_Headers_Message :: struct {
 	hash_stop:    Hash256,
 }
 
-Get_Blocks_Message :: struct {
-	version:      u32,
-	block_hashes: []Hash256,
-	hash_stop:    Hash256,
-}
-
 serialize_getheaders :: proc(w: ^Wire_Writer, msg: ^Get_Headers_Message) {
 	write_u32le(w, msg.version)
 	write_compact_size(w, u64(len(msg.block_hashes)))
@@ -168,26 +162,7 @@ serialize_getheaders :: proc(w: ^Wire_Writer, msg: ^Get_Headers_Message) {
 deserialize_getheaders :: proc(r: ^Wire_Reader, allocator := context.allocator) -> (msg: Get_Headers_Message, err: Wire_Error) {
 	msg.version = read_u32le(r) or_return
 	count := read_compact_size(r) or_return
-	msg.block_hashes = make([]Hash256, int(count), allocator)
-	for i in 0 ..< int(count) {
-		msg.block_hashes[i] = read_hash(r) or_return
-	}
-	msg.hash_stop = read_hash(r) or_return
-	return msg, nil
-}
-
-serialize_getblocks :: proc(w: ^Wire_Writer, msg: ^Get_Blocks_Message) {
-	write_u32le(w, msg.version)
-	write_compact_size(w, u64(len(msg.block_hashes)))
-	for h in msg.block_hashes {
-		write_hash(w, h)
-	}
-	write_hash(w, msg.hash_stop)
-}
-
-deserialize_getblocks :: proc(r: ^Wire_Reader, allocator := context.allocator) -> (msg: Get_Blocks_Message, err: Wire_Error) {
-	msg.version = read_u32le(r) or_return
-	count := read_compact_size(r) or_return
+	check_element_count(r, count, 32) or_return // each locator hash is 32 bytes
 	msg.block_hashes = make([]Hash256, int(count), allocator)
 	for i in 0 ..< int(count) {
 		msg.block_hashes[i] = read_hash(r) or_return
@@ -213,6 +188,7 @@ serialize_headers :: proc(w: ^Wire_Writer, msg: ^Headers_Message) {
 
 deserialize_headers :: proc(r: ^Wire_Reader, allocator := context.allocator) -> (msg: Headers_Message, err: Wire_Error) {
 	count := read_compact_size(r) or_return
+	check_element_count(r, count, 81) or_return // 80-byte header + 1-byte tx_count(0)
 	msg.headers = make([]Block_Header, int(count), allocator)
 	for i in 0 ..< int(count) {
 		msg.headers[i] = deserialize_block_header(r) or_return
