@@ -69,6 +69,11 @@ Block_Profile :: struct {
 // thread reads it lock-free while init runs.
 Boot_Stage: cstring = ""
 
+// Recovery rollback progress for loading screens (plain ints — single
+// writer, torn reads impossible on aligned word stores).
+Boot_Rollback_Done: int
+Boot_Rollback_Total: int
+
 chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.Chain_Params, db_cache_mb: int = 450, script_threads: int = 0, prune_target: int = 0) -> Chain_Error {
 	cs.params = params
 	cs.prune_target = prune_target
@@ -1191,7 +1196,14 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 			return
 		}
 
+		Boot_Rollback_Total = best_valid.height - meta_height
+		Boot_Rollback_Done = 0
 		for entry := best_valid; entry != nil && entry.height > meta_height; entry = entry.prev {
+			Boot_Rollback_Done += 1
+			if Boot_Rollback_Done % 5000 == 0 {
+				log.infof("Crash recovery: rolled back %d / %d blocks (at height %d)",
+					Boot_Rollback_Done, Boot_Rollback_Total, entry.height)
+			}
 			if rerr := _rollback_block_for_recovery(cs, entry); rerr != .None {
 				// A half-applied rollback + continuing to run is how a
 				// recoverable state becomes a lying one — refuse instead.
@@ -1207,6 +1219,8 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 				entry.status -= {.Valid_Chain}
 			}
 		}
+		Boot_Rollback_Total = 0
+		Boot_Rollback_Done = 0
 	}
 }
 

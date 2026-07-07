@@ -304,7 +304,12 @@ _draw_boot :: proc(boot: ^Boot, frame: int) {
 	_text(fmt.ctprintf("%s", ellipsis[:dots]), sx + i32(sw), cy + 66, 17, COL_ORANGE)
 
 	elapsed := frame / FPS
-	_text_centered(fmt.ctprintf("%ds elapsed", elapsed), cy + 92, 14, COL_DIM)
+	if chain.Boot_Rollback_Total > 0 {
+		_text_centered(fmt.ctprintf("%d / %d blocks — %ds elapsed",
+			chain.Boot_Rollback_Done, chain.Boot_Rollback_Total, elapsed), cy + 92, 14, COL_DIM)
+	} else {
+		_text_centered(fmt.ctprintf("%ds elapsed", elapsed), cy + 92, 14, COL_DIM)
+	}
 
 	// Indeterminate sweep bar.
 	bar_w := i32(340)
