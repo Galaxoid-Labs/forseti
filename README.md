@@ -6,7 +6,7 @@ This is an educational/experimental project implementing 33 BIPs. It covers the 
 
 ## Status
 
-**320 tests passing** across 9 packages. Successfully syncs signet (~294k blocks), testnet4 (~124k blocks), testnet3, and mainnet (actively syncing) with full script verification. Accepts both inbound and outbound P2P connections with v2 encrypted transport enabled by default. Builds on macOS and Linux.
+**330+ tests passing** across 9 packages. Fully synced and verified mainnet (tip hash and UTXO set totals cross-checked against public explorers), plus signet, testnet4, and testnet3. Accepts both inbound and outbound P2P connections with v2 encrypted transport (BIP324) and automatic v1 fallback in both directions. Electrum-server compatible: [electrs](https://github.com/romanz/electrs) v0.10 runs against btcnode unmodified, serving BDK and Electrum wallets. Crash-safe by construction: interrupted flushes heal via undo-based rollback at startup, with live progress in the GUI. Builds on macOS and Linux.
 
 | Phase | Component | Status |
 |-------|-----------|--------|
@@ -18,7 +18,7 @@ This is an educational/experimental project implementing 33 BIPs. It covers the 
 | 5 | Persistent Storage (LevelDB) | Complete (18 tests) |
 | 6 | P2P Networking | Complete (33 tests) |
 | 7 | Mempool + Persistence + RBF + Config | Complete (32 tests) |
-| 8 | RPC Interface (46 methods) | Complete (53 tests) |
+| 8 | RPC Interface (47 methods, threaded + keep-alive + batch) | Complete (53 tests) |
 | 9 | P2P Integration + CLI + Shutdown | Complete |
 | 10 | Signet Sync (BIP325) | Complete |
 | 11 | LevelDB Storage Migration | Complete |
@@ -50,6 +50,16 @@ This is an educational/experimental project implementing 33 BIPs. It covers the 
 | 37 | BIP 157/158 Compact Block Filters | Complete |
 | 38 | Inbound P2P Connections + Core 28 Parity | Complete |
 | 39 | UTXO Prefetch (Parallel LevelDB Reads) | Complete |
+| 40 | Block Pruning (`--prune`) + NODE_NETWORK_LIMITED | Complete |
+| 41 | GUI Dashboard (raylib, in-process + remote `btcnode-gui`) | Complete |
+| 42 | TUI Dashboard (ncurses, `--tui`, SSH-friendly) | Complete |
+| 43 | Chain Reorganization (chainwork fork choice, undo-based disconnect) | Complete |
+| 44 | Background UTXO Flush (memtable rotation, no sync freeze) | Complete |
+| 45 | Sync Progress + ETA (Core chainTxData style) | Complete |
+| 46 | Electrum Server Compatibility (electrs v0.10: batch RPC, keep-alive, getheaders serving) | Complete |
+| 47 | Instant GUI Startup + Shutdown-hold Screen | Complete |
+| 48 | Crash Recovery v2 (persisted undo locations, verified rollback, bounded by safety flushes) | Complete |
+| 49 | Single-instance Datadir Lock | Complete |
 
 ## Dependencies
 
@@ -284,6 +294,29 @@ Values in a network-specific section (e.g. `[regtest]`) take priority over globa
 | testnet4 | 48332 | 48333 |
 | signet | 38332 | 38333 |
 | regtest | 18443 | 18444 |
+
+## Electrum Wallets (BDK / Electrum / Sparrow)
+
+btcnode speaks enough Bitcoin Core RPC + P2P that [electrs](https://github.com/romanz/electrs)
+v0.10 runs against it unmodified, giving any Electrum-protocol wallet
+(BDK's `bdk_electrum`, Electrum, Sparrow) address balances, histories, and
+UTXOs backed by your own node:
+
+```bash
+# Node must be UNPRUNED for electrs's initial index build.
+./btcnode --network=signet --datadir=~/btcnode-signet
+
+electrs --network signet \
+  --daemon-rpc-addr 127.0.0.1:38332 \
+  --daemon-p2p-addr 127.0.0.1:38333 \
+  --cookie-file ~/btcnode-signet/.cookie \
+  --db-dir ~/electrs-db
+
+# Wallets connect to electrs at tcp://127.0.0.1:60601
+```
+
+electrs learns about new blocks over the P2P connection (no ZMQ needed)
+and syncs the mempool over RPC.
 
 ## RPC Interface
 
