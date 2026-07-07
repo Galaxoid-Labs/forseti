@@ -14,10 +14,10 @@ deps:
 	./deps/build.sh
 
 build: deps
-	odin build . -out:btcnode -extra-linker-flags:"$(CXX_LINK)"
+	odin build . -out:btcnode -o:speed -extra-linker-flags:"$(CXX_LINK)"
 
 gui: deps
-	odin build guiapp -out:btcnode-gui -extra-linker-flags:"$(CXX_LINK)"
+	odin build guiapp -out:btcnode-gui -o:speed -extra-linker-flags:"$(CXX_LINK)"
 
 test: deps
 	odin test crypto -extra-linker-flags:"$(CXX_LINK)" -define:ODIN_TEST_THREADS=1
