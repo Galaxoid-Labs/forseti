@@ -74,6 +74,14 @@ index_db_init :: proc(store: ^LDB_Store, allocator := context.allocator) -> (db:
 	loaded := 0
 	leveldb_iter_seek_to_first(iter)
 	for leveldb_iter_valid(iter) != 0 {
+		// Block records are keyed by their 32-byte hash; skip metadata keys
+		// (e.g. "dcu"+height drivechain undo records).
+		klen: c.size_t
+		_ = leveldb_iter_key(iter, &klen)
+		if klen != 32 {
+			leveldb_iter_next(iter)
+			continue
+		}
 		vlen: c.size_t
 		vptr := leveldb_iter_value(iter, &vlen)
 		if vlen >= c.size_t(BLOCK_INDEX_RECORD_SIZE_LEGACY) {

@@ -30,6 +30,7 @@ test: deps
 	odin test mempool -extra-linker-flags:"$(CXX_LINK)"
 	odin test rpc -extra-linker-flags:"$(CXX_LINK)" -define:ODIN_TEST_THREADS=1
 	odin test zmq -extra-linker-flags:"$(CXX_LINK)"
+	odin test drivechain -extra-linker-flags:"$(CXX_LINK)"
 
 debug: deps
 	odin build . -out:btcnode -debug -extra-linker-flags:"$(CXX_LINK)"

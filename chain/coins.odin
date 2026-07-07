@@ -48,6 +48,10 @@ Coins_Cache :: struct {
 	flush_done:       bool, // set by the worker (plain bool: single writer, polled)
 	flush_tip_hash:   Hash256,
 	flush_tip_height: int,
+	// Drivechain state blob snapshotted at flush start (matches the flush
+	// tip); written into the tip-marker batch so it stays atomic with the
+	// tip. Owned by the cache until written (heap clone).
+	flush_dc_state:   []byte,
 	flush_written:    int,
 	flush_deleted:    int,
 	flush_failed:     bool,
@@ -89,6 +93,7 @@ coins_cache_destroy :: proc(cc: ^Coins_Cache) {
 	coins_cache_flush_join(cc) // never leave a worker thread running
 	virtual.arena_destroy(&cc.script_arena)
 	delete(cc.cache)
+	delete(cc.flush_dc_state)
 }
 
 // Look up a UTXO. Checks cache first, then falls through to DB.
@@ -272,7 +277,7 @@ coins_cache_restore :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: sto
 
 // Flush dirty entries to DB atomically. All UTXO changes + metadata are
 // committed in a single WriteBatch for crash consistency.
-coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) -> Chain_Error {
+coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int, dc_state: []byte = nil) -> Chain_Error {
 	// A concurrently-running background flush would race this one's tip
 	// marker ahead of its own chunks — reap it fully first.
 	coins_cache_flush_join(cc)
@@ -341,10 +346,14 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) 
 	// Final data chunk, synced — everything durable before the tip moves.
 	berr := storage.ldb_batch_write(cc.db.store.chainstate_db, cc.db.store.sync_opts, batch)
 	if berr == .None {
-		// Tip marker last, in its own synced batch.
+		// Tip marker last, in its own synced batch. The drivechain state
+		// rides in the same batch — atomic with the tip.
 		tip_batch := storage.ldb_batch_create()
 		defer storage.ldb_batch_destroy(tip_batch)
 		write_meta_tip(cc.db.store, tip_batch, tip_hash, tip_height)
+		if dc_state != nil {
+			storage.ldb_batch_put(tip_batch, transmute([]byte)string(DC_STATE_KEY), dc_state)
+		}
 		berr = storage.ldb_batch_write(cc.db.store.chainstate_db, cc.db.store.sync_opts, tip_batch)
 	}
 	if berr != .None {

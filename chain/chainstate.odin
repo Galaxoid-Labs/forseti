@@ -9,6 +9,7 @@ import "core:thread"
 import "core:time"
 import "../consensus"
 import crypto "../crypto"
+import "../drivechain"
 import "../script"
 import "../storage"
 import "../wire"
@@ -50,6 +51,9 @@ Chain_State :: struct {
 	halt_height: int,         // 0 = healthy; else validation is stuck at this height
 	halt_error:  Chain_Error, // why
 	recovery_failed: bool, // crash recovery could not reconcile — refuse to run
+	// BIP300/301 drivechain (off = zero-cost, no state touched)
+	dc_mode:  drivechain.Mode,
+	dc_state: drivechain.State,
 }
 
 Block_Profile :: struct {
@@ -76,9 +80,10 @@ Boot_Stage: cstring = ""
 Boot_Rollback_Done: int
 Boot_Rollback_Total: int
 
-chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.Chain_Params, db_cache_mb: int = 450, script_threads: int = 0, prune_target: int = 0) -> Chain_Error {
+chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.Chain_Params, db_cache_mb: int = 450, script_threads: int = 0, prune_target: int = 0, dc_mode: drivechain.Mode = .Off) -> Chain_Error {
 	cs.params = params
 	cs.prune_target = prune_target
+	cs.dc_mode = dc_mode
 
 	// Ensure data_dir exists
 	os.make_directory(data_dir)
@@ -167,6 +172,11 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	// Compute cumulative chain_tx for the active chain
 	_compute_chain_tx(cs)
 
+	// Load drivechain state (must precede connect_pending_blocks, which
+	// re-applies blocks above the flush point through connect_block).
+	Boot_Stage = "Loading drivechain state"
+	_dc_load(cs)
+
 	// Persistent per-input verification arena (growing; starts at 8 MB, grows for
 	// oversized tapscripts, overflow blocks released on each free_all)
 	if verr := virtual.arena_init_growing(&cs.verify_arena, 8 * 1024 * 1024); verr != nil {
@@ -222,8 +232,10 @@ chain_state_destroy :: proc(cs: ^Chain_State) {
 	}
 
 	tip_hash, tip_height := chain_tip(cs)
-	coins_cache_flush(&cs.coins, tip_hash, tip_height)
+	dc_blob := dc_flush_blob(cs, context.temp_allocator)
+	coins_cache_flush(&cs.coins, tip_hash, tip_height, dc_blob)
 	coins_cache_destroy(&cs.coins)
+	drivechain.state_destroy(&cs.dc_state)
 	// LevelDB close can trigger compaction after a large flush — log so a slow
 	// shutdown here doesn't look like a hang.
 	Boot_Stage = "Closing databases"
@@ -500,6 +512,16 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 
 	t_scripts := time.tick_now()
 
+	// 4e. Drivechain (BIP300/301): validate against + apply to D1/D2. In
+	// enforce mode a violation rejects the block (DC state already restored
+	// inside the hook; UTXO changes rolled back here).
+	if cs.dc_mode != .Off {
+		if !_dc_connect(cs, block, entry, txids) {
+			_rollback_applied_txs(cs, block, applied_tx_indices[:], undo_coins[:])
+			return .Drivechain_Violation
+		}
+	}
+
 	// 5. Verify coinbase value <= subsidy + total_fees
 	{
 		coinbase := block.txs[0]
@@ -600,6 +622,12 @@ disconnect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Ind
 
 	// 4. Delete BIP158 filter on disconnect.
 	_disconnect_block_filter(cs, entry.hash)
+
+	// 4b. Restore drivechain state to the pre-block snapshot (if this block
+	// changed it).
+	if cs.dc_mode != .Off {
+		_dc_disconnect(cs, entry)
+	}
 
 	// 5. Update entry status and pop active chain
 	entry.status -= {.Valid_Chain}

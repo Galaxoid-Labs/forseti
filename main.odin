@@ -13,6 +13,7 @@ import "core:thread"
 import "chain"
 import "consensus"
 import "crypto"
+import "drivechain"
 import "mempool"
 import "p2p"
 import zmqpkg "zmq"
@@ -79,6 +80,7 @@ CLI_Flag :: enum {
 	Gui,
 	Tui,
 	Prune,
+	Drivechain,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
 
@@ -125,6 +127,7 @@ CLI_Config :: struct {
 	gui:                    bool,   // show GUI dashboard window (default: false = headless)
 	tui:                    bool,   // terminal dashboard (mutually exclusive with --gui)
 	prune_mb:               int,    // prune target in MB (0 = keep all blocks)
+	drivechain:             string, // BIP300/301: "off", "track", "enforce"
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -156,6 +159,7 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 	cfg.v2_transport = false
 	cfg.block_filter_index = false
 	cfg.listen = true
+	cfg.drivechain = "off"
 
 	for arg in os.args[1:] {
 		if arg == "--help" || arg == "-h" {
@@ -195,6 +199,14 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 		} else if arg == "--tui" {
 			cfg.tui = true
 			flags_set += {.Tui}
+		} else if strings.has_prefix(arg, "--drivechain=") {
+			val := arg[len("--drivechain="):]
+			if val != "off" && val != "track" && val != "enforce" {
+				fmt.eprintln("Error: --drivechain must be off, track, or enforce")
+				return cfg, flags_set, false
+			}
+			cfg.drivechain = val
+			flags_set += {.Drivechain}
 		} else if strings.has_prefix(arg, "--prune=") {
 			val, parse_ok := strconv.parse_int(arg[len("--prune="):])
 			if !parse_ok {
@@ -448,6 +460,16 @@ _print_usage :: proc() {
 	fmt.println("  --tui                  Terminal dashboard (for SSH sessions; q quits)")
 	fmt.println("  --prune=<MB>           Delete old block files, keep usage under target (min 550, 0=off)")
 	fmt.println()
+	fmt.println("Drivechain (BIP 300/301) options:")
+	fmt.println("  --drivechain=<mode>   off (default), track, or enforce.")
+	fmt.println("                        track: parse M1-M6/BMM messages and maintain the sidechain +")
+	fmt.println("                        withdrawal databases without rejecting anything (zero risk).")
+	fmt.println("                        enforce: additionally reject blocks violating BIP300/301 rules.")
+	fmt.println("                        WARNING: enforce is a CUSF-style voluntary soft fork — while the")
+	fmt.println("                        rest of the network does not enforce these rules, a violating")
+	fmt.println("                        block would be rejected by this node but accepted by everyone")
+	fmt.println("                        else, forking this node off the network.")
+	fmt.println()
 	fmt.println("  --peerbloomfilters=<0|1> Enable BIP 37 bloom filters + BIP 35 mempool msg (default: 0)")
 	fmt.println("  --debug               Enable debug logging (default: off)")
 	fmt.println("  --help, -h            Show this help message")
@@ -544,6 +566,16 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 		if val, found := _ini_get(&m, cfg.network, "prune"); found {
 			if mb, parse_ok := strconv.parse_int(val); parse_ok && (mb == 0 || mb >= 550) {
 				cfg.prune_mb = mb
+			}
+		}
+	}
+
+	if .Drivechain not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "drivechain"); found {
+			if val == "off" || val == "track" || val == "enforce" {
+				cfg.drivechain = val
+			} else {
+				log.warnf("Config: invalid drivechain value %q (must be off, track, or enforce) — ignored", val)
 			}
 		}
 	}
@@ -1009,9 +1041,20 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 		log.info("Assumevalid: disabled (verifying all scripts)")
 	}
 
+	dc_mode: drivechain.Mode = .Off
+	switch cfg.drivechain {
+	case "track":
+		dc_mode = .Track
+		log.info("Drivechain (BIP300/301): TRACK mode — maintaining sidechain/withdrawal databases, rejecting nothing")
+	case "enforce":
+		dc_mode = .Enforce
+		log.warn("Drivechain (BIP300/301): ENFORCE mode — blocks violating BIP300/301 will be REJECTED.")
+		log.warn("While the rest of the network does not enforce these rules, this node can fork itself off the network.")
+	}
+
 	// Initialize chain state.
 	cs := new(chain.Chain_State)
-	cs_err := chain.chain_state_init(cs, cfg.data_dir, params, cfg.db_cache_mb, script_threads, cfg.prune_mb * 1024 * 1024)
+	cs_err := chain.chain_state_init(cs, cfg.data_dir, params, cfg.db_cache_mb, script_threads, cfg.prune_mb * 1024 * 1024, dc_mode)
 	if cs_err != .None {
 		log.errorf("Failed to initialize chain state: %v", cs_err)
 		return

@@ -459,6 +459,12 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_getmininginfo(srv, req.params)
 	case "getnodestatus":
 		return _handle_getnodestatus(srv, req.params)
+	case "listsidechains":
+		return _handle_listsidechains(srv, req.params)
+	case "getsidechaininfo":
+		return _handle_getsidechaininfo(srv, req.params)
+	case "listwithdrawalstatus":
+		return _handle_listwithdrawalstatus(srv, req.params)
 	case "getnetworkhashps":
 		return _handle_getnetworkhashps(srv, req.params)
 	case "getnettotals":

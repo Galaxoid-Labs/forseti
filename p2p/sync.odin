@@ -373,7 +373,8 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 				}
 			} else {
 				tip_hash, tip_h := chain.chain_tip(sm.chain)
-				chain.coins_cache_flush_begin(&sm.chain.coins, tip_hash, tip_h)
+				dc_blob := chain.dc_flush_blob(sm.chain, context.temp_allocator)
+				chain.coins_cache_flush_begin(&sm.chain.coins, tip_hash, tip_h, dc_blob)
 			}
 		}
 

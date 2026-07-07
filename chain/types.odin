@@ -27,6 +27,7 @@ Chain_Error :: enum {
 	Non_Final_Tx,
 	Consensus_Error,
 	Invalid_State,
+	Drivechain_Violation,
 }
 
 Undo_Coin :: struct {

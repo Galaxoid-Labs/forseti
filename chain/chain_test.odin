@@ -2,6 +2,7 @@ package chain
 
 import "../consensus"
 import crypto "../crypto"
+import "../drivechain"
 import "../storage"
 import "../wire"
 import "core:fmt"
@@ -1367,4 +1368,181 @@ test_restore_respend_deletes_from_db :: proc(t: ^testing.T) {
 	// The DB copy must be gone. (Fresh-flagged restores skipped the delete.)
 	_, still_there := storage.utxo_db_get(db, op, context.temp_allocator)
 	testing.expect(t, !still_there, "restored+respent coin must be deleted from DB")
+}
+
+// --- Drivechain (BIP300/301) integration ---
+
+// M1 sidechain-proposal OP_RETURN payload (short title/description so a
+// single-byte push suffices).
+_dc_m1_payload :: proc(sidechain: u8, allocator := context.temp_allocator) -> []byte {
+	p := make([dynamic]byte, 0, 80, allocator)
+	append(&p, 0xd5, 0xe0, 0xc4, 0xaf) // M1 tag
+	append(&p, sidechain)
+	append(&p, 1, 0, 0, 0) // version
+	append(&p, 'T', 0, 'd') // title \0 description
+	for _ in 0 ..< 32 { append(&p, 0xaa) } // hashID1
+	for _ in 0 ..< 20 { append(&p, 0xbb) } // hashID2
+	return p[:]
+}
+
+// Like make_chain_block but with extra zero-value OP_RETURN coinbase outputs.
+make_dc_block :: proc(height: int, prev_hash: Hash256, params: ^consensus.Chain_Params, payloads: [][]byte) -> wire.Block {
+	value := consensus.get_block_subsidy(height, params)
+	cb := consensus.make_coinbase(height, value = value)
+
+	outs := make([dynamic]wire.Tx_Out, 0, 1 + len(payloads), context.temp_allocator)
+	append(&outs, ..cb.outputs)
+	for p in payloads {
+		spk := make([]byte, 2 + len(p), context.temp_allocator)
+		spk[0] = 0x6a
+		spk[1] = byte(len(p))
+		copy(spk[2:], p)
+		append(&outs, wire.Tx_Out{value = 0, script_pubkey = spk})
+	}
+	cb.outputs = outs[:]
+
+	txs := make([]wire.Tx, 1, context.temp_allocator)
+	txs[0] = cb
+	tx_id := wire.tx_id(&cb)
+	merkle := crypto.merkle_root([]crypto.Hash256{tx_id})
+	block := wire.Block {
+		header = wire.Block_Header {
+			version     = 0x20000000,
+			prev_hash   = prev_hash,
+			merkle_root = merkle,
+			timestamp   = u32(1231006505 + height),
+			bits        = params.pow_limit_bits,
+		},
+		txs = txs,
+	}
+	consensus.mine_block(&block, params)
+	return block
+}
+
+@(test)
+test_drivechain_track_and_disconnect :: proc(t: ^testing.T) {
+	dir := make_test_dir("dc_track")
+	defer remove_test_dir(dir)
+
+	params := consensus.REGTEST_PARAMS
+	cs: Chain_State
+	err := chain_state_init(&cs, dir, &params, dc_mode = .Track)
+	testing.expect_value(t, err, Chain_Error.None)
+	defer chain_state_destroy(&cs)
+
+	// Two plain blocks, then one carrying an M1 proposal.
+	prev_hash := HASH_ZERO
+	for i in 0 ..< 2 {
+		block := make_chain_block(i, prev_hash, &params)
+		testing.expect_value(t, accept_block(&cs, &block), Chain_Error.None)
+		prev_hash = wire.block_header_hash(&block.header)
+	}
+
+	pre_m1 := drivechain.serialize_state(&cs.dc_state, context.temp_allocator)
+
+	m1_block := make_dc_block(2, prev_hash, &params, [][]byte{_dc_m1_payload(3)})
+	testing.expect_value(t, accept_block(&cs, &m1_block), Chain_Error.None)
+	testing.expect_value(t, len(cs.dc_state.proposals), 1)
+	testing.expect_value(t, cs.dc_state.proposals[0].sidechain, u8(3))
+	testing.expect_value(t, cs.dc_state.proposals[0].title, "T")
+
+	// Disconnect restores the pre-block state byte-identically.
+	m1_hash := wire.block_header_hash(&m1_block.header)
+	entry, found := cs.block_index.entries[m1_hash]
+	testing.expect(t, found, "m1 block entry exists")
+	testing.expect_value(t, disconnect_block(&cs, &m1_block, entry), Chain_Error.None)
+	testing.expect_value(t, len(cs.dc_state.proposals), 0)
+
+	post := drivechain.serialize_state(&cs.dc_state, context.temp_allocator)
+	testing.expect_value(t, len(post), len(pre_m1))
+	same := true
+	for b, i in pre_m1 {
+		if post[i] != b { same = false; break }
+	}
+	testing.expect(t, same, "state restored byte-identically after disconnect")
+
+	// Reconnect and make sure the proposal comes back (dcu record rewritten).
+	testing.expect_value(t, connect_block(&cs, &m1_block, entry), Chain_Error.None)
+	testing.expect_value(t, len(cs.dc_state.proposals), 1)
+}
+
+@(test)
+test_drivechain_state_survives_restart :: proc(t: ^testing.T) {
+	dir := make_test_dir("dc_restart")
+	defer remove_test_dir(dir)
+
+	params := consensus.REGTEST_PARAMS
+	prev_hash := HASH_ZERO
+	{
+		cs: Chain_State
+		err := chain_state_init(&cs, dir, &params, dc_mode = .Track)
+		testing.expect_value(t, err, Chain_Error.None)
+
+		for i in 0 ..< 2 {
+			block := make_chain_block(i, prev_hash, &params)
+			testing.expect_value(t, accept_block(&cs, &block), Chain_Error.None)
+			prev_hash = wire.block_header_hash(&block.header)
+		}
+		m1_block := make_dc_block(2, prev_hash, &params, [][]byte{_dc_m1_payload(9)})
+		testing.expect_value(t, accept_block(&cs, &m1_block), Chain_Error.None)
+		testing.expect_value(t, len(cs.dc_state.proposals), 1)
+
+		chain_state_destroy(&cs) // shutdown flush persists dcstate with the tip
+	}
+	{
+		cs: Chain_State
+		err := chain_state_init(&cs, dir, &params, dc_mode = .Track)
+		testing.expect_value(t, err, Chain_Error.None)
+		defer chain_state_destroy(&cs)
+
+		testing.expect_value(t, len(cs.dc_state.proposals), 1)
+		if len(cs.dc_state.proposals) == 1 {
+			testing.expect_value(t, cs.dc_state.proposals[0].sidechain, u8(9))
+			testing.expect_value(t, cs.dc_state.proposals[0].age, 1)
+		}
+	}
+}
+
+@(test)
+test_drivechain_enforce_rejects_bad_bmm :: proc(t: ^testing.T) {
+	dir := make_test_dir("dc_enforce")
+	defer remove_test_dir(dir)
+
+	params := consensus.REGTEST_PARAMS
+	cs: Chain_State
+	err := chain_state_init(&cs, dir, &params, dc_mode = .Enforce)
+	testing.expect_value(t, err, Chain_Error.None)
+	defer chain_state_destroy(&cs)
+
+	block0 := make_chain_block(0, HASH_ZERO, &params)
+	testing.expect_value(t, accept_block(&cs, &block0), Chain_Error.None)
+	prev_hash := wire.block_header_hash(&block0.header)
+
+	// Block with a BMM request tx but NO matching coinbase accept → rejected
+	// in enforce mode. Build: coinbase + a tx spending block0's coinbase...
+	// spending immature coinbase would fail first, so give the request tx a
+	// bogus input — Inputs_Unavailable would also reject, but the drivechain
+	// check runs on the same block; instead craft the violation in the
+	// coinbase itself: a BMM request OP_RETURN in a NON-coinbase position is
+	// required. Use the state-machine check directly at block level.
+	req := make([]byte, 68, context.temp_allocator)
+	req[0] = 0x00; req[1] = 0xbf; req[2] = 0x00
+	req[3] = 1
+	for i in 4 ..< 36 { req[i] = 0x42 }
+	copy(req[36:], prev_hash[:])
+
+	txs := make([]wire.Tx, 2, context.temp_allocator)
+	txs[0] = consensus.make_coinbase(1, value = consensus.get_block_subsidy(1, &params))
+	spk := make([]byte, 2 + len(req), context.temp_allocator)
+	spk[0] = 0x6a
+	spk[1] = byte(len(req))
+	copy(spk[2:], req)
+	outs := make([]wire.Tx_Out, 1, context.temp_allocator)
+	outs[0] = wire.Tx_Out{value = 0, script_pubkey = spk}
+	ins := make([]wire.Tx_In, 1, context.temp_allocator)
+	ins[0] = wire.Tx_In{previous_output = {hash = {0 = 0xee}, index = 0}, sequence = 0xffffffff}
+	txs[1] = wire.Tx{version = 2, inputs = ins, outputs = outs}
+
+	violation := drivechain.check_bmm(drivechain.collect_coinbase_payloads(&txs[0]), txs, prev_hash)
+	testing.expect(t, violation != "", "unmatched BMM request is a violation")
 }

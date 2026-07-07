@@ -1,5 +1,15 @@
 # Drivechain (BIP300/301) Plan for bitcoin-node-odin
 
+> **STATUS (2026-07-07): IMPLEMENTED** — phases 1 and 2 shipped (`drivechain/`
+> package, chain integration + persistence, `--drivechain` flag, 3 RPCs, docs).
+> Differences from this plan discovered during implementation: undo records
+> live in the block-index LevelDB (`"dcu"+height`), NOT the rev files (the rev
+> parser is a proven-delicate crash-recovery surface); the blinded m6id follows
+> the CUSF enforcer (inputs cleared + output0 → OP_RETURN fee), which the BIP
+> text defers to; no script Verify_Flag was needed — enforcement is entirely
+> tx-level, matching the spec. Phase 3 (sidechain-facing BMM service) remains
+> unbuilt. See docs/bips.md and docs/architecture.md for the shipped design.
+
 ## Goal
 
 Add opt-in BIP300 (Hashrate Escrows) and BIP301 (Blind Merged Mining) support
@@ -183,7 +193,10 @@ Keeps BIP300/301 logic out of `consensus/` core. Contents:
 2. If the August block-964,000 fork happens and btcnode should *follow* that
    chain, enforcement flag alone is not enough — that fork reportedly changes
    more than BIP300 (coin split). Out of scope until the fork ships something
-   concrete to validate against.
+   concrete to validate against. **P2P note:** following the fork chain will
+   almost certainly require explicit fork-aware peers (`--connect`/addnode) —
+   DNS seeds and the address manager serve majority-chain peers, which will
+   not relay the fork chain and may ban a node rejecting their blocks.
 3. D2 upper bound: bundles are per-sidechain-slot and pruned aggressively by the
    ACK math, so D2 stays small; confirm worst-case growth during implementation.
 

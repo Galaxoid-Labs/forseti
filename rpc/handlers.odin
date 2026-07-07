@@ -1828,10 +1828,13 @@ RPC_METHODS := [?]string{
 	"getrawmempool",
 	"getrawtransaction",
 	"getrpcinfo",
+	"getsidechaininfo",
 	"gettxout",
 	"gettxoutproof",
 	"gettxoutsetinfo",
 	"help",
+	"listsidechains",
+	"listwithdrawalstatus",
 	"logging",
 	"ping",
 	"savemempool",
@@ -1920,6 +1923,9 @@ _get_method_help :: proc(method: string) -> string {
 	case "signrawtransactionwithkey":   return "signrawtransactionwithkey \"hex\" [\"privatekey\",...] ( [{\"txid\":\"hex\",\"vout\":n,\"scriptPubKey\":\"hex\",\"amount\":n},...] \"sighashtype\" )\nSign inputs for raw transaction with provided private keys."
 	case "verifytxoutproof":           return "verifytxoutproof \"proof\"\nVerifies that a proof points to a transaction in a block, returning the txids."
 	case "getblockfilter":             return "getblockfilter \"blockhash\" ( \"filtertype\" )\nRetrieve a BIP 158 content filter for a particular block."
+	case "listsidechains":             return "listsidechains\nList active BIP300 sidechains (D1) and pending sidechain proposals. Requires --drivechain=track or enforce."
+	case "getsidechaininfo":           return "getsidechaininfo nsidechain\nReturns information about one active BIP300 sidechain, including its CTIP (treasury UTXO). Requires --drivechain=track or enforce."
+	case "listwithdrawalstatus":       return "listwithdrawalstatus ( nsidechain )\nList BIP300 withdrawal bundles (D2) with their ACK scores and blocks remaining. Requires --drivechain=track or enforce."
 	}
 	return fmt.tprintf("%s\nNo detailed help available.", method)
 }
@@ -3300,4 +3306,109 @@ _handle_generatetoaddress :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_R
 		append(&hashes, json.Value(json.String(_hash_to_hex(hash))))
 	}
 	return _make_result(json.Value(hashes), srv._current_id)
+}
+
+// --- drivechain (BIP300/301) ---
+
+_dc_check_enabled :: proc(srv: ^RPC_Server) -> (RPC_Response, bool) {
+	if srv.chain.dc_mode == .Off {
+		return _make_error(.Misc_Error, "Drivechain support is disabled (start with --drivechain=track or enforce)", srv._current_id), false
+	}
+	return {}, true
+}
+
+_dc_sidechain_to_json :: proc(srv: ^RPC_Server, n: int) -> json.Object {
+	s := &srv.chain.dc_state.slots[n]
+	obj := make(json.Object, 10, context.temp_allocator)
+	obj["nsidechain"] = json.Value(json.Integer(i64(n)))
+	obj["title"] = json.Value(json.String(s.title))
+	obj["description"] = json.Value(json.String(s.description))
+	obj["version"] = json.Value(json.Integer(i64(s.version)))
+	obj["hashid1"] = json.Value(json.String(_hash_to_hex(s.hash_id_1)))
+	obj["hashid2"] = json.Value(json.String(_bytes_to_hex(s.hash_id_2[:])))
+	obj["activationheight"] = json.Value(json.Integer(i64(s.activated_h)))
+	if s.ctip_txid != {} {
+		ctip := make(json.Object, 3, context.temp_allocator)
+		ctip["txid"] = json.Value(json.String(_hash_to_hex(s.ctip_txid)))
+		ctip["vout"] = json.Value(json.Integer(i64(s.ctip_vout)))
+		ctip["amount"] = json.Value(json.Float(_satoshi_to_btc(s.ctip_amount)))
+		obj["ctip"] = json.Value(ctip)
+	}
+	return obj
+}
+
+// listsidechains: active sidechain slots (D1) plus pending M1 proposals.
+_handle_listsidechains :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	if resp, enabled := _dc_check_enabled(srv); !enabled {
+		return resp
+	}
+	st := &srv.chain.dc_state
+
+	active := make(json.Array, 0, context.temp_allocator)
+	for n in 0 ..< len(st.slots) {
+		if !st.slots[n].active { continue }
+		append(&active, json.Value(_dc_sidechain_to_json(srv, n)))
+	}
+
+	proposals := make(json.Array, 0, context.temp_allocator)
+	for &p in st.proposals {
+		obj := make(json.Object, 7, context.temp_allocator)
+		obj["nsidechain"] = json.Value(json.Integer(i64(p.sidechain)))
+		obj["title"] = json.Value(json.String(p.title))
+		obj["description"] = json.Value(json.String(p.description))
+		obj["version"] = json.Value(json.Integer(i64(p.version)))
+		obj["proposalhash"] = json.Value(json.String(_hash_to_hex(p.commitment)))
+		obj["age"] = json.Value(json.Integer(i64(p.age)))
+		obj["fails"] = json.Value(json.Integer(i64(p.fails)))
+		obj["overwriting"] = json.Value(json.Boolean(p.overwriting))
+		append(&proposals, json.Value(obj))
+	}
+
+	result := make(json.Object, 2, context.temp_allocator)
+	result["sidechains"] = json.Value(active)
+	result["proposals"] = json.Value(proposals)
+	return _make_result(json.Value(result), srv._current_id)
+}
+
+// getsidechaininfo <nsidechain>: one active slot from D1.
+_handle_getsidechaininfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	if resp, enabled := _dc_check_enabled(srv); !enabled {
+		return resp
+	}
+	n, ok := _get_int_param(params, 0)
+	if !ok || n < 0 || n > 255 {
+		return _make_error(.Invalid_Params, "Missing or invalid nsidechain parameter (0-255)", srv._current_id)
+	}
+	if !srv.chain.dc_state.slots[n].active {
+		return _make_error(.Misc_Error, fmt.tprintf("Sidechain %d is not active", n), srv._current_id)
+	}
+	return _make_result(json.Value(_dc_sidechain_to_json(srv, n)), srv._current_id)
+}
+
+// listwithdrawalstatus ( nsidechain ): withdrawal bundles (D2), optionally
+// filtered to one sidechain.
+_handle_listwithdrawalstatus :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	if resp, enabled := _dc_check_enabled(srv); !enabled {
+		return resp
+	}
+	filter := -1
+	if n, ok := _get_int_param(params, 0); ok {
+		if n < 0 || n > 255 {
+			return _make_error(.Invalid_Params, "Invalid nsidechain parameter (0-255)", srv._current_id)
+		}
+		filter = n
+	}
+
+	bundles := make(json.Array, 0, context.temp_allocator)
+	for &b in srv.chain.dc_state.bundles {
+		if filter >= 0 && int(b.sidechain) != filter { continue }
+		obj := make(json.Object, 5, context.temp_allocator)
+		obj["nsidechain"] = json.Value(json.Integer(i64(b.sidechain)))
+		obj["hash"] = json.Value(json.String(_hash_to_hex(b.hash)))
+		obj["nblocksleft"] = json.Value(json.Integer(i64(b.remaining)))
+		obj["nworkscore"] = json.Value(json.Integer(i64(b.acks)))
+		obj["approved"] = json.Value(json.Boolean(b.approved))
+		append(&bundles, json.Value(obj))
+	}
+	return _make_result(json.Value(bundles), srv._current_id)
 }

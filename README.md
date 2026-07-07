@@ -6,7 +6,7 @@ with only C dependencies Bitcoin Core itself uses (libsecp256k1, LevelDB).
 
 **Fully synced and verified on mainnet** — tip hash and UTXO totals
 cross-checked against the public network — plus signet, testnet4, and
-testnet3. 328 tests across 10 packages.
+testnet3. 342 tests across 11 packages.
 
 ## Highlights
 
@@ -22,6 +22,8 @@ testnet3. 328 tests across 10 packages.
 - **Crash-safe by construction** — chunked atomic flushes, undo-based
   recovery with live progress, bounded rollback depth, single-instance lock
 - **Pruning** (`--prune`), background UTXO flushes, sync ETA
+- **Drivechain (BIP300/301)** — opt-in `--drivechain=track|enforce`: sidechain
+  proposal/withdrawal tracking, escrow (CTIP) validation, blind merged mining
 - **Dashboards** — instant-start GUI window (raylib), SSH-friendly TUI
   (ncurses), and a standalone remote client (`btcnode-gui`)
 
@@ -48,7 +50,7 @@ Requires the Odin compiler, LLVM 15+, and `make` — full details in
 | [docs/integrations.md](docs/integrations.md) | Electrum wallets via electrs (BDK/Sparrow), ZMQ notifications |
 | [docs/dashboards.md](docs/dashboards.md) | GUI window, terminal TUI, remote client |
 | [docs/architecture.md](docs/architecture.md) | Project layout, storage design, threading, sync internals |
-| [docs/bips.md](docs/bips.md) | All 34 implemented BIPs |
+| [docs/bips.md](docs/bips.md) | All 36 implemented BIPs |
 | [docs/hardware.md](docs/hardware.md) | What to run it on (SHA-256 backends, IBD times) |
 | [docs/history.md](docs/history.md) | The 50 build phases and what's left |
 

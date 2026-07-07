@@ -61,6 +61,7 @@ Every build phase in order. See the [README](../README.md) for the current summa
 | 52 | Regtest Mining (generatetoaddress) | Complete |
 | 53 | UTXO Hygiene (skip unspendable outputs, --repairutxo sweep) | Complete |
 | 54 | Dashboard Halt Banners + 100%-at-tip | Complete |
+| 55 | Drivechain BIP300/301 (--drivechain=off\|track\|enforce, D1/D2 + CTIP + BMM, 3 RPCs) | Complete |
 
 
 ## What's Left to Build

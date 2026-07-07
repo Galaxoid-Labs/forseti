@@ -29,8 +29,10 @@ import "../wire"
 FLUSH_BATCH_BYTES :: 16 * 1024 * 1024
 
 // Snapshot the cache and start the background flush. No-op (returns false)
-// if a flush is already running or the cache is empty.
-coins_cache_flush_begin :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int) -> bool {
+// if a flush is already running or the cache is empty. dc_state is the
+// drivechain snapshot AT tip_height — it must be taken now (the live state
+// advances while the worker runs) and is written with the tip marker.
+coins_cache_flush_begin :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int, dc_state: []byte = nil) -> bool {
 	if cc.flush_thread != nil || cc.frozen != nil || len(cc.cache) == 0 {
 		return false
 	}
@@ -53,6 +55,12 @@ coins_cache_flush_begin :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height:
 
 	cc.flush_tip_hash = tip_hash
 	cc.flush_tip_height = tip_height
+	delete(cc.flush_dc_state)
+	cc.flush_dc_state = nil
+	if dc_state != nil {
+		cc.flush_dc_state = make([]byte, len(dc_state))
+		copy(cc.flush_dc_state, dc_state)
+	}
 	cc.flush_done = false
 	cc.flush_failed = false
 	cc.flush_written = 0
@@ -101,9 +109,14 @@ coins_cache_flush_pump :: proc(cc: ^Coins_Cache) -> (completed: bool, err: Chain
 	}
 
 	// Tip marker last: everything the recovery replay assumes durable now is.
+	// The drivechain snapshot (taken at flush_begin, matching this tip) rides
+	// in the same batch — atomic with the tip.
 	batch := storage.ldb_batch_create()
 	defer storage.ldb_batch_destroy(batch)
 	write_meta_tip(cc.db.store, batch, cc.flush_tip_hash, cc.flush_tip_height)
+	if cc.flush_dc_state != nil {
+		storage.ldb_batch_put(batch, transmute([]byte)string(DC_STATE_KEY), cc.flush_dc_state)
+	}
 	werr := storage.ldb_batch_write(cc.db.store.chainstate_db, cc.db.store.sync_opts, batch)
 	if werr != .None {
 		// Same retention logic: without the tip marker nothing is durable yet.
@@ -115,6 +128,8 @@ coins_cache_flush_pump :: proc(cc: ^Coins_Cache) -> (completed: bool, err: Chain
 
 	// Success: release the frozen layer — arena destroy returns every script
 	// byte (live and dead) to the OS in one shot.
+	delete(cc.flush_dc_state)
+	cc.flush_dc_state = nil
 	virtual.arena_destroy(&cc.frozen_arena)
 	delete(cc.frozen)
 	cc.frozen = nil

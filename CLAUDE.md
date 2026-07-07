@@ -4,11 +4,11 @@
 
 ```bash
 make              # Build deps + binary
-make test         # Run all tests (9 packages, ~330)
+make test         # Run all tests (11 packages, ~342)
 make gui          # Build standalone remote dashboard (btcnode-gui)
 make debug        # Build with debug symbols
 odin build . -out:btcnode   # Build binary only
-odin test <pkg>   # Test single package (crypto, wire, script, consensus, storage, chain, p2p, mempool, rpc)
+odin test <pkg>   # Test single package (crypto, wire, script, consensus, storage, chain, p2p, mempool, rpc, zmq, drivechain)
 ```
 
 Note: Script tests have a known flaky secp256k1 thread-safety issue with parallel test threads. Use `-define:ODIN_TEST_THREADS=1` if tests crash.
@@ -23,6 +23,7 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 ./btcnode --help                                           # All options
 ./btcnode --gui                                            # In-process dashboard window
 ./btcnode --prune=2000                                     # Prune old block files to ~2GB
+./btcnode --drivechain=track                               # BIP300/301 observation mode (enforce = reject violations)
 ./btcnode-gui --connect=127.0.0.1:8332 --cookie=<datadir>/.cookie  # Remote dashboard (make gui)
 ```
 
@@ -36,7 +37,8 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 - `chain/` — UTXO cache, block index with skip list, undo data, chain state, parallel verification, regtest miner, crash-recovery rollback, repairutxo sweep
 - `p2p/` — Peer connections (outbound + inbound), sync manager, connection manager, address manager, BIP324 v2 transport, TCP listener (8 files)
 - `mempool/` — Fee rates, relay policy, validation pipeline, RBF (BIP125), persistence, configurable limits (6 files)
-- `rpc/` — JSON-RPC server, 60 methods (59/78 Core coverage + getnodestatus), HTTP server
+- `rpc/` — JSON-RPC server, 63 methods (59/78 Core coverage + getnodestatus + 3 drivechain views), HTTP server
+- `drivechain/` — BIP300/301: M1-M6 + BMM message codecs, D1/D2 state machine (apply/undo snapshots), enforce-mode validation (CTIP tracking, blinded m6id per CUSF enforcer), persistence codec (4 files + tests)
 - `zmq/` — native ZMTP 3.0 PUB sockets (no libzmq): Core zmqpub* parity (hashblock/hashtx/rawblock/rawtx/sequence), verified against real libzmq
 - `gui/` — raylib/raygui dashboard (in-process --gui and remote rendering; Cascadia Code embedded via #load)
 - `guiapp/` — standalone `btcnode-gui` binary: polls getnodestatus RPC, renders the gui package remotely (--probe for one-shot CLI check, --tui for terminal rendering)
@@ -65,6 +67,7 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 - **RPC**: 60 methods, 59/78 Core non-wallet coverage (getnodestatus feeds the GUI/remote dashboards) including getpeerinfo (18 fields), getmininginfo, getnetworkhashps, getnettotals, validateaddress, savemempool, ping, help, getmemoryinfo, getrpcinfo, logging, createrawtransaction, combinerawtransaction, signrawtransactionwithkey, getchaintxstats, gettxoutsetinfo, getmempoolancestors, getmempooldescendants, gettxoutproof, verifytxoutproof, signmessagewithprivkey, verifymessage. HTTP Basic Auth via `--rpcuser`/`--rpcpassword` or auto-generated `.cookie` file (Bitcoin Core compatible). `--server=0` disables RPC. Server is thread-per-connection with HTTP keep-alive and JSON-RPC batch (array) support; estimatesmartfee returns the mempool floor. Electrum-server compatible: electrs v0.10 runs against btcnode (RPC + inbound P2P getheaders/getdata serving). Node-control RPCs (disconnect/precious/prune/setnetworkactive) route through a mutex-guarded control queue drained by the P2P tick. generatetoaddress mines real regtest blocks through accept_block. --repairutxo sweeps stale UTXO entries from block data.
 
 - **Single-instance lock**: fcntl write-lock on `<datadir>/.lock`, held for the whole process lifetime; second instance on the same datadir refuses at startup (Core parity).
+- **Drivechain (BIP300/301)**: `--drivechain=off|track|enforce` (default off = zero-cost, no hooks). `drivechain/` package holds D1 (256 slots) + D2 (bundles) as `drivechain.State` on `Chain_State`. `connect_block` step 4e calls `_dc_connect` (chain/drivechain_link.odin): apply coinbase M1-M4 + M5/M6 escrow txs + BMM checks; enforce violations return `.Drivechain_Violation` (UTXO changes rolled back, DC state restored from the pre-block snapshot). Undo = full pre-block snapshot in the INDEX LevelDB under `"dcu"+height(LE)` (value: block hash + snapshot), written only when the block changed the state; `disconnect_block` restores it (hash-checked against the entry). Persistence: `"dcstate"` key ([tip_hash][tip_height][snapshot]) written INSIDE the tip-marker batch of both flush paths (sync + background — background snapshots the blob at flush_begin since live state advances) → atomic with the meta tip, so recovery + pending-block replay reconverge it. `_dc_load` on startup: match → load; behind tip on active chain → coinbase replay catch-up from flat files; else reset-empty with warning (tracking starts at current tip; full history needs resync with the flag on). index_db_init skips non-32-byte keys. Blinded m6id = txid of tx with inputs cleared + output0 replaced by zero-value OP_RETURN 8-byte-BE fee (CUSF enforcer semantics, the BIP defers to it). Enforce = CUSF-style voluntary soft fork (self-fork risk documented in --help + docs/bips.md). RPCs: listsidechains, getsidechaininfo, listwithdrawalstatus.
 
 ## Build Notes
 

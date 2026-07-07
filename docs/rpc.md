@@ -19,7 +19,9 @@ bitcoin-cli -rpcport=18443 getblockchaininfo
 
 ## Bitcoin Core RPC Coverage (59 / 78 non-wallet RPCs)
 
-Plus one btcnode-specific method: `getnodestatus` (feeds the GUI/TUI dashboards).
+Plus four btcnode-specific methods: `getnodestatus` (feeds the GUI/TUI
+dashboards) and the drivechain views `listsidechains`, `getsidechaininfo`,
+and `listwithdrawalstatus` (see below).
 
 The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are intentionally excluded.
 
@@ -135,4 +137,15 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `signmessagewithprivkey` | Yes | |
 | `validateaddress` | Yes | |
 | `verifymessage` | Yes | |
+
+## Drivechain RPCs (btcnode-specific)
+
+Available when the node runs with `--drivechain=track` or `enforce` (BIP 300/301);
+they error with "Drivechain support is disabled" otherwise.
+
+| Method | Description |
+|--------|-------------|
+| `listsidechains` | Active sidechain slots (D1) with CTIP escrow info, plus pending M1 proposals under vote |
+| `getsidechaininfo <nsidechain>` | One active sidechain: title, description, hashes, activation height, CTIP (txid/vout/amount) |
+| `listwithdrawalstatus ( nsidechain )` | Withdrawal bundles (D2): blinded hash, ACK score (`nworkscore`), blocks remaining, approved flag |
 

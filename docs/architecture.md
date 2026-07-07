@@ -14,7 +14,8 @@ bitcoin-node-odin/
 ├── chain/                 # UTXO cache, block index (skip list), undo data, chain state, block filter building
 ├── p2p/                   # Peer connections, sync manager, connection manager, address manager, BIP324 v2 transport, inbound listener
 ├── mempool/               # Fee rates, relay policy, validation pipeline, RBF, persistence, configurable limits
-├── rpc/                   # JSON-RPC server (60 methods, threaded + keep-alive + batch)
+├── rpc/                   # JSON-RPC server (63 methods, threaded + keep-alive + batch)
+├── drivechain/            # BIP300/301: M1-M6 + BMM codecs, D1/D2 state machine, enforce-mode validation
 ├── zmq/                   # Native ZMTP 3.0 PUB sockets (Core zmqpub* parity, no libzmq)
 ├── gui/                   # raylib/raygui dashboard renderer (in-process + remote)
 ├── guiapp/                # Standalone btcnode-gui remote client (GUI + TUI + --probe)
@@ -34,9 +35,11 @@ The node uses two [LevelDB](https://github.com/google/leveldb) instances for cra
 **Chainstate database** (`<datadir>/chainstate/`):
 - UTXO entries — Key: outpoint (txid + vout), Value: encoded coin (height, coinbase flag, amount, script)
 - Chain tip metadata — Key: `"tip"`, Value: tip hash + height
+- Drivechain state (when `--drivechain` is on) — Key: `"dcstate"`, Value: tip hash + height + D1/D2 snapshot, written in the same synced batch as the tip marker (atomic with it)
 
 **Block index database** (`<datadir>/blocks/index/`):
 - Block index entries — Key: block hash, Value: block index record (height, status, file location, header fields)
+- Drivechain undo records — Key: `"dcu"` + height, Value: block hash + pre-block D1/D2 snapshot; written only when a block changes drivechain state, used to restore it on disconnect/reorg
 
 Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split following Bitcoin Core's algorithm: block index DB gets min(total/8, 2 MiB), chainstate DB gets min(remaining/2, 8 MiB), and the remainder goes to the in-memory UTXO coins cache. Both databases use 10-bit bloom filters, 2 MiB write buffers, and no compression. UTXO changes and chain tip metadata are committed atomically via LevelDB WriteBatch. The coins cache flushes in the background (memtable rotation — sync never stalls) when memory usage exceeds the budget, with a durability safety net every 25,000 blocks (every 5,000 for budgets under 1 GiB). Flush WriteBatches are chunked at 16 MB (Core's dbbatchsize) with the tip marker written last in its own synced batch.
 
@@ -75,6 +78,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Configurable DB cache**: `--dbcache` controls total database memory (default 450 MiB), split following Bitcoin Core's algorithm — small LevelDB caches (2-8 MiB), large in-memory coins cache (~440 MiB). Lower values reduce RAM usage at the cost of more frequent UTXO flushes during sync
 - **Assumevalid**: Skips script verification below a network-specific height (mainnet=880,000, signet=267,665, testnet3=2,100,000, testnet4=200,000). Configurable via `--assumevalid=<height>` (0 disables)
 - **Zero-allocation txid computation**: Transaction IDs are computed from raw stream bytes during block deserialization — non-witness txs hash raw bytes directly, witness txs use incremental `sha256d_multi` (no memory allocation). Pre-computed txids are passed through `connect_block` → `check_block` (Merkle root), eliminating redundant re-serialization. Reduced `connect_block` time by ~23% at mainnet height 360k
+- **Drivechain (BIP300/301)**: Opt-in via `--drivechain=track|enforce` (default off = zero cost, no hooks run). D1 (256 sidechain slots) and D2 (withdrawal bundles) live in memory on `Chain_State` and are maintained by `connect_block`/`disconnect_block`. Enforce mode validates M5/M6 escrow spends (CTIP tracking, blinded-hash matching against approved bundles, per the CUSF enforcer semantics) and BIP301 BMM request/accept matching, rejecting violating blocks. Persistence is snapshot-based: the whole state is tiny, so the flush writes it atomically with the tip and each state-changing block stores its pre-block snapshot as the undo record. See [bips.md](bips.md) for the mode semantics and enforce-mode fork warning
 - **Block profiling**: Timing instrumentation logs per-phase breakdown every 1000 blocks (read, prefetch, validation, UTXO, scripts, undo, index) for bottleneck identification
 - **No external Odin dependencies**: Only `core:` and `base:` standard library packages
 
