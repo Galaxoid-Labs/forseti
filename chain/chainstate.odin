@@ -1217,6 +1217,12 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 		for _, entry in cs.block_index.entries {
 			if .Valid_Chain in entry.status && entry.height > meta_height {
 				entry.status -= {.Valid_Chain}
+				// PERSIST the strip: in-memory-only stripping left the DB
+				// records claiming Valid_Chain up to the crash tip, so every
+				// restart re-triggered the same full rollback (79k blocks,
+				// ~25 min, each boot) until sync passed the old tip.
+				rec := block_index_to_record(entry)
+				storage.index_db_put(&cs.index_db, rec)
 			}
 		}
 		Boot_Rollback_Total = 0
