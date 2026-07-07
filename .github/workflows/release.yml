@@ -44,6 +44,12 @@ jobs:
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
+          # Hosted runners preinstall a Microsoft/Azure apt repo that
+          # intermittently serves an unsigned InRelease, which fails the whole
+          # `apt-get update` (exit 100) even though the Ubuntu repos we need are
+          # fine. We don't use it — remove it before updating.
+          sudo rm -f /etc/apt/sources.list.d/*microsoft* \
+            /etc/apt/sources.list.d/*azure* 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y autoconf automake libtool libncurses-dev \
             libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev \
