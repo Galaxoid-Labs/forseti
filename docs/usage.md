@@ -117,6 +117,7 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | `--blockfilterindex=<0\|1>` | Build and serve BIP 157 compact block filters | `0` |
 | `--peerbloomfilters=<0\|1>` | Enable BIP 37 bloom filters + BIP 35 mempool message | `0` |
 | `--zmqpub<topic>=<tcp://ip:port>` | ZMQ notifications: `hashblock`, `hashtx`, `rawblock`, `rawtx`, `sequence` | off |
+| `--repairutxo` | Maintenance: sweep stale UTXO entries from local block data, report, exit | — |
 | `--debug` | Enable debug logging | `false` |
 
 **Mempool (matching Bitcoin Core):**

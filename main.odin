@@ -117,6 +117,7 @@ CLI_Config :: struct {
 	zmq_rawblock:           string,
 	zmq_rawtx:              string,
 	zmq_sequence:           string,
+	repair_utxo:            bool,   // --repairutxo maintenance sweep, then exit
 	block_filter_index:     bool,   // BIP158 compact block filter index
 	listen:                 bool,   // accept inbound connections (default: true)
 	debug:                  bool,   // enable debug logging (default: false)
@@ -352,6 +353,18 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 			}
 			cfg.max_connections = max(val, 0)
 			flags_set += {.Max_Connections}
+		} else if arg == "--repairutxo" {
+			cfg.repair_utxo = true
+		} else if strings.has_prefix(arg, "--zmqpubhashblock=") {
+			cfg.zmq_hashblock = strings.clone(arg[len("--zmqpubhashblock="):])
+		} else if strings.has_prefix(arg, "--zmqpubhashtx=") {
+			cfg.zmq_hashtx = strings.clone(arg[len("--zmqpubhashtx="):])
+		} else if strings.has_prefix(arg, "--zmqpubrawblock=") {
+			cfg.zmq_rawblock = strings.clone(arg[len("--zmqpubrawblock="):])
+		} else if strings.has_prefix(arg, "--zmqpubrawtx=") {
+			cfg.zmq_rawtx = strings.clone(arg[len("--zmqpubrawtx="):])
+		} else if strings.has_prefix(arg, "--zmqpubsequence=") {
+			cfg.zmq_sequence = strings.clone(arg[len("--zmqpubsequence="):])
 		} else if arg == "--v2transport" || arg == "--v2transport=1" {
 			cfg.v2_transport = true
 			flags_set += {.V2_Transport}
@@ -407,6 +420,7 @@ _print_usage :: proc() {
 	fmt.println("  --zmqpubrawblock=<tcp://ip:port>   ZMQ publish raw blocks")
 	fmt.println("  --zmqpubrawtx=<tcp://ip:port>      ZMQ publish raw transactions")
 	fmt.println("  --zmqpubsequence=<tcp://ip:port>   ZMQ publish sequence events")
+	fmt.println("  --repairutxo          Sweep stale UTXO entries from local block data, then exit")
 	fmt.println("  --maxconnections=<N>  Total peer connections (default: 125)")
 	fmt.println("  --v2transport=<0|1>   Enable BIP 324 v2 encrypted P2P transport (default: 0)")
 	fmt.println("  --blockfilterindex=<0|1|basic> Enable BIP 158 compact block filter index (default: 0)")
@@ -1020,6 +1034,13 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 
 	tip_hash, tip_height := chain.chain_tip(cs)
 	log.infof("Chain loaded: height=%d tip=%s", tip_height, rpc._hash_to_hex(tip_hash))
+
+	// Maintenance mode: sweep stale UTXO entries from local block data,
+	// report, and exit (no RPC, no P2P).
+	if cfg.repair_utxo {
+		chain.repair_utxo_sweep(cs)
+		return
+	}
 
 	// Initialize mempool with config from CLI/config file.
 	mp_config := mempool.Mempool_Config{
