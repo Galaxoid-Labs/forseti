@@ -79,6 +79,11 @@ repair_utxo_sweep :: proc(cs: ^Chain_State) -> (spent_deleted: int, unspendable_
 		}
 		free_all(context.temp_allocator)
 	}
+	// The sweep bypasses the coins cache, so any rolling UTXO stats are now
+	// stale — invalidate them (key removed; slow scan until a resync).
+	cs.coins.stats_valid = false
+	storage.ldb_batch_delete(batch, transmute([]byte)string(UTXO_STATS_KEY))
+
 	storage.ldb_batch_write(cs.store.chainstate_db, cs.store.sync_opts, batch)
 	storage.ldb_batch_destroy(batch)
 

@@ -177,6 +177,32 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	Boot_Stage = "Loading drivechain state"
 	_dc_load(cs)
 
+	// Rolling UTXO stats: the persisted counters are atomic with the meta
+	// tip (same batch), so after recovery they match the rebuilt chain and
+	// the pending-block replay advances them through the normal cache hooks.
+	// Fresh datadirs track from genesis; legacy datadirs (no key, non-empty
+	// chain) keep the slow-scan gettxoutsetinfo until a resync.
+	{
+		key := transmute([]byte)string(UTXO_STATS_KEY)
+		blob, found := storage.ldb_get(cs.store.chainstate_db, cs.store.read_opts, key, context.temp_allocator)
+		_, stats_tip := chain_tip(cs)
+		if found && len(blob) >= 16 {
+			c, a := u64(0), u64(0)
+			for i in 0 ..< 8 {
+				c |= u64(blob[i]) << uint(i * 8)
+				a |= u64(blob[8 + i]) << uint(i * 8)
+			}
+			cs.coins.stat_count = transmute(i64)c
+			cs.coins.stat_amount = transmute(i64)a
+			cs.coins.stats_valid = true
+			log.infof("UTXO stats loaded: %d coins, %d sat", cs.coins.stat_count, cs.coins.stat_amount)
+		} else if stats_tip < 0 {
+			cs.coins.stats_valid = true // fresh datadir — tracked from genesis
+		} else {
+			log.info("UTXO stats: not tracked for this datadir (predates rolling stats); gettxoutsetinfo will scan — resync to enable instant stats")
+		}
+	}
+
 	// Persistent per-input verification arena (growing; starts at 8 MB, grows for
 	// oversized tapscripts, overflow blocks released on each free_all)
 	if verr := virtual.arena_init_growing(&cs.verify_arena, 8 * 1024 * 1024); verr != nil {

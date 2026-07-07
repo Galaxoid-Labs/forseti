@@ -60,6 +60,32 @@ Coins_Cache :: struct {
 	flushing:       bool,
 	flush_total:    int,
 	flush_progress: int,
+	// Rolling logical-UTXO-set stats (coin count + total sats), maintained by
+	// add/spend/restore so every path — connect, rollback, disconnect,
+	// recovery replay — stays consistent. Valid only when loaded from the
+	// persisted "utxostats" key or when the datadir started from genesis;
+	// legacy datadirs keep the slow-scan gettxoutsetinfo until a resync.
+	stat_count:        i64,
+	stat_amount:       i64,
+	stats_valid:       bool,
+	// Snapshot taken at flush begin (the live counters advance while the
+	// background worker runs); written into the tip-marker batch.
+	flush_stat_count:  i64,
+	flush_stat_amount: i64,
+	flush_stats_valid: bool,
+}
+
+UTXO_STATS_KEY :: "utxostats"
+
+_utxo_stats_blob :: proc(count: i64, amount: i64) -> [16]byte {
+	b: [16]byte
+	c := transmute(u64)count
+	a := transmute(u64)amount
+	for i in 0 ..< 8 {
+		b[i] = byte(c >> uint(i * 8))
+		b[8 + i] = byte(a >> uint(i * 8))
+	}
+	return b
 }
 
 // Allocator over the cache's script arena. Derived per call — Coins_Cache is
@@ -142,8 +168,44 @@ coins_cache_has :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> bool {
 	return db_found
 }
 
+// Stats hook for adds. Non-coinbase outputs are always brand new (their
+// txid embeds their inputs). Coinbase adds can OVERWRITE a live coin — the
+// pre-BIP30 duplicate coinbases (mainnet 91842/91880) — replacing it in the
+// set; only those pay for an existence lookup, and only ~1-2 per block.
+_stats_on_add :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: storage.UTXO_Coin) {
+	if !cc.stats_valid { return }
+	if coin.is_coinbase {
+		if e, in_cache := &cc.cache[outpoint]; in_cache {
+			if !_is_spent_sentinel(e) {
+				cc.stat_amount += coin.amount - e.coin.amount
+				return
+			}
+		} else {
+			if cc.frozen != nil {
+				if fe, in_frozen := cc.frozen[outpoint]; in_frozen {
+					if !_is_spent_sentinel_val(fe) {
+						cc.stat_amount += coin.amount - fe.coin.amount
+						return
+					}
+					// frozen sentinel: logically spent — normal add below
+					cc.stat_count += 1
+					cc.stat_amount += coin.amount
+					return
+				}
+			}
+			if old, in_db := storage.utxo_db_get(cc.db, outpoint, context.temp_allocator); in_db {
+				cc.stat_amount += coin.amount - old.amount
+				return
+			}
+		}
+	}
+	cc.stat_count += 1
+	cc.stat_amount += coin.amount
+}
+
 // Add a new UTXO to the cache (Dirty+Fresh).
 coins_cache_add :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: storage.UTXO_Coin) {
+	_stats_on_add(cc, outpoint, coin)
 	// Clone script into the cache's script arena
 	new_script: []byte
 	if len(coin.script) > 0 {
@@ -171,6 +233,11 @@ coins_cache_spend :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage
 	if found {
 		if _is_spent_sentinel(entry) {
 			return {}, false
+		}
+
+		if cc.stats_valid {
+			cc.stat_count -= 1
+			cc.stat_amount -= entry.coin.amount
 		}
 
 		spent_coin := entry.coin
@@ -209,6 +276,10 @@ coins_cache_spend :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage
 			if _is_spent_sentinel(&fentry) {
 				return {}, false
 			}
+			if cc.stats_valid {
+				cc.stat_count -= 1
+				cc.stat_amount -= fentry.coin.amount
+			}
 			spent_coin := fentry.coin
 			if len(spent_coin.script) > 0 {
 				temp_script := make([]byte, len(spent_coin.script), context.temp_allocator)
@@ -226,6 +297,11 @@ coins_cache_spend :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage
 	coin, db_found := storage.utxo_db_get(cc.db, outpoint, context.temp_allocator)
 	if !db_found {
 		return {}, false
+	}
+
+	if cc.stats_valid {
+		cc.stat_count -= 1
+		cc.stat_amount -= coin.amount
 	}
 
 	// Mark as spent sentinel in cache (no script, just overhead)
@@ -248,6 +324,16 @@ coins_cache_restore :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: sto
 		is_coinbase = coin.is_coinbase,
 		amount      = coin.amount,
 		script      = new_script,
+	}
+
+	if cc.stats_valid {
+		if e, live := &cc.cache[outpoint]; live && !_is_spent_sentinel(e) {
+			// Replacing an existing live coin (shouldn't happen normally)
+			cc.stat_amount += coin.amount - e.coin.amount
+		} else {
+			cc.stat_count += 1
+			cc.stat_amount += coin.amount
+		}
 	}
 
 	// Check if there's an existing entry (spent sentinel)
@@ -346,13 +432,19 @@ coins_cache_flush :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height: int, 
 	// Final data chunk, synced — everything durable before the tip moves.
 	berr := storage.ldb_batch_write(cc.db.store.chainstate_db, cc.db.store.sync_opts, batch)
 	if berr == .None {
-		// Tip marker last, in its own synced batch. The drivechain state
-		// rides in the same batch — atomic with the tip.
+		// Tip marker last, in its own synced batch. The drivechain state and
+		// UTXO stats ride in the same batch — atomic with the tip.
 		tip_batch := storage.ldb_batch_create()
 		defer storage.ldb_batch_destroy(tip_batch)
 		write_meta_tip(cc.db.store, tip_batch, tip_hash, tip_height)
 		if dc_state != nil {
 			storage.ldb_batch_put(tip_batch, transmute([]byte)string(DC_STATE_KEY), dc_state)
+		}
+		if cc.stats_valid {
+			blob := _utxo_stats_blob(cc.stat_count, cc.stat_amount)
+			storage.ldb_batch_put(tip_batch, transmute([]byte)string(UTXO_STATS_KEY), blob[:])
+		} else {
+			storage.ldb_batch_delete(tip_batch, transmute([]byte)string(UTXO_STATS_KEY))
 		}
 		berr = storage.ldb_batch_write(cc.db.store.chainstate_db, cc.db.store.sync_opts, tip_batch)
 	}

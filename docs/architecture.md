@@ -36,6 +36,7 @@ The node uses two [LevelDB](https://github.com/google/leveldb) instances for cra
 - UTXO entries — Key: outpoint (txid + vout), Value: encoded coin (height, coinbase flag, amount, script)
 - Chain tip metadata — Key: `"tip"`, Value: tip hash + height
 - Drivechain state (when `--drivechain` is on) — Key: `"dcstate"`, Value: tip hash + height + D1/D2 snapshot, written in the same synced batch as the tip marker (atomic with it)
+- Rolling UTXO stats — Key: `"utxostats"`, Value: coin count + total sats, also written in the tip-marker batch; maintained by the coins-cache add/spend/restore hooks so `gettxoutsetinfo` answers instantly (datadirs predating the key fall back to a full scan until resynced; `--repairutxo` invalidates it)
 
 **Block index database** (`<datadir>/blocks/index/`):
 - Block index entries — Key: block hash, Value: block index record (height, status, file location, header fields)

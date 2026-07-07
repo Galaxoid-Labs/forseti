@@ -496,6 +496,20 @@ _handle_gettxout :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 _handle_gettxoutsetinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 	tip_hash, height := chain.chain_tip(srv.chain)
 
+	// Fast path: rolling stats maintained by the coins cache (datadirs
+	// synced since rolling stats shipped). Falls through to the legacy
+	// full scan on older datadirs.
+	if srv.chain.coins.stats_valid {
+		obj := make(json.Object, 8, context.temp_allocator)
+		obj["height"] = json.Value(json.Integer(height))
+		obj["bestblock"] = json.Value(json.String(_hash_to_hex(tip_hash)))
+		obj["txouts"] = json.Value(json.Integer(srv.chain.coins.stat_count))
+		obj["total_amount"] = json.Value(json.Float(_satoshi_to_btc(srv.chain.coins.stat_amount)))
+		obj["disk_size"] = json.Value(json.Integer(srv.chain.coins.stat_count * 100))
+		obj["hash_serialized_2"] = json.Value(json.String(""))
+		return _make_result(json.Value(obj), srv._current_id)
+	}
+
 	// Scan UTXO database for flushed stats
 	db_count, db_amount := storage.utxo_db_scan_stats(srv.chain.coins.db)
 

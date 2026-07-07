@@ -1546,3 +1546,84 @@ test_drivechain_enforce_rejects_bad_bmm :: proc(t: ^testing.T) {
 	violation := drivechain.check_bmm(drivechain.collect_coinbase_payloads(&txs[0]), txs, prev_hash)
 	testing.expect(t, violation != "", "unmatched BMM request is a violation")
 }
+
+// --- Rolling UTXO stats ---
+
+@(test)
+test_utxo_stats_rolling :: proc(t: ^testing.T) {
+	dir := make_test_dir("utxo_stats")
+	defer remove_test_dir(dir)
+
+	params := consensus.REGTEST_PARAMS
+	expected_count, expected_amount := i64(0), i64(0)
+	prev_hash := HASH_ZERO
+	blocks: [6]wire.Block
+	{
+		cs: Chain_State
+		err := chain_state_init(&cs, dir, &params)
+		testing.expect_value(t, err, Chain_Error.None)
+		testing.expect(t, cs.coins.stats_valid, "fresh datadir tracks stats")
+
+		for i in 0 ..< 6 {
+			blocks[i] = make_chain_block(i, prev_hash, &params)
+			testing.expect_value(t, accept_block(&cs, &blocks[i]), Chain_Error.None)
+			prev_hash = wire.block_header_hash(&blocks[i].header)
+			expected_count += 1
+			expected_amount += consensus.get_block_subsidy(i, &params)
+		}
+		testing.expect_value(t, cs.coins.stat_count, expected_count)
+		testing.expect_value(t, cs.coins.stat_amount, expected_amount)
+
+		// Disconnect the tip: its coinbase output leaves the set.
+		last_hash := wire.block_header_hash(&blocks[5].header)
+		entry, _ := cs.block_index.entries[last_hash]
+		testing.expect_value(t, disconnect_block(&cs, &blocks[5], entry), Chain_Error.None)
+		testing.expect_value(t, cs.coins.stat_count, expected_count - 1)
+		testing.expect_value(t, cs.coins.stat_amount, expected_amount - consensus.get_block_subsidy(5, &params))
+
+		// Reconnect for the restart half.
+		testing.expect_value(t, connect_block(&cs, &blocks[5], entry), Chain_Error.None)
+		chain_state_destroy(&cs)
+	}
+	{
+		cs: Chain_State
+		err := chain_state_init(&cs, dir, &params)
+		testing.expect_value(t, err, Chain_Error.None)
+		defer chain_state_destroy(&cs)
+		testing.expect(t, cs.coins.stats_valid, "stats survive restart")
+		testing.expect_value(t, cs.coins.stat_count, expected_count)
+		testing.expect_value(t, cs.coins.stat_amount, expected_amount)
+	}
+}
+
+@(test)
+test_utxo_stats_coinbase_overwrite :: proc(t: ^testing.T) {
+	dir := make_test_dir("utxo_stats_ow")
+	defer remove_test_dir(dir)
+	cc, db, store := _make_test_coins_cache(dir)
+	defer _cleanup_test_coins(&cc, db, store)
+	cc.stats_valid = true
+
+	op := wire.Outpoint{hash = {0 = 0xab}, index = 0}
+	script := []byte{0x51}
+	coins_cache_add(&cc, op, storage.UTXO_Coin{height = 100, is_coinbase = true, amount = 50, script = script})
+	testing.expect_value(t, cc.stat_count, i64(1))
+	testing.expect_value(t, cc.stat_amount, i64(50))
+
+	// BIP30-style duplicate coinbase: same outpoint added again REPLACES the
+	// live coin — count unchanged, amount adjusted.
+	coins_cache_add(&cc, op, storage.UTXO_Coin{height = 200, is_coinbase = true, amount = 40, script = script})
+	testing.expect_value(t, cc.stat_count, i64(1))
+	testing.expect_value(t, cc.stat_amount, i64(40))
+
+	// Spend it: back to zero.
+	_, ok := coins_cache_spend(&cc, op)
+	testing.expect(t, ok, "spend succeeds")
+	testing.expect_value(t, cc.stat_count, i64(0))
+	testing.expect_value(t, cc.stat_amount, i64(0))
+
+	// Restore: back to one.
+	coins_cache_restore(&cc, op, storage.UTXO_Coin{height = 200, is_coinbase = true, amount = 40, script = script})
+	testing.expect_value(t, cc.stat_count, i64(1))
+	testing.expect_value(t, cc.stat_amount, i64(40))
+}

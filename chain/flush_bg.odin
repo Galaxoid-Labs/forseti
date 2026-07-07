@@ -55,6 +55,9 @@ coins_cache_flush_begin :: proc(cc: ^Coins_Cache, tip_hash: Hash256, tip_height:
 
 	cc.flush_tip_hash = tip_hash
 	cc.flush_tip_height = tip_height
+	cc.flush_stat_count = cc.stat_count
+	cc.flush_stat_amount = cc.stat_amount
+	cc.flush_stats_valid = cc.stats_valid
 	delete(cc.flush_dc_state)
 	cc.flush_dc_state = nil
 	if dc_state != nil {
@@ -116,6 +119,12 @@ coins_cache_flush_pump :: proc(cc: ^Coins_Cache) -> (completed: bool, err: Chain
 	write_meta_tip(cc.db.store, batch, cc.flush_tip_hash, cc.flush_tip_height)
 	if cc.flush_dc_state != nil {
 		storage.ldb_batch_put(batch, transmute([]byte)string(DC_STATE_KEY), cc.flush_dc_state)
+	}
+	if cc.flush_stats_valid {
+		blob := _utxo_stats_blob(cc.flush_stat_count, cc.flush_stat_amount)
+		storage.ldb_batch_put(batch, transmute([]byte)string(UTXO_STATS_KEY), blob[:])
+	} else {
+		storage.ldb_batch_delete(batch, transmute([]byte)string(UTXO_STATS_KEY))
 	}
 	werr := storage.ldb_batch_write(cc.db.store.chainstate_db, cc.db.store.sync_opts, batch)
 	if werr != .None {

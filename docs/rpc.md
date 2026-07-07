@@ -47,7 +47,7 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `getrawmempool` | Yes | |
 | `gettxout` | Yes | |
 | `gettxoutproof` | Yes | Partial merkle tree proof |
-| `gettxoutsetinfo` | Yes | UTXO count + total amount |
+| `gettxoutsetinfo` | Yes | Instant on datadirs with rolling UTXO stats (coinstatsindex-style); full scan on older datadirs |
 | `preciousblock` | Yes | Routed through the P2P control queue |
 | `pruneblockchain` | Yes | Requires `--prune` mode |
 | `savemempool` | Yes | |
