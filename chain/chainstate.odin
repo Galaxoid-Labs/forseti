@@ -464,6 +464,9 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 
 		// 4d. Add outputs (available for later txs in same block)
 		for out_idx in 0 ..< len(tx.outputs) {
+			if _is_unspendable(tx.outputs[out_idx].script_pubkey) {
+				continue
+			}
 			op := wire.Outpoint{hash = txids[tx_idx], index = u32(out_idx)}
 			coin := storage.UTXO_Coin {
 				height      = u32(height),
@@ -512,6 +515,9 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 	{
 		coinbase := block.txs[0]
 		for out_idx in 0 ..< len(coinbase.outputs) {
+			if _is_unspendable(coinbase.outputs[out_idx].script_pubkey) {
+				continue
+			}
 			op := wire.Outpoint{hash = txids[0], index = u32(out_idx)}
 			coin := storage.UTXO_Coin {
 				height      = u32(height),
@@ -867,6 +873,14 @@ accept_block_headers_batch :: proc(cs: ^Chain_State, headers: []wire.Block_Heade
 }
 
 // Accept a full block: accept header, store block data, connect to chain.
+
+// Bitcoin Core parity: provably-unspendable outputs (OP_RETURN, oversized
+// scripts) are never added to the UTXO set — they can't be spent, and
+// storing them bloated mainnet chainstate by tens of millions of entries.
+_is_unspendable :: proc(spk: []byte) -> bool {
+	return len(spk) > 10_000 || (len(spk) >= 1 && spk[0] == 0x6a)
+}
+
 accept_block :: proc(cs: ^Chain_State, block: ^wire.Block) -> Chain_Error {
 	// Accept header
 	header := block.header
