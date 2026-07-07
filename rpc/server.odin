@@ -556,6 +556,8 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_prioritisetransaction(srv, req.params)
 	case "generateblock":
 		return _handle_generateblock(srv, req.params)
+	case "generatetodescriptor":
+		return _handle_generatetodescriptor(srv, req.params)
 	case "verifychain":
 		return _handle_verifychain(srv, req.params)
 	case "getdescriptorinfo":

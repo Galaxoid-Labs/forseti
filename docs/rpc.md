@@ -17,7 +17,7 @@ curl -s -u myuser:mypassword \
 bitcoin-cli -rpcport=18443 getblockchaininfo
 ```
 
-## Bitcoin Core RPC Coverage (68 / 78 non-wallet RPCs)
+## Bitcoin Core RPC Coverage (69 / 78 non-wallet RPCs)
 
 Plus four btcnode-specific methods: `getnodestatus` (feeds the GUI/TUI
 dashboards) and the drivechain views `listsidechains`, `getsidechaininfo`,
@@ -66,13 +66,13 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `stop` | Yes | Graceful shutdown |
 | `uptime` | Yes | |
 
-**Generating (2/3):**
+**Generating (3/3):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
 | `generateblock` | Yes | Regtest; raw txs and mempool txids (descriptor outputs not supported) |
 | `generatetoaddress` | Yes | Regtest only; mines mempool txs + coinbase |
-| `generatetodescriptor` | — | Regtest mining to descriptor |
+| `generatetodescriptor` | Yes | Non-ranged descriptors |
 
 **Mining (6/6):**
 

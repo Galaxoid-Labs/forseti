@@ -14,7 +14,7 @@ bitcoin-node-odin/
 ├── chain/                 # UTXO cache, block index (skip list), undo data, chain state, block filter building
 ├── p2p/                   # Peer connections, sync manager, connection manager, address manager, BIP324 v2 transport, inbound listener
 ├── mempool/               # Fee rates, relay policy, validation pipeline, RBF, persistence, configurable limits
-├── rpc/                   # JSON-RPC server (72 methods, threaded + keep-alive + batch)
+├── rpc/                   # JSON-RPC server (73 methods, threaded + keep-alive + batch)
 ├── descriptor/            # Output descriptors: checksum, BIP32 CKDpub, parser, script/address generation
 ├── drivechain/            # BIP300/301: M1-M6 + BMM codecs, D1/D2 state machine, enforce-mode validation
 ├── zmq/                   # Native ZMTP 3.0 PUB sockets (Core zmqpub* parity, no libzmq)

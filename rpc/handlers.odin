@@ -1859,6 +1859,7 @@ RPC_METHODS := [?]string{
 	"decodescript",
 	"deriveaddresses",
 	"generateblock",
+	"generatetodescriptor",
 	"getbestblockhash",
 	"getblock",
 	"getblockchaininfo",
@@ -1996,6 +1997,7 @@ _get_method_help :: proc(method: string) -> string {
 	case "generateblock":              return "generateblock \"output\" ( [\"rawtx/txid\",...] )\nMine a block with a set of ordered transactions immediately to a specified address (regtest only)."
 	case "getdescriptorinfo":          return "getdescriptorinfo \"descriptor\"\nAnalyses a descriptor: canonical form with checksum, isrange, issolvable."
 	case "deriveaddresses":            return "deriveaddresses \"descriptor\" ( range )\nDerives one or more addresses corresponding to an output descriptor."
+	case "generatetodescriptor":       return "generatetodescriptor num_blocks \"descriptor\" ( maxtries )\nMine to a specified descriptor and return the block hashes (regtest only)."
 	case "scantxoutset":               return "scantxoutset \"action\" ( [scanobjects,...] )\nScans the unspent transaction output set for entries that match certain output descriptors."
 	case "verifychain":                return "verifychain ( checklevel nblocks )\nVerifies blockchain database: block data reads/deserializes (0), context-free validity (1), undo data (2+)."
 	}
@@ -3343,7 +3345,11 @@ _handle_generatetoaddress :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_R
 	if !spk_ok {
 		return _make_error(.Invalid_Params, "Invalid address", srv._current_id)
 	}
+	return _generate_blocks(srv, nblocks, spk, max_tries)
+}
 
+// Shared mining loop for generatetoaddress/generatetodescriptor.
+_generate_blocks :: proc(srv: ^RPC_Server, nblocks: int, spk: []byte, max_tries: int) -> RPC_Response {
 	sync.mutex_lock(&_generate_mutex)
 	defer sync.mutex_unlock(&_generate_mutex)
 
@@ -3358,18 +3364,40 @@ _handle_generatetoaddress :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_R
 		}
 		if srv.mp != nil {
 			// Remove mined txs the same way a network block would.
-			blk_entry, _ := srv.chain.block_index.entries[hash]
-			_ = blk_entry
 			for sel in selected {
-				if e, found := mempool.mempool_get(srv.mp, sel.txid); found {
-					_ = e
-					mempool.mempool_remove(srv.mp, sel.txid)
-				}
+				mempool.mempool_remove(srv.mp, sel.txid)
 			}
 		}
 		append(&hashes, json.Value(json.String(_hash_to_hex(hash))))
 	}
 	return _make_result(json.Value(hashes), srv._current_id)
+}
+
+_handle_generatetodescriptor :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	if srv.params.name != "regtest" {
+		return _make_error(.Internal_Error, "generatetodescriptor is regtest-only", srv._current_id)
+	}
+	nblocks, n_ok := _get_int_param(params, 0)
+	desc_str, d_ok := _get_string_param(params, 1)
+	if !n_ok || nblocks < 1 || nblocks > 10_000 || !d_ok {
+		return _make_error(.Invalid_Params, "Usage: generatetodescriptor nblocks \"descriptor\" [maxtries]", srv._current_id)
+	}
+	max_tries := 1_000_000
+	if mt, mt_ok := _get_int_param(params, 2); mt_ok {
+		max_tries = mt
+	}
+	d, derr := descriptor.parse(desc_str, _desc_net(srv), context.temp_allocator)
+	if derr != "" {
+		return _make_error(.Invalid_Params, derr, srv._current_id)
+	}
+	if d.is_range {
+		return _make_error(.Invalid_Params, "Ranged descriptor not accepted. Maybe pass through deriveaddresses first.", srv._current_id)
+	}
+	spk, spk_ok := descriptor.script_pubkey(&d, 0, context.temp_allocator)
+	if !spk_ok {
+		return _make_error(.Invalid_Params, "Cannot derive script from descriptor", srv._current_id)
+	}
+	return _generate_blocks(srv, nblocks, spk, max_tries)
 }
 
 // --- drivechain (BIP300/301) ---
