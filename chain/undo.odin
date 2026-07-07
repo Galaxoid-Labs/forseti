@@ -24,20 +24,20 @@ write_block_undo :: proc(undo_files: ^storage.Flat_File_Manager, entry: ^Block_I
 
 	payload := wire.writer_bytes(&w)
 
-	// Write with size prefix: [size:4 LE][payload]
-	header_w := wire.writer_init(context.temp_allocator)
-	wire.write_u32le(&header_w, u32(len(payload)))
-	header_bytes := wire.writer_bytes(&header_w)
+	// ONE write of [size:4 LE][payload]: two separate writes let the file
+	// roll over between them, leaving the header at the tail of one file
+	// and the payload at the start of the next — the recorded location
+	// (header pos + 4) then points at nothing (mainnet rev file 381/382).
+	rec := make([]byte, 4 + len(payload), context.temp_allocator)
+	sz := u32(len(payload))
+	rec[0] = byte(sz)
+	rec[1] = byte(sz >> 8)
+	rec[2] = byte(sz >> 16)
+	rec[3] = byte(sz >> 24)
+	copy(rec[4:], payload)
 
-	// Write header
-	pos, herr := storage.flat_file_write(undo_files, header_bytes)
+	pos, herr := storage.flat_file_write(undo_files, rec)
 	if herr != .None {
-		return .Storage_Error
-	}
-
-	// Write payload
-	_, perr := storage.flat_file_write(undo_files, payload)
-	if perr != .None {
 		return .Storage_Error
 	}
 
@@ -59,6 +59,14 @@ read_block_undo :: proc(undo_files: ^storage.Flat_File_Manager, entry: ^Block_In
 	pos := storage.File_Pos {
 		file_num = entry.undo_file_num,
 		offset   = entry.undo_offset,
+	}
+
+	// Legacy two-write records: if the header sat at the tail of a file,
+	// the payload rolled over to the NEXT file at offset 0 (the recorded
+	// offset points past the data). New records are single-write and can't
+	// straddle, but locations persisted before the fix still can.
+	if i64(pos.offset) + i64(entry.undo_size) > storage.flat_file_size(undo_files, pos.file_num) {
+		pos = storage.File_Pos{file_num = pos.file_num + 1, offset = 0}
 	}
 
 	data, rerr := storage.flat_file_read(undo_files, pos, entry.undo_size, context.temp_allocator)

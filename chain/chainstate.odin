@@ -47,6 +47,7 @@ Chain_State :: struct {
 	prune_height:      int,
 	last_flush_height: int,
 	last_halt_log_height: int, // rate-limits the validation-halt error log
+	recovery_failed: bool, // crash recovery could not reconcile — refuse to run
 }
 
 Block_Profile :: struct {
@@ -142,6 +143,9 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	// Crash recovery: read meta tip and truncate active chain if needed
 	Boot_Stage = "Rebuilding active chain"
 	_recover_from_meta(cs)
+	if cs.recovery_failed {
+		return .Storage_Error
+	}
 
 	_rebuild_active_chain(cs)
 	log.infof("Active chain rebuilt: %d blocks", len(cs.active_chain))
@@ -1165,6 +1169,7 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 	// Blocks in this range are above the last flush point, so pruning has
 	// never touched their block/undo data.
 	if best_valid.height > meta_height {
+		Boot_Stage = "Recovering from unclean shutdown (rolling back blocks)"
 		log.infof("Crash recovery: index tip %d > meta tip %d, rolling back %d blocks via undo data",
 			best_valid.height, meta_height, best_valid.height - meta_height)
 
@@ -1178,15 +1183,22 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 			}
 		}
 		if needs_rebuild && !_rebuild_undo_locations(cs, meta_height, best_valid) {
-			log.errorf("Crash recovery: could not rebuild undo locations — leaving state untouched")
+			// REFUSE to run: proceeding once advanced the meta tip over an
+			// unreconciled UTXO set (bookmark said 734,886, data didn't),
+			// converting a repairable state into a lying one.
+			log.errorf("Crash recovery: could not rebuild undo locations — refusing to start with inconsistent UTXO state")
+			cs.recovery_failed = true
 			return
 		}
 
 		for entry := best_valid; entry != nil && entry.height > meta_height; entry = entry.prev {
 			if rerr := _rollback_block_for_recovery(cs, entry); rerr != .None {
-				log.errorf("Crash recovery: rollback failed at height %d (%v) — UTXO set may be inconsistent",
+				// A half-applied rollback + continuing to run is how a
+				// recoverable state becomes a lying one — refuse instead.
+				log.errorf("Crash recovery: rollback failed at height %d (%v) — refusing to start",
 					entry.height, rerr)
-				break
+				cs.recovery_failed = true
+				return
 			}
 		}
 
@@ -1243,9 +1255,77 @@ _rebuild_undo_locations :: proc(cs: ^Chain_State, meta_height: int, tip: ^Block_
 		}
 	}
 
-	// Tail-align: last record ↔ index tip, walking both backward.
+	// Find the alignment: the stream tail SHOULD be the tip, but an
+	// interrupted final undo write truncates the tail — search which height
+	// the last parseable record belongs to (content-verified, plus 8
+	// consecutive confirmations walking down).
+	if len(positions) == 0 {
+		log.errorf("Undo rebuild: no parseable undo records")
+		return false
+	}
+	anchor: ^Block_Index_Entry
+	last := positions[len(positions) - 1]
+	for j in 0 ..< 64 {
+		cand := tip
+		for _ in 0 ..< j {
+			if cand == nil {
+				break
+			}
+			cand = cand.prev
+		}
+		if cand == nil || cand.height <= meta_height {
+			break
+		}
+		cand.undo_file_num = last.file_num
+		cand.undo_offset = last.offset
+		cand.undo_size = last.size
+		if !_verify_undo_matches_block(cs, cand) {
+			continue
+		}
+		// Confirm with the next 8 records down.
+		confirmed := true
+		e := cand.prev
+		k := len(positions) - 2
+		for c in 0 ..< 8 {
+			_ = c
+			if e == nil || e.height <= meta_height || k < 0 {
+				break
+			}
+			e.undo_file_num = positions[k].file_num
+			e.undo_offset = positions[k].offset
+			e.undo_size = positions[k].size
+			if !_verify_undo_matches_block(cs, e) {
+				confirmed = false
+				break
+			}
+			e = e.prev
+			k -= 1
+		}
+		if confirmed {
+			anchor = cand
+			if j > 0 {
+				log.warnf("Undo rebuild: rev stream tail truncated — last %d block(s) below tip %d have no undo data", j, tip.height)
+			}
+			break
+		}
+	}
+	if anchor == nil {
+		log.errorf("Undo rebuild: no alignment found near tip — aborting")
+		return false
+	}
+
+	// Blocks above the anchor lost their undo records: strip Has_Undo so
+	// the rollback uses the block-data-only path for them.
+	for e := tip; e != nil && e != anchor; e = e.prev {
+		e.status -= {.Has_Undo}
+		e.undo_file_num = 0
+		e.undo_offset = 0
+		e.undo_size = 0
+	}
+
+	// Assign + verify the full range downward from the anchor.
 	idx := len(positions) - 1
-	for entry := tip; entry != nil && entry.height > meta_height; entry = entry.prev {
+	for entry := anchor; entry != nil && entry.height > meta_height; entry = entry.prev {
 		if idx < 0 {
 			log.errorf("Undo rebuild: rev stream exhausted at height %d", entry.height)
 			return false
@@ -1269,7 +1349,7 @@ _rebuild_undo_locations :: proc(cs: ^Chain_State, meta_height: int, tip: ^Block_
 		storage.index_db_put(&cs.index_db, rec)
 	}
 
-	log.infof("Undo rebuild: verified and persisted %d undo locations", tip.height - meta_height)
+	log.infof("Undo rebuild: verified and persisted undo locations down to height %d", meta_height + 1)
 	return true
 }
 
@@ -1328,11 +1408,17 @@ _verify_undo_matches_block :: proc(cs: ^Chain_State, entry: ^Block_Index_Entry) 
 // mechanical — no validation, no active_chain interaction (recovery runs
 // before the active chain is rebuilt).
 _rollback_block_for_recovery :: proc(cs: ^Chain_State, entry: ^Block_Index_Entry) -> Chain_Error {
-	if .Has_Data not_in entry.status || .Has_Undo not_in entry.status {
-		log.errorf("recovery rollback %d: status=%v file=%d off=%d size=%d undo_file=%d undo_off=%d undo_size=%d",
-			entry.height, entry.status, entry.file_num, entry.data_offset, entry.data_size,
-			entry.undo_file_num, entry.undo_offset, entry.undo_size)
+	if .Has_Data not_in entry.status {
+		log.errorf("recovery rollback %d: no block data (status=%v)", entry.height, entry.status)
 		return .Storage_Error
+	}
+	// Undo-less (truncated rev tail): delete this block's created outputs
+	// from block data alone. Its spent pre-range coins can't be restored
+	// here — if any of their deletes landed in the partial flush, the
+	// validating replay fails LOUDLY on that exact input (never silent).
+	undo_less := .Has_Undo not_in entry.status
+	if undo_less {
+		log.warnf("recovery rollback %d: no undo data — deleting created outputs only", entry.height)
 	}
 
 	loc := storage.Block_Location{
@@ -1353,11 +1439,15 @@ _rollback_block_for_recovery :: proc(cs: ^Chain_State, entry: ^Block_Index_Entry
 		return .Storage_Error
 	}
 
-	undo, uerr := read_block_undo(&cs.undo_files, entry, context.temp_allocator)
-	if uerr != .None {
-		log.errorf("recovery rollback %d: undo read failed (%v) undo_file=%d undo_off=%d undo_size=%d",
-			entry.height, uerr, entry.undo_file_num, entry.undo_offset, entry.undo_size)
-		return uerr
+	undo: Block_Undo
+	if !undo_less {
+		u, uerr := read_block_undo(&cs.undo_files, entry, context.temp_allocator)
+		if uerr != .None {
+			log.errorf("recovery rollback %d: undo read failed (%v) undo_file=%d undo_off=%d undo_size=%d",
+				entry.height, uerr, entry.undo_file_num, entry.undo_offset, entry.undo_size)
+			return uerr
+		}
+		undo = u
 	}
 
 	for tx_idx := len(block.txs) - 1; tx_idx >= 0; tx_idx -= 1 {
