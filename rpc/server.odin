@@ -415,6 +415,8 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_setnetworkactive(srv, req.params)
 	case "getnodeaddresses":
 		return _handle_getnodeaddresses(srv, req.params)
+	case "generatetoaddress":
+		return _handle_generatetoaddress(srv, req.params)
 	case "getrawmempool":
 		return _handle_getrawmempool(srv, req.params)
 	case "gettxout":

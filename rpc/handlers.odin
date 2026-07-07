@@ -3230,3 +3230,74 @@ _handle_getnodeaddresses :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Re
 	}
 	return _make_result(json.Value(arr), srv._current_id)
 }
+
+// --- generatetoaddress / generateblock (regtest) ---
+
+// Serializes concurrent generate calls (threaded RPC server); when P2P is
+// active, generation still runs here but the chain mutations race the P2P
+// thread — restrict to regtest where that's the accepted testing tradeoff
+// (Core regtest miners share the same caveat spirit; use --no-p2p for
+// deterministic harnesses).
+_generate_mutex: sync.Mutex
+
+_handle_generatetoaddress :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	if srv.params.name != "regtest" {
+		return _make_error(.Internal_Error, "generatetoaddress is regtest-only", srv._current_id)
+	}
+	nblocks, n_ok := _get_int_param(params, 0)
+	addr, addr_ok := _get_string_param(params, 1)
+	if !n_ok || nblocks < 1 || nblocks > 10_000 || !addr_ok {
+		return _make_error(.Invalid_Params, "Usage: generatetoaddress nblocks \"address\" [maxtries]", srv._current_id)
+	}
+	max_tries := 1_000_000
+	if mt, mt_ok := _get_int_param(params, 2); mt_ok {
+		max_tries = mt
+	}
+	spk, spk_ok := _address_to_script_pubkey(addr, srv.params)
+	if !spk_ok {
+		return _make_error(.Invalid_Params, "Invalid address", srv._current_id)
+	}
+
+	sync.mutex_lock(&_generate_mutex)
+	defer sync.mutex_unlock(&_generate_mutex)
+
+	hashes := make(json.Array, 0, context.temp_allocator)
+	for _ in 0 ..< nblocks {
+		// Select mempool txs with no unconfirmed parents (trivial ordering).
+		selected := make([dynamic]chain.Mine_Tx, 0, 64, context.temp_allocator)
+		total_fees: i64
+		if srv.mp != nil {
+			for txid, entry in srv.mp.entries {
+				ok := true
+				for inp in entry.tx.inputs {
+					if mempool.mempool_has(srv.mp, inp.previous_output.hash) {
+						ok = false
+						break
+					}
+				}
+				if ok {
+					append(&selected, chain.Mine_Tx{tx = entry.tx, txid = txid, wtxid = entry.wtxid})
+					total_fees += entry.fee
+				}
+			}
+		}
+
+		hash, merr := chain.mine_block(srv.chain, selected[:], total_fees, spk, max_tries)
+		if merr != .None {
+			return _make_error(.Internal_Error, fmt.tprintf("mining failed: %v", merr), srv._current_id)
+		}
+		if srv.mp != nil {
+			// Remove mined txs the same way a network block would.
+			blk_entry, _ := srv.chain.block_index.entries[hash]
+			_ = blk_entry
+			for sel in selected {
+				if e, found := mempool.mempool_get(srv.mp, sel.txid); found {
+					_ = e
+					mempool.mempool_remove(srv.mp, sel.txid)
+				}
+			}
+		}
+		append(&hashes, json.Value(json.String(_hash_to_hex(hash))))
+	}
+	return _make_result(json.Value(hashes), srv._current_id)
+}
