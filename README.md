@@ -29,6 +29,9 @@ testnet3. 342 tests across 11 packages.
 
 ## Quick Start
 
+Prebuilt binaries (macOS arm64, Linux x64/arm64) are on the
+[releases page](../../releases). Or build from source:
+
 ```bash
 git clone --recursive https://github.com/youruser/bitcoin-node-odin.git
 cd bitcoin-node-odin && make

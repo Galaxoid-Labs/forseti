@@ -9,7 +9,9 @@ mkdir -p "$LIB_DIR"
 # Match Odin's macOS deployment target (16.0) to suppress linker warnings.
 # Apple clang on macOS 26+ forcibly overrides -mmacosx-version-min to the SDK
 # version, so we prefer Homebrew LLVM/clang which respects the flag.
-DEPLOY_FLAGS="-mmacosx-version-min=16.0"
+# MACOS_MIN overrides the target — CI sets 13.0 for portable release binaries
+# (a 16.0-minos binary would not run on the macOS 15 GitHub runners).
+DEPLOY_FLAGS="-mmacosx-version-min=${MACOS_MIN:-16.0}"
 if [ "$(uname -s)" = "Darwin" ]; then
     if [ -x /opt/homebrew/opt/llvm@20/bin/clang ]; then
         CC="${CC:-/opt/homebrew/opt/llvm@20/bin/clang}"

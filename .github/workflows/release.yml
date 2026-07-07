@@ -1,0 +1,134 @@
+# Release: build btcnode + btcnode-gui (-o:speed via the Makefile) for
+# macOS arm64 and Linux x64/arm64, run the full test suite, and attach the
+# tarballs + SHA256SUMS to a GitHub Release.
+#
+# Triggers on version tags (v*). workflow_dispatch runs the same builds and
+# uploads workflow artifacts without publishing a release (dry run).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Pinned Odin toolchain (prebuilt release binaries exist for all three targets).
+  ODIN_RELEASE: dev-2026-06
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: macos-arm64
+            odin_asset: macos-arm64
+          - os: ubuntu-24.04
+            target: linux-x64
+            odin_asset: linux-amd64
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+            odin_asset: linux-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out (with submodules)
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool libncurses-dev \
+            libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libxi-dev
+
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install autoconf automake libtool
+
+      - name: Install Odin (prebuilt ${{ env.ODIN_RELEASE }})
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$ODIN_RELEASE" --repo odin-lang/Odin \
+            --pattern "odin-${{ matrix.odin_asset }}-*" --dir "$RUNNER_TEMP"
+          mkdir -p "$HOME/odin"
+          tar -xzf "$RUNNER_TEMP"/odin-${{ matrix.odin_asset }}-*.tar.gz -C "$HOME/odin"
+          # Archive layout has varied across releases — locate the binary.
+          ODIN_BIN="$(find "$HOME/odin" -maxdepth 3 -name odin -type f | head -1)"
+          chmod +x "$ODIN_BIN"
+          dirname "$ODIN_BIN" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        run: odin version
+
+      - name: Build (deps + node + dashboard client)
+        env:
+          MACOS_MIN: "13.0" # portable minos for release binaries
+        run: |
+          make deps
+          make build
+          make gui
+
+      - name: Run test suite
+        run: make test
+
+      - name: Smoke test binaries
+        run: |
+          ./btcnode --help > /dev/null
+          ./btcnode-gui --help > /dev/null
+          echo "smoke OK"
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            VERSION="$(git rev-parse --short HEAD)"
+          fi
+          NAME="btcnode-${VERSION}-${{ matrix.target }}"
+          mkdir "$NAME"
+          cp btcnode btcnode-gui README.md LICENSE "$NAME/"
+          cp -R docs "$NAME/docs"
+          tar -czf "$NAME.tar.gz" "$NAME"
+          ls -la "$NAME.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: btcnode-${{ matrix.target }}
+          path: btcnode-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum btcnode-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/btcnode-*.tar.gz dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "btcnode $GITHUB_REF_NAME" \
+            --generate-notes

@@ -1,5 +1,10 @@
 # Building
 
+Prebuilt binaries for macOS arm64 and Linux x64/arm64 are attached to
+[GitHub Releases](../../../releases) — built by `.github/workflows/release.yml`
+(`-o:speed`, full test suite as a gate, SHA256SUMS included). Tagging `v*`
+publishes a release; the workflow can also be dispatched manually as a dry run.
+
 ## Dependencies
 
 **Build tools:**
