@@ -37,6 +37,7 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 - `p2p/` — Peer connections (outbound + inbound), sync manager, connection manager, address manager, BIP324 v2 transport, TCP listener (8 files)
 - `mempool/` — Fee rates, relay policy, validation pipeline, RBF (BIP125), persistence, configurable limits (6 files)
 - `rpc/` — JSON-RPC server, 47 methods, HTTP server (4 files)
+- `zmq/` — native ZMTP 3.0 PUB sockets (no libzmq): Core zmqpub* parity (hashblock/hashtx/rawblock/rawtx/sequence), verified against real libzmq
 - `gui/` — raylib/raygui dashboard (in-process --gui and remote rendering; Cascadia Code embedded via #load)
 - `guiapp/` — standalone `btcnode-gui` binary: polls getnodestatus RPC, renders the gui package remotely (--probe for one-shot CLI check, --tui for terminal rendering)
 - `ncurses/` — minimal libncurses FFI bindings (system lib, secp256k1-binding style)

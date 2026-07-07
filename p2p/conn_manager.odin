@@ -14,8 +14,10 @@ import crypto "../crypto"
 import "../mempool"
 import "../storage"
 import "../wire"
+import zmqpkg "../zmq"
 
 Conn_Manager :: struct {
+	zmq: ^zmqpkg.Node, // nil unless --zmqpub* configured
 	peers:              map[Peer_Id]^Peer,
 	sync_mgr:           Sync_Manager,
 	chain:              ^chain.Chain_State,
@@ -957,6 +959,7 @@ _conn_manager_handle_tx :: proc(cm: ^Conn_Manager, peer_id: Peer_Id, payload: []
 	}
 
 	log.debugf("Accepted tx %s from peer %d", _hash_to_hex_short(txid), peer_id)
+	zmqpkg.notify_tx(cm.zmq, txid, payload)
 
 	// Look up entry to get wtxid + fee rate for BIP133/339 relay.
 	entry, _ := mempool.mempool_get(cm.mp, txid)

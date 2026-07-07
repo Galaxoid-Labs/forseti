@@ -60,6 +60,7 @@ This is an educational/experimental project implementing 33 BIPs. It covers the 
 | 47 | Instant GUI Startup + Shutdown-hold Screen | Complete |
 | 48 | Crash Recovery v2 (persisted undo locations, verified rollback, bounded by safety flushes) | Complete |
 | 49 | Single-instance Datadir Lock | Complete |
+| 50 | ZMQ Notifications (native ZMTP, Core zmqpub* parity, LND-ready) | Complete |
 
 ## Dependencies
 
@@ -317,6 +318,18 @@ electrs --network signet \
 
 electrs learns about new blocks over the P2P connection (no ZMQ needed)
 and syncs the mempool over RPC.
+
+For consumers that DO want ZMQ (LND's bitcoind backend, custom indexers),
+btcnode implements Bitcoin Core's publisher interface natively (no libzmq
+dependency — ZMTP 3.0 spoken directly):
+
+```bash
+./btcnode --zmqpubrawblock=tcp://127.0.0.1:28332 --zmqpubrawtx=tcp://127.0.0.1:28333
+```
+
+Topics: `hashblock`, `hashtx`, `rawblock`, `rawtx`, `sequence` — payloads
+and per-topic LE32 sequence numbers match Core exactly (verified against
+libzmq subscribers).
 
 ## RPC Interface
 

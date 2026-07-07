@@ -12,6 +12,7 @@ import crypto "../crypto"
 import "../mempool"
 import "../storage"
 import "../wire"
+import zmqpkg "../zmq"
 
 Sync_State :: enum {
 	Idle,
@@ -45,6 +46,7 @@ Compact_Block_State :: struct {
 }
 
 Sync_Manager :: struct {
+	zmq:                ^zmqpkg.Node, // nil unless --zmqpub* configured (set with Conn_Manager.zmq)
 	chain:              ^chain.Chain_State,
 	params:             ^consensus.Chain_Params,
 	mp:                 ^mempool.Mempool,
@@ -1334,6 +1336,17 @@ _announce_block :: proc(sm: ^Sync_Manager, from_peer: Peer_Id, block: ^wire.Bloc
 
 	// Build compact block once (reused for all compact-capable peers).
 	cmpct := wire.create_compact_block(block, nonce, context.temp_allocator)
+
+	// ZMQ notifications (hashblock/rawblock/sequence), if configured.
+	if sm.zmq != nil {
+		raw: []byte
+		if zmqpkg.TOPIC_RAWBLOCK in sm.zmq.by_topic {
+			w := wire.writer_init(context.temp_allocator)
+			wire.serialize_block(&w, block)
+			raw = wire.writer_bytes(&w)
+		}
+		zmqpkg.notify_block(sm.zmq, block_hash, raw)
+	}
 
 	// Single-element header slice for BIP130 announcement.
 	hdr_slice := [1]wire.Block_Header{block.header}

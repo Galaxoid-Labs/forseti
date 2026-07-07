@@ -15,6 +15,7 @@ import "consensus"
 import "crypto"
 import "mempool"
 import "p2p"
+import zmqpkg "zmq"
 import "gui"
 import "tui"
 import "rpc"
@@ -111,6 +112,11 @@ CLI_Config :: struct {
 	server:                 bool,   // default true
 	max_connections:        int,    // total peer connections (default: 125)
 	v2_transport:           bool,   // BIP324 v2 encrypted transport
+	zmq_hashblock:          string, // --zmqpubhashblock=tcp://addr:port
+	zmq_hashtx:             string,
+	zmq_rawblock:           string,
+	zmq_rawtx:              string,
+	zmq_sequence:           string,
 	block_filter_index:     bool,   // BIP158 compact block filter index
 	listen:                 bool,   // accept inbound connections (default: true)
 	debug:                  bool,   // enable debug logging (default: false)
@@ -396,6 +402,11 @@ _print_usage :: proc() {
 	fmt.println("  --p2p-port=<port>     P2P listen port (default: network-appropriate)")
 	fmt.println("  --no-p2p              Disable P2P networking (RPC-only mode)")
 	fmt.println("  --listen=<0|1>        Accept inbound P2P connections (default: 1)")
+	fmt.println("  --zmqpubhashblock=<tcp://ip:port>  ZMQ publish block hashes")
+	fmt.println("  --zmqpubhashtx=<tcp://ip:port>     ZMQ publish tx hashes")
+	fmt.println("  --zmqpubrawblock=<tcp://ip:port>   ZMQ publish raw blocks")
+	fmt.println("  --zmqpubrawtx=<tcp://ip:port>      ZMQ publish raw transactions")
+	fmt.println("  --zmqpubsequence=<tcp://ip:port>   ZMQ publish sequence events")
 	fmt.println("  --maxconnections=<N>  Total peer connections (default: 125)")
 	fmt.println("  --v2transport=<0|1>   Enable BIP 324 v2 encrypted P2P transport (default: 0)")
 	fmt.println("  --blockfilterindex=<0|1|basic> Enable BIP 158 compact block filter index (default: 0)")
@@ -670,6 +681,21 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 	}
 
 	if .V2_Transport not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "zmqpubhashblock"); found && cfg.zmq_hashblock == "" {
+			cfg.zmq_hashblock = strings.clone(val)
+		}
+		if val, found := _ini_get(&m, cfg.network, "zmqpubhashtx"); found && cfg.zmq_hashtx == "" {
+			cfg.zmq_hashtx = strings.clone(val)
+		}
+		if val, found := _ini_get(&m, cfg.network, "zmqpubrawblock"); found && cfg.zmq_rawblock == "" {
+			cfg.zmq_rawblock = strings.clone(val)
+		}
+		if val, found := _ini_get(&m, cfg.network, "zmqpubrawtx"); found && cfg.zmq_rawtx == "" {
+			cfg.zmq_rawtx = strings.clone(val)
+		}
+		if val, found := _ini_get(&m, cfg.network, "zmqpubsequence"); found && cfg.zmq_sequence == "" {
+			cfg.zmq_sequence = strings.clone(val)
+		}
 		if val, found := _ini_get(&m, cfg.network, "v2transport"); found {
 			cfg.v2_transport = val == "1" || val == "true" || val == "yes"
 		}
@@ -1133,6 +1159,21 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 			// Set global pointer for signal handler.
 			_g_conn_manager = cm
 
+			// ZMQ publishers (Bitcoin Core zmqpub* parity), if configured.
+			{
+				topics := make([dynamic]string, 0, 5, context.temp_allocator)
+				eps := make([dynamic]string, 0, 5, context.temp_allocator)
+				if cfg.zmq_hashblock != "" { append(&topics, zmqpkg.TOPIC_HASHBLOCK); append(&eps, cfg.zmq_hashblock) }
+				if cfg.zmq_hashtx    != "" { append(&topics, zmqpkg.TOPIC_HASHTX);    append(&eps, cfg.zmq_hashtx) }
+				if cfg.zmq_rawblock  != "" { append(&topics, zmqpkg.TOPIC_RAWBLOCK);  append(&eps, cfg.zmq_rawblock) }
+				if cfg.zmq_rawtx     != "" { append(&topics, zmqpkg.TOPIC_RAWTX);     append(&eps, cfg.zmq_rawtx) }
+				if cfg.zmq_sequence  != "" { append(&topics, zmqpkg.TOPIC_SEQUENCE);  append(&eps, cfg.zmq_sequence) }
+				if len(topics) > 0 {
+					cm.zmq = zmqpkg.setup(topics[:], eps[:])
+					cm.sync_mgr.zmq = cm.zmq
+				}
+			}
+
 			// GUI reads a 1 Hz status snapshot; only populate it when needed.
 			cm.status_enabled = cfg.gui
 
@@ -1219,6 +1260,9 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 		thread.join(rpc_thread)
 	}
 
+	if cm != nil && cm.zmq != nil {
+		zmqpkg.shutdown(cm.zmq)
+	}
 	log.info("Shutting down...")
 }
 
