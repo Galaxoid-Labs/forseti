@@ -150,6 +150,15 @@ block_index_load :: proc(idx: ^Block_Index, db: ^storage.Index_DB) {
 			}
 		}
 	}
+
+	// by_prev keeps ONE child per parent, and the map-order build above
+	// picks a random sibling at every fork — a stale mainnet block can
+	// shadow the real chain, and connect_pending_blocks (which walks
+	// by_prev from the tip) stops dead at it after a restart. Force the
+	// links along the best-work chain so forward walks always follow it.
+	for e := idx.best_header; e != nil && e.prev != nil; e = e.prev {
+		idx.by_prev[e.prev_hash] = e
+	}
 }
 
 // Add a new block header to the index.
