@@ -33,6 +33,52 @@ RPC_Server :: struct {
 	conn_mutex:   sync.Mutex,
 	conns:        map[tcp.TCP_Socket]bool, // open client sockets, force-closed on stop
 	shared:       ^RPC_Server, // per-connection copies point back at the real server
+	bind_addr:    tcp.IP4_Address,   // --rpcbind (default loopback)
+	bind_set:     bool,              // 0.0.0.0 is a valid bind — can't use the zero value as "unset"
+	allow_nets:   [dynamic]Allow_Net, // --rpcallowip CIDRs (loopback always allowed)
+}
+
+Allow_Net :: struct {
+	net:  u32, // network byte order as big-endian u32
+	mask: u32,
+}
+
+// Parse "a.b.c.d" or "a.b.c.d/nn" into an allow entry.
+rpc_parse_allowip :: proc(s: string) -> (Allow_Net, bool) {
+	addr_part := s
+	bits := 32
+	if slash := strings.index_byte(s, '/'); slash >= 0 {
+		addr_part = s[:slash]
+		n, n_ok := strconv.parse_int(s[slash + 1:])
+		if !n_ok || n < 0 || n > 32 {
+			return {}, false
+		}
+		bits = n
+	}
+	addr, addr_ok := tcp.parse_ip4_address(addr_part)
+	if !addr_ok {
+		return {}, false
+	}
+	ip := u32(addr[0]) << 24 | u32(addr[1]) << 16 | u32(addr[2]) << 8 | u32(addr[3])
+	mask := bits == 0 ? u32(0) : u32(0xffffffff) << uint(32 - bits)
+	return Allow_Net{net = ip & mask, mask = mask}, true
+}
+
+_addr_allowed :: proc(srv: ^RPC_Server, addr: tcp.Address) -> bool {
+	ip4, is_ip4 := addr.(tcp.IP4_Address)
+	if !is_ip4 {
+		return false // IPv6 sources not supported by the allowlist yet
+	}
+	if ip4[0] == 127 {
+		return true // loopback always allowed
+	}
+	ip := u32(ip4[0]) << 24 | u32(ip4[1]) << 16 | u32(ip4[2]) << 8 | u32(ip4[3])
+	for a in srv.allow_nets {
+		if ip & a.mask == a.net {
+			return true
+		}
+	}
+	return false
 }
 
 // Loopback-only server, but bound so a misbehaving client can't exhaust fds.
@@ -55,17 +101,52 @@ rpc_server_init :: proc(srv: ^RPC_Server, cs: ^chain.Chain_State, mp: ^mempool.M
 	srv.shared = nil
 }
 
+// Apply --rpcbind/--rpcallowip. Refuses a non-loopback bind without an
+// allowlist (Core parity — an open RPC port guarded only by auth is a
+// footgun). Call before rpc_server_start.
+rpc_server_configure_network :: proc(srv: ^RPC_Server, bind: string, allow_ips: []string) -> bool {
+	for a in allow_ips {
+		entry, ok := rpc_parse_allowip(a)
+		if !ok {
+			log.errorf("Invalid --rpcallowip value: %s", a)
+			return false
+		}
+		append(&srv.allow_nets, entry)
+	}
+	if bind != "" {
+		addr, ok := tcp.parse_ip4_address(bind)
+		if !ok {
+			log.errorf("Invalid --rpcbind address: %s (IPv4 only)", bind)
+			return false
+		}
+		if addr != tcp.IP4_Loopback && len(srv.allow_nets) == 0 {
+			log.error("--rpcbind set to a non-loopback address without --rpcallowip — refusing to start")
+			return false
+		}
+		srv.bind_addr = addr
+		srv.bind_set = true
+	}
+	return true
+}
+
 // Bind the TCP socket and start listening.
 rpc_server_start :: proc(srv: ^RPC_Server) -> bool {
+	bind := srv.bind_addr
+	if !srv.bind_set {
+		bind = tcp.IP4_Loopback
+	}
 	endpoint := tcp.Endpoint {
-		address = tcp.IP4_Loopback,
+		address = bind,
 		port    = srv.port,
 	}
 
 	socket, err := tcp.listen_tcp(endpoint)
 	if err != nil {
-		log.errorf("Failed to listen on port %d: %v", srv.port, err)
+		log.errorf("Failed to listen on %v port %d: %v", bind, srv.port, err)
 		return false
+	}
+	if bind != tcp.IP4_Loopback {
+		log.warnf("RPC listening on %v:%d — restricted to loopback + %d rpcallowip subnet(s)", bind, srv.port, len(srv.allow_nets))
 	}
 
 	srv.listener = socket
@@ -87,11 +168,17 @@ rpc_server_stop :: proc(srv: ^RPC_Server) {
 // let one client starve all others, including the GUI's getnodestatus poll).
 rpc_server_run :: proc(srv: ^RPC_Server) {
 	for srv.running {
-		client, _, accept_err := tcp.accept_tcp(srv.listener)
+		client, source, accept_err := tcp.accept_tcp(srv.listener)
 		if accept_err != nil {
 			if !srv.running {
 				break
 			}
+			continue
+		}
+
+		// --rpcallowip filter (loopback always passes).
+		if !_addr_allowed(srv, source.address) {
+			tcp.close(client)
 			continue
 		}
 
@@ -469,6 +556,8 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_prioritisetransaction(srv, req.params)
 	case "generateblock":
 		return _handle_generateblock(srv, req.params)
+	case "verifychain":
+		return _handle_verifychain(srv, req.params)
 	case "listsidechains":
 		return _handle_listsidechains(srv, req.params)
 	case "getsidechaininfo":

@@ -3,6 +3,7 @@ package rpc
 import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
+import "core:log"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -1879,6 +1880,7 @@ RPC_METHODS := [?]string{
 	"testmempoolaccept",
 	"uptime",
 	"validateaddress",
+	"verifychain",
 	"verifytxoutproof",
 	"getblockfilter",
 }
@@ -1966,6 +1968,7 @@ _get_method_help :: proc(method: string) -> string {
 	case "submitheader":               return "submitheader \"hexdata\"\nDecode the given hexdata as a header and submit it as a candidate chain tip if valid."
 	case "prioritisetransaction":      return "prioritisetransaction \"txid\" ( dummy ) fee_delta\nAccepts the transaction into mined blocks at a higher (or lower) priority."
 	case "generateblock":              return "generateblock \"output\" ( [\"rawtx/txid\",...] )\nMine a block with a set of ordered transactions immediately to a specified address (regtest only)."
+	case "verifychain":                return "verifychain ( checklevel nblocks )\nVerifies blockchain database: block data reads/deserializes (0), context-free validity (1), undo data (2+)."
 	}
 	return fmt.tprintf("%s\nNo detailed help available.", method)
 }
@@ -3845,4 +3848,81 @@ _handle_generateblock :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respo
 	obj := make(json.Object, 1, context.temp_allocator)
 	obj["hash"] = json.Value(json.String(_hash_to_hex(hash)))
 	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// --- verifychain ---
+//
+// Levels (Core-shaped): 0 = block data reads + deserializes, 1 = context-
+// free block validity (PoW, merkle, structure), 2+ = undo data reads and
+// parses. Levels 3/4 (disconnect/reconnect simulation) are not implemented;
+// requests for them run the level-2 checks.
+_handle_verifychain :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	checklevel := 3
+	if lvl, ok := _get_int_param(params, 0); ok {
+		if lvl < 0 || lvl > 4 {
+			return _make_error(.Invalid_Params, "checklevel must be 0-4", srv._current_id)
+		}
+		checklevel = lvl
+	}
+	nblocks := 6
+	if n, ok := _get_int_param(params, 1); ok {
+		nblocks = n
+	}
+
+	tip_height := chain.chain_height(srv.chain)
+	if nblocks <= 0 || nblocks > tip_height {
+		nblocks = tip_height
+	}
+
+	ok_result := true
+	checked := 0
+	for h := tip_height; h > tip_height - nblocks && h > 0; h -= 1 {
+		hash := srv.chain.active_chain[h]
+		entry, found := srv.chain.block_index.entries[hash]
+		if !found {
+			ok_result = false
+			break
+		}
+		if .Has_Data not_in entry.status {
+			// Pruned below this point — everything checkable was fine.
+			log.infof("verifychain: block data pruned below height %d, checked %d block(s)", h, checked)
+			break
+		}
+
+		loc := storage.Block_Location{
+			file_num    = entry.file_num,
+			data_offset = entry.data_offset,
+			data_size   = entry.data_size,
+		}
+		raw, rerr := storage.block_db_read_raw(&srv.chain.block_db, loc, context.temp_allocator)
+		if rerr != .None {
+			ok_result = false
+			break
+		}
+		r := wire.reader_init(raw)
+		block, derr := wire.deserialize_block(&r, context.temp_allocator)
+		if derr != nil {
+			ok_result = false
+			break
+		}
+
+		if checklevel >= 1 {
+			if cerr := consensus.check_block(&block, entry.height, srv.params, nil); cerr != .None {
+				log.warnf("verifychain: block %d fails check_block: %v", entry.height, cerr)
+				ok_result = false
+				break
+			}
+		}
+		if checklevel >= 2 && .Has_Undo in entry.status {
+			if _, uerr := chain.read_block_undo(&srv.chain.undo_files, entry, context.temp_allocator); uerr != .None {
+				log.warnf("verifychain: block %d undo data unreadable: %v", entry.height, uerr)
+				ok_result = false
+				break
+			}
+		}
+		checked += 1
+		free_all(context.temp_allocator)
+	}
+
+	return _make_result(json.Value(json.Boolean(ok_result)), srv._current_id)
 }

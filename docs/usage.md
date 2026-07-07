@@ -104,6 +104,8 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | `--rpcport=<port>` | JSON-RPC port | Network default |
 | `--rpcuser=<user>` | RPC auth username | Cookie auth |
 | `--rpcpassword=<pass>` | RPC auth password (must set both user and password) | Cookie auth |
+| `--rpcbind=<addr>` | Bind RPC to an address (e.g. `0.0.0.0` for a trusted LAN); non-loopback requires `--rpcallowip` | `127.0.0.1` |
+| `--rpcallowip=<ip[/nn]>` | Allow RPC from an IPv4 address/CIDR, repeatable (loopback always allowed) | — |
 | `--server=<0\|1>` | Enable/disable RPC server | `1` |
 | `--connect=<ip:port>` | Connect to a specific peer | DNS discovery |
 | `--p2p-port=<port>` | P2P listen port | Network default |

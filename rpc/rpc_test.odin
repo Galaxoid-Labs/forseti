@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:math/rand"
 import "core:os"
 import "core:testing"
+import tcp "core:net"
 
 import "../chain"
 import "../consensus"
@@ -2339,4 +2340,46 @@ test_prioritisetransaction :: proc(t: ^testing.T) {
 	e, found := mempool.mempool_get(mp, txid)
 	testing.expect(t, found, "entry exists")
 	testing.expect_value(t, mempool.mempool_selection_fee(mp, e), i64(2000 + 10_000))
+}
+
+@(test)
+test_rpc_allowip_parse :: proc(t: ^testing.T) {
+	a, ok := rpc_parse_allowip("192.168.1.0/24")
+	testing.expect(t, ok, "cidr parses")
+	testing.expect_value(t, a.net, u32(0xc0a80100))
+	testing.expect_value(t, a.mask, u32(0xffffff00))
+
+	b, ok2 := rpc_parse_allowip("10.0.0.5")
+	testing.expect(t, ok2, "bare ip parses as /32")
+	testing.expect_value(t, b.net, u32(0x0a000005))
+	testing.expect_value(t, b.mask, u32(0xffffffff))
+
+	_, bad := rpc_parse_allowip("10.0.0.5/33")
+	testing.expect(t, !bad, "bad prefix rejected")
+	_, bad2 := rpc_parse_allowip("nonsense")
+	testing.expect(t, !bad2, "garbage rejected")
+
+	srv: RPC_Server
+	defer delete(srv.allow_nets)
+	append(&srv.allow_nets, a)
+	testing.expect(t, _addr_allowed(&srv, tcp.IP4_Address{127, 0, 0, 1}), "loopback always allowed")
+	testing.expect(t, _addr_allowed(&srv, tcp.IP4_Address{192, 168, 1, 77}), "in-subnet allowed")
+	testing.expect(t, !_addr_allowed(&srv, tcp.IP4_Address{192, 168, 2, 1}), "out-of-subnet denied")
+}
+
+@(test)
+test_verifychain :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "verify", 10)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+	srv._current_id = json.Value(json.Integer(1))
+
+	resp := _handle_verifychain(srv, _make_params(json.Value(json.Integer(2)), json.Value(json.Integer(6))))
+	_, has_err := resp.error.?
+	testing.expect(t, !has_err, "verifychain should not error")
+	ok_val, is_bool := resp.result.(json.Boolean)
+	testing.expect(t, is_bool && bool(ok_val), "healthy chain verifies")
+
+	resp = _handle_verifychain(srv, _make_params(json.Value(json.Integer(9))))
+	_, range_err := resp.error.?
+	testing.expect(t, range_err, "checklevel > 4 errors")
 }

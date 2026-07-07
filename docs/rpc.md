@@ -17,7 +17,7 @@ curl -s -u myuser:mypassword \
 bitcoin-cli -rpcport=18443 getblockchaininfo
 ```
 
-## Bitcoin Core RPC Coverage (64 / 78 non-wallet RPCs)
+## Bitcoin Core RPC Coverage (65 / 78 non-wallet RPCs)
 
 Plus four btcnode-specific methods: `getnodestatus` (feeds the GUI/TUI
 dashboards) and the drivechain views `listsidechains`, `getsidechaininfo`,
@@ -25,7 +25,7 @@ and `listwithdrawalstatus` (see below).
 
 The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are intentionally excluded.
 
-**Blockchain (23/25):**
+**Blockchain (24/25):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
@@ -52,7 +52,7 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `pruneblockchain` | Yes | Requires `--prune` mode |
 | `savemempool` | Yes | |
 | `scantxoutset` | — | UTXO set descriptor scan |
-| `verifychain` | — | Block-by-block re-verification |
+| `verifychain` | Yes | Levels 0-2 (data reads, context-free validity, undo data); 3/4 run the level-2 checks |
 | `verifytxoutproof` | Yes | Merkle proof verification |
 
 **Control (6/6):**

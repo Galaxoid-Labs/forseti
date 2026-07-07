@@ -81,6 +81,7 @@ CLI_Flag :: enum {
 	Tui,
 	Prune,
 	Drivechain,
+	Rpc_Bind,
 }
 CLI_Flags_Set :: bit_set[CLI_Flag]
 
@@ -128,6 +129,8 @@ CLI_Config :: struct {
 	tui:                    bool,   // terminal dashboard (mutually exclusive with --gui)
 	prune_mb:               int,    // prune target in MB (0 = keep all blocks)
 	drivechain:             string, // BIP300/301: "off", "track", "enforce"
+	rpc_bind:               string, // --rpcbind address (default 127.0.0.1)
+	rpc_allow_ips:          [dynamic]string, // --rpcallowip CIDRs (repeatable)
 }
 
 _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
@@ -199,6 +202,11 @@ _parse_cli :: proc() -> (cfg: CLI_Config, flags_set: CLI_Flags_Set, ok: bool) {
 		} else if arg == "--tui" {
 			cfg.tui = true
 			flags_set += {.Tui}
+		} else if strings.has_prefix(arg, "--rpcbind=") {
+			cfg.rpc_bind = arg[len("--rpcbind="):]
+			flags_set += {.Rpc_Bind}
+		} else if strings.has_prefix(arg, "--rpcallowip=") {
+			append(&cfg.rpc_allow_ips, arg[len("--rpcallowip="):])
 		} else if strings.has_prefix(arg, "--drivechain=") {
 			val := arg[len("--drivechain="):]
 			if val != "off" && val != "track" && val != "enforce" {
@@ -422,6 +430,8 @@ _print_usage :: proc() {
 	fmt.println("  --rpcport=<port>      RPC port (default: network-appropriate)")
 	fmt.println("  --rpcuser=<user>      RPC auth username (default: cookie auth)")
 	fmt.println("  --rpcpassword=<pass>  RPC auth password (must set both user and password)")
+	fmt.println("  --rpcbind=<addr>      Bind RPC to address (default: 127.0.0.1; non-loopback requires --rpcallowip)")
+	fmt.println("  --rpcallowip=<ip[/nn]> Allow RPC from IPv4 address/CIDR, repeatable (loopback always allowed)")
 	fmt.println("  --server=<0|1>        Enable/disable RPC server (default: 1)")
 	fmt.println("  --connect=<ip:port>   Connect to specific peer instead of DNS discovery")
 	fmt.println("  --p2p-port=<port>     P2P listen port (default: network-appropriate)")
@@ -566,6 +576,23 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, flags_set: CLI_Flags_S
 		if val, found := _ini_get(&m, cfg.network, "prune"); found {
 			if mb, parse_ok := strconv.parse_int(val); parse_ok && (mb == 0 || mb >= 550) {
 				cfg.prune_mb = mb
+			}
+		}
+	}
+
+	if .Rpc_Bind not_in flags_set {
+		if val, found := _ini_get(&m, cfg.network, "rpcbind"); found {
+			cfg.rpc_bind = strings.clone(val)
+		}
+	}
+	if len(cfg.rpc_allow_ips) == 0 {
+		if val, found := _ini_get(&m, cfg.network, "rpcallowip"); found {
+			// Comma-separated list in the config file.
+			for part in strings.split(val, ",", context.temp_allocator) {
+				trimmed := strings.trim_space(part)
+				if len(trimmed) > 0 {
+					append(&cfg.rpc_allow_ips, strings.clone(trimmed))
+				}
 			}
 		}
 	}
@@ -1134,12 +1161,15 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 		srv = new(rpc.RPC_Server)
 		rpc.rpc_server_init(srv, cs, mp, params, rpc_port, data_dir = cfg.data_dir, rpc_user = cfg.rpc_user, rpc_password = cfg.rpc_password)
 
+		if !rpc.rpc_server_configure_network(srv, cfg.rpc_bind, cfg.rpc_allow_ips[:]) {
+			return
+		}
 		if !rpc.rpc_server_start(srv) {
 			log.errorf("Failed to start RPC server on port %d", rpc_port)
 			return
 		}
 
-		log.infof("RPC listening on 127.0.0.1:%d", rpc_port)
+		log.infof("RPC listening on %s:%d", cfg.rpc_bind != "" ? cfg.rpc_bind : "127.0.0.1", rpc_port)
 
 		// Set global pointer for signal handler.
 		_g_rpc_server = srv
