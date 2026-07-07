@@ -2154,8 +2154,14 @@ _update_node_status :: proc(cm: ^Conn_Manager, now: i64) {
 		dt := now - oldest.t
 		dtx := tip_tx - oldest.chain_tx
 		if dt > 0 && dtx > 0 {
-			rate := f64(dtx) / f64(dt)
+			rate := f64(dtx) / f64(dt) // txs/sec
+			// Remaining transactions. When the anchor underestimates the chain
+			// (spam-heavy signet/testnet), the naive delta goes negative — fall
+			// back to average txs/block over the blocks still to download.
 			remaining := chain.estimated_total_chain_tx(cm.params, now) - f64(tip_tx)
+			if remaining <= 0 && tip_height > 0 {
+				remaining = f64(st.blocks_remaining) * (f64(tip_tx) / f64(tip_height))
+			}
 			if remaining > 0 && rate > 1 {
 				st.eta_secs = i64(remaining / rate)
 			}

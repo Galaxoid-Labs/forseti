@@ -1669,15 +1669,26 @@ estimated_total_chain_tx :: proc(params: ^consensus.Chain_Params, now: i64) -> f
 
 // Verification progress in [0,1], measured in transactions verified vs the
 // estimated chain total — block counts misestimate work by ~40x across eras.
+// Falls back to the block/header ratio when there's no tx anchor (regtest) or
+// when the anchor UNDERESTIMATES the chain: spam-heavy signet/testnet can hold
+// more txs at the tip than the hardcoded anchor claims for the whole chain,
+// which would otherwise clamp progress to 100% mid-download.
 verification_progress :: proc(cs: ^Chain_State, now: i64) -> f64 {
-	total := estimated_total_chain_tx(cs.params, now)
-	if total <= 0 { return 1 }
 	tip_hash, tip_height := chain_tip(cs)
 	if tip_height < 0 { return 0 }
+	header_h := cs.block_index.best_header != nil ? cs.block_index.best_header.height : tip_height
+	block_ratio := header_h > 0 ? clamp(f64(tip_height) / f64(header_h), 0, 1) : 1
+
+	total := estimated_total_chain_tx(cs.params, now)
+	if total <= 0 { return block_ratio }
 	entry, found := cs.block_index.entries[tip_hash]
-	if !found { return 0 }
-	p := f64(entry.chain_tx) / total
-	return clamp(p, 0, 1)
+	if !found { return block_ratio }
+	tx_p := f64(entry.chain_tx) / total
+	// tx ratio saturated while blocks remain → anchor is too low; trust blocks.
+	if tx_p >= 1.0 && tip_height < header_h {
+		return block_ratio
+	}
+	return clamp(tx_p, 0, 1)
 }
 
 // Cumulative txs at the current tip (0 if unavailable).
