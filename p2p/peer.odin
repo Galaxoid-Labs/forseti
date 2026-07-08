@@ -52,6 +52,7 @@ Peer :: struct {
 	socks:          ^Socks5_State,
 	// nbio fields
 	read_buf:       [65536]byte,  // fixed buffer for async recv
+	connect_op:     ^nbio.Operation, // pending async dial (for cancel on destroy)
 	recv_op:        ^nbio.Operation, // pending recv operation (for cancel on destroy)
 	send_op:        ^nbio.Operation, // pending send operation (for cancel on destroy)
 	send_queue:     [dynamic][]byte, // queued outbound messages (owned bytes)
@@ -107,12 +108,16 @@ peer_start_connect :: proc(cm: ^Conn_Manager, address: string, port: int, peer_i
 	// Add peer to map immediately so we can track it.
 	cm.peers[peer_id] = peer
 
-	// Kick off async dial.
-	nbio.dial_poly(endpoint, peer, _on_connect, timeout = 5 * time.Second)
+	// Kick off async dial. Track the op so peer_destroy can cancel it — a peer
+	// destroyed while still dialing (shutdown, eviction) would otherwise fire
+	// _on_connect on freed memory (io_uring completes the dial regardless of
+	// close; kqueue doesn't, so macOS never saw it).
+	peer.connect_op = nbio.dial_poly(endpoint, peer, _on_connect, timeout = 5 * time.Second)
 }
 
 // Callback when async dial completes.
 _on_connect :: proc(op: ^nbio.Operation, peer: ^Peer) {
+	peer.connect_op = nil // this dial is completing; nothing to cancel anymore
 	if op.dial.err != nil {
 		log.debugf("Connection to %s failed: %v", peer.address, op.dial.err)
 		// Remove from peers map and clean up.
@@ -543,11 +548,16 @@ peer_destroy :: proc(peer: ^Peer) {
 	}
 	peer.state = .Disconnected
 
-	// Cancel pending recv AND send operations BEFORE closing socket. Closing
-	// the fd does NOT cancel an in-flight io_uring op — its completion still
-	// fires the callback later, on an already-freed peer (use-after-free →
-	// heap corruption, seen on Linux mainnet IBD 2026-07-08). nbio.remove marks
-	// the op so nbio suppresses the callback when the completion arrives.
+	// Cancel every pending io_uring op (dial/recv/send) BEFORE closing the
+	// socket. Closing the fd does NOT cancel an in-flight io_uring op — its
+	// completion still fires the callback later, on an already-freed peer
+	// (use-after-free → heap corruption / SIGSEGV, seen on Linux mainnet IBD
+	// 2026-07-08). nbio.remove marks the op so nbio suppresses the callback.
+	still_dialing := peer.connect_op != nil
+	if peer.connect_op != nil {
+		nbio.remove(peer.connect_op)
+		peer.connect_op = nil
+	}
 	if peer.recv_op != nil {
 		nbio.remove(peer.recv_op)
 		peer.recv_op = nil
@@ -557,7 +567,12 @@ peer_destroy :: proc(peer: ^Peer) {
 		peer.send_op = nil
 	}
 
-	tcp.close(peer.socket)
+	// Only close the socket if we actually own one. While still dialing,
+	// peer.socket is unset (nbio owns the connecting fd, freed with the dial
+	// op above) — closing the zero value here would hit fd 0 (stdin).
+	if !still_dialing {
+		tcp.close(peer.socket)
+	}
 
 	// Free any unsent messages in the queue.
 	for msg in peer.send_queue {
