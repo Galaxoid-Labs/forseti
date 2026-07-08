@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/btcnode_icon.png" width="128" alt="bitcoin-node-odin">
+</p>
+
 # bitcoin-node-odin
 
 A Bitcoin full node written from scratch in [Odin](https://odin-lang.org/) —

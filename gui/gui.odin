@@ -23,6 +23,11 @@ FPS :: 30
 // embedded at compile time — the binary stays self-contained.
 FONT_DATA := #load("fonts/CascadiaCode-VariableFont_wght.ttf")
 
+// App/window icon, embedded (256x256 PNG). raylib SetWindowIcon sets the
+// taskbar/window icon at runtime on Linux/Windows; it's a no-op on macOS,
+// where the Dock icon comes from a .app bundle instead.
+ICON_DATA := #load("../assets/btcnode_icon.png")
+
 // One atlas per text size in use, each baked at 2x so HiDPI framebuffers map
 // atlas pixels 1:1 (a single scaled atlas renders soft on retina).
 FONT_SIZES :: [?]i32{13, 14, 15, 18, 24}
@@ -348,6 +353,15 @@ _window_open :: proc(title: cstring) -> bool {
 		return false
 	}
 	apply_transparent_titlebar({COL_BG.r, COL_BG.g, COL_BG.b, COL_BG.a}) // macOS unified titlebar; no-op elsewhere
+
+	// Window/taskbar icon (Linux/Windows; no-op on macOS — Dock icon needs a
+	// .app bundle). SetWindowIcon copies the pixels, so unload right after.
+	icon := rl.LoadImageFromMemory(".png", raw_data(ICON_DATA), i32(len(ICON_DATA)))
+	if icon.data != nil {
+		rl.SetWindowIcon(icon)
+		rl.UnloadImage(icon)
+	}
+
 	rl.SetTargetFPS(FPS)
 	_apply_theme()
 
