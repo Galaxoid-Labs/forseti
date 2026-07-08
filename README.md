@@ -108,6 +108,7 @@ cp contrib/btcnode.conf.sample ~/btcnode/btcnode.conf
 | [docs/architecture.md](docs/architecture.md) | Project layout, storage design, threading, sync internals |
 | [docs/bips.md](docs/bips.md) | All 36 implemented BIPs |
 | [docs/hardware.md](docs/hardware.md) | What to run it on (SHA-256 backends, IBD times) |
+| [docs/full-validation-test.md](docs/full-validation-test.md) | Full-consensus sync from genesis (`--assumevalid=0`) — the strongest correctness test |
 | [docs/history.md](docs/history.md) | The 50 build phases and what's left |
 
 ## License
