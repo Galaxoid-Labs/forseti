@@ -159,6 +159,18 @@ rpc_server_start :: proc(srv: ^RPC_Server) -> bool {
 rpc_server_stop :: proc(srv: ^RPC_Server) {
 	target := srv.shared != nil ? srv.shared : srv
 	target.running = false
+	// Wake the accept loop. close() alone does NOT interrupt a blocked
+	// accept() in another thread on Linux (POSIX leaves it undefined; macOS
+	// happens to wake it), so shutdown would hang joining the RPC thread. A
+	// throwaway self-connection unblocks the accept — it returns our dummy
+	// client, the loop sees running=false, and exits.
+	addr := tcp.IP4_Loopback
+	if target.bind_set && target.bind_addr != (tcp.IP4_Address{0, 0, 0, 0}) {
+		addr = target.bind_addr
+	}
+	if dummy, derr := tcp.dial_tcp(tcp.Endpoint{address = addr, port = target.port}); derr == nil {
+		tcp.close(dummy)
+	}
 	tcp.close(target.listener)
 }
 
@@ -174,6 +186,12 @@ rpc_server_run :: proc(srv: ^RPC_Server) {
 				break
 			}
 			continue
+		}
+		// Woken by the shutdown self-connection (rpc_server_stop) — don't serve
+		// it, just exit the loop so the thread can be joined.
+		if !srv.running {
+			tcp.close(client)
+			break
 		}
 
 		// --rpcallowip filter (loopback always passes).
