@@ -354,12 +354,16 @@ _window_open :: proc(title: cstring) -> bool {
 	}
 	apply_transparent_titlebar({COL_BG.r, COL_BG.g, COL_BG.b, COL_BG.a}) // macOS unified titlebar; no-op elsewhere
 
-	// Window/taskbar icon (Linux/Windows; no-op on macOS — Dock icon needs a
-	// .app bundle). SetWindowIcon copies the pixels, so unload right after.
-	icon := rl.LoadImageFromMemory(".png", raw_data(ICON_DATA), i32(len(ICON_DATA)))
-	if icon.data != nil {
-		rl.SetWindowIcon(icon)
-		rl.UnloadImage(icon)
+	// Window/taskbar icon (Linux/Windows). macOS windows have no per-window
+	// icon — GLFW logs "Regular windows do not have icons on macOS" — so skip
+	// it there and use the Dock icon (set_dock_icon) instead. SetWindowIcon
+	// copies the pixels, so unload right after.
+	when ODIN_OS != .Darwin {
+		icon := rl.LoadImageFromMemory(".png", raw_data(ICON_DATA), i32(len(ICON_DATA)))
+		if icon.data != nil {
+			rl.SetWindowIcon(icon)
+			rl.UnloadImage(icon)
+		}
 	}
 	set_dock_icon(ICON_DATA) // macOS Dock icon (no-op elsewhere)
 
