@@ -361,6 +361,7 @@ _window_open :: proc(title: cstring) -> bool {
 		rl.SetWindowIcon(icon)
 		rl.UnloadImage(icon)
 	}
+	set_dock_icon(ICON_DATA) // macOS Dock icon (no-op elsewhere)
 
 	rl.SetTargetFPS(FPS)
 	_apply_theme()

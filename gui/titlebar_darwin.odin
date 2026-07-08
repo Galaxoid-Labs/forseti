@@ -10,6 +10,7 @@ package gui
 // titlebar_other.odin stubs it elsewhere.
 
 import NS "core:sys/darwin/Foundation"
+import "base:intrinsics"
 
 // Apply the transparent titlebar. `bg` is the dashboard background color
 // (RGBA bytes) so the titlebar matches it. Call once after InitWindow.
@@ -41,4 +42,26 @@ apply_transparent_titlebar :: proc(bg: [4]u8) {
 	NS.Window_setBackgroundColor(win, color)
 	NS.Window_setTitlebarAppearsTransparent(win, true)
 	NS.Window_setTitleVisibility(win, .Hidden)
+}
+
+// macOS-only: set the Dock (application) icon at runtime from embedded PNG
+// bytes. This works for a CLI binary launched from Terminal — no .app bundle
+// needed — so `btcnode --gui` and `btcnode-gui` both get a Dock icon without
+// packaging. NSImage.initWithData: and NSApplication.setApplicationIconImage:
+// aren't wrapped in core:sys/darwin/Foundation, so call them via the objc
+// runtime directly (intrinsics.objc_send == the bindings' private msgSend).
+set_dock_icon :: proc(png: []byte) {
+	app := NS.Application_sharedApplication()
+	if app == nil {
+		return
+	}
+	data := NS.Data_initWithBytes(NS.Data_alloc(), png)
+	if data == nil {
+		return
+	}
+	img := intrinsics.objc_send(^NS.Image, NS.Image_alloc(), "initWithData:", data)
+	if img == nil {
+		return
+	}
+	intrinsics.objc_send(nil, app, "setApplicationIconImage:", img)
 }
