@@ -167,6 +167,11 @@ v2_transport_receive :: proc(t: ^V2_Transport, data: []byte, allocator := contex
 	}
 
 	for {
+		// No-progress guard (below): every iteration must either advance the
+		// state machine or consume bytes from recv_buf. Capture both up front.
+		prev_state := t.state
+		prev_len := len(t.recv_buf)
+
 		switch t.state {
 		case .Awaiting_EllSwift:
 			if len(t.recv_buf) < 64 {
@@ -255,9 +260,19 @@ v2_transport_receive :: proc(t: ^V2_Transport, data: []byte, allocator := contex
 				log.debugf("V2: decoded message: %s (%d bytes)", msg.command, len(msg.payload))
 				append(&messages, msg)
 			}
-			continue
+			// fall through to the no-progress guard, then loop for the next packet
 
 		case .Failed:
+			return messages, .Invalid_Message
+		}
+
+		// Safety net: if an iteration neither advanced the state machine nor
+		// consumed any bytes, continuing would spin this loop at 100% CPU (a
+		// v2/io_uring edge case pegged a core on Linux mid-IBD, 2026-07-08).
+		// Treat it as a protocol error and drop the peer instead of hanging.
+		if t.state == prev_state && len(t.recv_buf) == prev_len {
+			log.errorf("V2: receive loop made no progress (state=%v, %d buffered bytes) — dropping peer", t.state, len(t.recv_buf))
+			t.state = .Failed
 			return messages, .Invalid_Message
 		}
 	}
