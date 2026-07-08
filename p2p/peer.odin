@@ -53,6 +53,7 @@ Peer :: struct {
 	// nbio fields
 	read_buf:       [65536]byte,  // fixed buffer for async recv
 	recv_op:        ^nbio.Operation, // pending recv operation (for cancel on destroy)
+	send_op:        ^nbio.Operation, // pending send operation (for cancel on destroy)
 	send_queue:     [dynamic][]byte, // queued outbound messages (owned bytes)
 	sending:        bool,  // whether an async send is in-flight
 	sending_msg:    []byte, // the message currently being sent (for freeing in callback)
@@ -498,11 +499,17 @@ _peer_flush_send_queue :: proc(peer: ^Peer) {
 	peer.sending = true
 	peer.sending_msg = msg
 	bufs := [1][]byte{msg}
-	nbio.send_poly(peer.socket, bufs[:], peer, _on_send, all = true, timeout = 30 * time.Second)
+	// Track the send op so peer_destroy can cancel it. On io_uring a submitted
+	// send completes on its own schedule regardless of socket close, so without
+	// cancelling it the _on_send callback fires on an already-freed peer
+	// (use-after-free → heap corruption; kqueue closes synchronously so macOS
+	// never saw this).
+	peer.send_op = nbio.send_poly(peer.socket, bufs[:], peer, _on_send, all = true, timeout = 30 * time.Second)
 }
 
 // Callback when async send completes.
 _on_send :: proc(op: ^nbio.Operation, peer: ^Peer) {
+	peer.send_op = nil // this op is completing; nothing to cancel anymore
 	// If peer was destroyed, sending_msg was already freed — bail out.
 	if peer.state == .Disconnected {
 		return
@@ -536,13 +543,18 @@ peer_destroy :: proc(peer: ^Peer) {
 	}
 	peer.state = .Disconnected
 
-	// Cancel pending recv operation BEFORE closing socket.
-	// nbio timeouts are separate kqueue Timer events — closing the socket does NOT
-	// cancel them. Without this, the 20-min recv timeout would fire after the peer
-	// is freed from the zombie list, causing a use-after-free.
+	// Cancel pending recv AND send operations BEFORE closing socket. Closing
+	// the fd does NOT cancel an in-flight io_uring op — its completion still
+	// fires the callback later, on an already-freed peer (use-after-free →
+	// heap corruption, seen on Linux mainnet IBD 2026-07-08). nbio.remove marks
+	// the op so nbio suppresses the callback when the completion arrives.
 	if peer.recv_op != nil {
 		nbio.remove(peer.recv_op)
 		peer.recv_op = nil
+	}
+	if peer.send_op != nil {
+		nbio.remove(peer.send_op)
+		peer.send_op = nil
 	}
 
 	tcp.close(peer.socket)
@@ -553,7 +565,8 @@ peer_destroy :: proc(peer: ^Peer) {
 	}
 	delete(peer.send_queue)
 
-	// Free the in-flight send message (callback won't fire after socket close).
+	// Free the in-flight send message. Safe to free here: we cancelled the send
+	// op above, so nbio will suppress _on_send (which would otherwise free it).
 	if peer.sending_msg != nil {
 		delete(peer.sending_msg)
 		peer.sending_msg = nil
