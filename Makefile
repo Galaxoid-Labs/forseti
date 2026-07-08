@@ -12,6 +12,7 @@ all: deps build
 deps:
 	git submodule update --init --recursive
 	./deps/build.sh
+	./deps/raylib-arm64.sh   # arm64 Linux: build vendored raylib/raygui (no-op elsewhere)
 
 build: deps
 	odin build . -out:btcnode -o:speed -extra-linker-flags:"$(CXX_LINK)"
