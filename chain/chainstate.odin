@@ -1286,6 +1286,18 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 			return
 		}
 
+		// Bound recovery memory. A large rollback otherwise accumulates EVERY
+		// undo coin in the in-memory cache and blows past RAM into swap — a
+		// 20,090-block rollback on a 16 GB-cache node hit ~55 GB and thrashed
+		// (2026-07-08). Flush+evict periodically with the tip PINNED at
+		// meta_height: the rollback is idempotent (undo writes absolute
+		// pre-block values, not deltas) and Valid_Chain is not stripped until
+		// the whole rollback completes, so an interrupted recovery just re-runs
+		// the full range and reconverges. Cap the cache low so eviction fires.
+		saved_budget := cs.coins.budget
+		cs.coins.budget = min(cs.coins.budget, 2 * 1024 * 1024 * 1024) // 2 GiB during rollback
+		defer cs.coins.budget = saved_budget
+
 		Boot_Rollback_Total = best_valid.height - meta_height
 		Boot_Rollback_Done = 0
 		for entry := best_valid; entry != nil && entry.height > meta_height; entry = entry.prev {
@@ -1302,6 +1314,24 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 				cs.recovery_failed = true
 				return
 			}
+			// Write out + evict the corrections so far, keeping memory bounded.
+			// Tip stays at meta_height; if we crash here the next boot re-rolls
+			// the full range (idempotent) since Valid_Chain is still set.
+			if coins_cache_should_flush(&cs.coins) {
+				if ferr := coins_cache_flush(&cs.coins, meta_hash, meta_height); ferr != .None {
+					log.errorf("Crash recovery: mid-rollback flush failed (%v) — refusing to start", ferr)
+					cs.recovery_failed = true
+					return
+				}
+			}
+		}
+
+		// Final flush: commit any remaining corrections so the UTXO set on disk
+		// is exactly @meta_height BEFORE the index tip is stripped down to it.
+		if ferr := coins_cache_flush(&cs.coins, meta_hash, meta_height); ferr != .None {
+			log.errorf("Crash recovery: final rollback flush failed (%v) — refusing to start", ferr)
+			cs.recovery_failed = true
+			return
 		}
 
 		for _, entry in cs.block_index.entries {
