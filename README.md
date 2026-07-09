@@ -15,7 +15,9 @@ testnet3. 378 tests across 13 packages.
 ## Highlights
 
 - **Full consensus validation** — script interpreter (P2PKH through Taproot),
-  all deployed soft forks, parallel script verification, assumevalid
+  all deployed soft forks, parallel script verification, parallel prevout
+  prefetch (warms the UTXO cache from LevelDB across worker threads for faster
+  cold-cache IBD), assumevalid
 - **Headers-first IBD** with multi-peer download, compact blocks (BIP152),
   and encrypted v2 transport (BIP324) with automatic v1 fallback both ways
 - **Bitcoin Core-compatible surface** — 87 of Core v30's 94 non-wallet RPCs
