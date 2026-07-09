@@ -23,7 +23,7 @@ FPS :: 30
 // embedded at compile time — the binary stays self-contained.
 FONT_DATA := #load("fonts/CascadiaCode-VariableFont_wght.ttf")
 
-// App/window icon, embedded (256x256 PNG). raylib SetWindowIcon sets the
+// App/window icon, embedded (1024x1024 PNG). raylib SetWindowIcon sets the
 // taskbar/window icon at runtime on Linux/Windows; it's a no-op on macOS,
 // where the Dock icon comes from a .app bundle instead.
 ICON_DATA := #load("../assets/forseti_icon.png")
