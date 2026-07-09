@@ -339,6 +339,13 @@ get_script_flags :: proc(height: int, params: ^Chain_Params) -> script.Verify_Fl
 		flags += {.Witness, .Null_Dummy}
 	}
 
+	// Taproot (BIP341/342). Before activation, witness v1 (P2TR) outputs are
+	// unknown-version anyone-can-spend and MUST NOT be validated as Taproot —
+	// they were spent with empty witnesses historically (mainnet 692261 tx 193).
+	if height >= params.taproot_height {
+		flags += {.Taproot}
+	}
+
 	return flags
 }
 

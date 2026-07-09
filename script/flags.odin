@@ -18,6 +18,7 @@ Verify_Flag :: enum {
 	Witness_Pub_Key_Compressed,        // BIP143: witness pubkeys must be compressed
 	Discourage_Upgradable_Nops,        // Discourage use of NOPs reserved for upgrades
 	Discourage_Upgradable_Witness,     // Discourage unknown witness versions
+	Taproot,                           // BIP341/342: validate witness v1 (P2TR) spends
 }
 
 Verify_Flags :: bit_set[Verify_Flag]
@@ -43,4 +44,5 @@ STANDARD_FLAGS :: Verify_Flags{
 	.Witness_Pub_Key_Compressed,
 	.Discourage_Upgradable_Nops,
 	.Discourage_Upgradable_Witness,
+	.Taproot,
 }

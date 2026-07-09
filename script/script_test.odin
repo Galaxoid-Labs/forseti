@@ -968,6 +968,110 @@ test_signet_250058_tx11_p2wpkh :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_mainnet_692261_tx193_pretaproot_v1 :: proc(t: ^testing.T) {
+	// Real-world consensus regression: mainnet block 692261, tx index 193
+	// (txid b10c007c60e14f9d..., 0xB10C's https://b10c.me/7 tx). It spends FOUR
+	// witness-v1 (P2TR-shaped, 5120<32B>) outputs with EMPTY scriptSig and NO
+	// witness — the tx isn't even segwit-marked. Block 692261 is BEFORE Taproot
+	// activation (mainnet 709632), so BIP341 rules were NOT yet in force: witness
+	// v1 was an unknown/future version = anyone-can-spend. The spend is valid on
+	// mainnet.
+	//
+	// The bug: verify_witness_program ran verify_taproot for ANY v1/32-byte
+	// program regardless of activation, so it rejected these with
+	// Witness_Program_Mismatch (empty witness). Assumevalid (880k) normally skips
+	// these scripts, so only a full-validation sync (--assumevalid=0) exposed it.
+	// Fix: gate the Taproot branch on the .Taproot flag, set by height in
+	// consensus.get_script_flags (>= params.taproot_height).
+	crypto.init_secp256k1()
+	defer crypto.destroy_secp256k1()
+
+	src_dir := #location().file_path
+	base_dir := src_dir[:strings.last_index(src_dir, "/")]
+
+	tx_hex_raw, tx_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/mainnet_692261_tx193_pretaproot.hex", base_dir), context.allocator)
+	if tx_read_err != nil {
+		testing.expect(t, false, "failed to read testdata/mainnet_692261_tx193_pretaproot.hex")
+		return
+	}
+	defer delete(tx_hex_raw)
+
+	tx_bytes, hex_ok := hex.decode(transmute([]u8)strings.trim_space(string(tx_hex_raw)), context.temp_allocator)
+	if !hex_ok {
+		testing.expect(t, false, "failed to hex-decode tx")
+		return
+	}
+
+	r := wire.reader_init(tx_bytes)
+	tx, tx_err := wire.deserialize_tx(&r, context.temp_allocator)
+	if tx_err != nil {
+		testing.expect(t, false, fmt.tprintf("tx deserialization failed: %v", tx_err))
+		return
+	}
+
+	testing.expect_value(t, len(tx.inputs), 4)
+	testing.expect_value(t, len(tx.outputs), 2)
+
+	// Prevouts: "value scriptPubKey_hex" per line (all witness v1, 5120<32B>).
+	prevout_raw, prev_read_err := os.read_entire_file(fmt.tprintf("%s/testdata/mainnet_692261_tx193_prevouts.txt", base_dir), context.allocator)
+	if prev_read_err != nil {
+		testing.expect(t, false, "failed to read prevouts file")
+		return
+	}
+	defer delete(prevout_raw)
+
+	lines := strings.split(strings.trim_space(string(prevout_raw)), "\n", context.temp_allocator)
+	testing.expect_value(t, len(lines), 4)
+
+	spent_outputs := make([]wire.Tx_Out, len(tx.inputs), context.temp_allocator)
+	for i in 0 ..< len(lines) {
+		parts := strings.split(strings.trim_space(lines[i]), " ", context.temp_allocator)
+		value, val_ok := strconv.parse_i64(parts[0])
+		testing.expect(t, val_ok, "parse value")
+		spk, spk_ok := hex.decode(transmute([]u8)parts[1], context.temp_allocator)
+		testing.expect(t, spk_ok, "decode spk")
+		// Sanity: each prevout is a witness v1 program (OP_1 <32-byte push>).
+		testing.expect(t, len(spk) == 34 && spk[0] == 0x51 && spk[1] == 0x20, "prevout is v1/32 witness program")
+		spent_outputs[i] = wire.Tx_Out{value = value, script_pubkey = spk}
+	}
+
+	verify_all :: proc(t: ^testing.T, tx: ^wire.Tx, spent_outputs: []wire.Tx_Out, flags: Verify_Flags) -> (Script_Error, int) {
+		sighash_cache: Sighash_Cache
+		for in_idx in 0 ..< len(tx.inputs) {
+			verifier := Script_Verifier {
+				tx            = tx,
+				input_idx     = in_idx,
+				amount        = spent_outputs[in_idx].value,
+				flags         = flags,
+				spent_outputs = spent_outputs,
+				sighash_cache = &sighash_cache,
+			}
+			witness: [][]byte
+			if len(tx.witness) > in_idx {
+				witness = tx.witness[in_idx]
+			}
+			serr := verify_script(&verifier, tx.inputs[in_idx].script_sig, spent_outputs[in_idx].script_pubkey, witness)
+			if serr != .None {
+				return serr, in_idx
+			}
+		}
+		return .None, -1
+	}
+
+	// Consensus flags at mainnet height 692261 (pre-Taproot): NO .Taproot.
+	// All four v1 spends must pass as anyone-can-spend.
+	pre_flags := Verify_Flags{.P2SH, .DER_Sig, .Check_Locktime, .Check_Sequence, .Witness, .Null_Dummy}
+	serr, bad_idx := verify_all(t, &tx, spent_outputs, pre_flags)
+	testing.expect(t, serr == .None, fmt.tprintf("pre-Taproot: all v1 spends should pass, but input %d gave %v", bad_idx, serr))
+
+	// With .Taproot active (post-709632 flags), the SAME empty-witness spend must
+	// be rejected — proves the flag genuinely gates the Taproot path.
+	post_flags := pre_flags + {.Taproot}
+	serr_post, _ := verify_all(t, &tx, spent_outputs, post_flags)
+	testing.expect(t, serr_post != .None, "with Taproot active, empty-witness v1 spend must be rejected")
+}
+
+@(test)
 test_signet_2148_tx1_two_phase :: proc(t: ^testing.T) {
 	// Regression test: signet block 2148, tx index 1.
 	// This tx has 400 P2WPKH inputs. It exposed a use-after-free bug in the

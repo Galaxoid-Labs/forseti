@@ -215,6 +215,13 @@ test_get_script_flags :: proc(t: ^testing.T) {
 	testing.expect(t, .Check_Sequence in flags_post, "Check_Sequence should be active")
 	testing.expect(t, .Witness in flags_post, "Witness should be active")
 	testing.expect(t, .Null_Dummy in flags_post, "Null_Dummy should be active")
+	// Taproot NOT active at 481824 — witness v1 is anyone-can-spend until 709632
+	// (mainnet 692261 tx 193 spends pre-activation v1 outputs with empty witness).
+	testing.expect(t, .Taproot not_in flags_post, "Taproot should NOT be active before height 709632")
+
+	// Taproot gating around activation height 709632.
+	testing.expect(t, .Taproot not_in get_script_flags(709_631, &params), "Taproot NOT active at 709631")
+	testing.expect(t, .Taproot in get_script_flags(709_632, &params), "Taproot active at 709632")
 	// Policy-only rules must never be part of consensus flags (see signet 297396).
 	testing.expect(t, .Low_S not_in flags_post, "Low_S is policy, not consensus")
 	testing.expect(t, .Null_Fail not_in flags_post, "Null_Fail is policy, not consensus")

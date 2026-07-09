@@ -360,11 +360,17 @@ verify_witness_program :: proc(
 		} else {
 			return .Witness_Program_Wrong_Length
 		}
-	} else if version == 1 && len(program) == 32 && !is_p2sh {
-		// Taproot (BIP341) — native segwit v1 with exactly 32-byte program
+	} else if version == 1 && len(program) == 32 && !is_p2sh && .Taproot in verifier.flags {
+		// Taproot (BIP341) — native segwit v1 with exactly 32-byte program.
+		// Only when Taproot is ACTIVE. Before activation, witness v1 programs are
+		// unknown-version and fall through to the anyone-can-spend branch below —
+		// they were spendable with an empty witness (e.g. mainnet 692261 tx 193,
+		// 0xB10C's https://b10c.me/7, spends four pre-activation v1 outputs).
 		return verify_taproot(verifier, witness, program)
 	} else {
-		// Future witness versions/lengths — succeed unless discouraged
+		// Future/unknown witness versions/lengths — succeed unless discouraged.
+		// Discourage_Upgradable_Witness is a policy flag only (never in consensus
+		// flags), so pre-Taproot v1 spends validate as anyone-can-spend in blocks.
 		if .Discourage_Upgradable_Witness in verifier.flags {
 			return .Discourage_Upgradable_Witness
 		}
