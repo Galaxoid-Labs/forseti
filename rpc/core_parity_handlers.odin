@@ -68,6 +68,123 @@ _expand_scan_objects :: proc(srv: ^RPC_Server, objs: json.Array) -> (scripts: [d
 	return scripts, {}, true
 }
 
+// --- getdescriptoractivity ---
+
+_handle_getdescriptoractivity :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	// params: [ [blockhashes], [scanobjects], include_mempool ]
+	objs, objs_ok := _get_array_param(params, 1)
+	if !objs_ok || len(objs) == 0 {
+		return _make_error(.Invalid_Params, "scanobjects argument is required", srv._current_id)
+	}
+	scripts, resp, sc_ok := _expand_scan_objects(srv, objs)
+	if !sc_ok {
+		return resp
+	}
+	want := make(map[string]bool, len(scripts) * 2, context.temp_allocator)
+	for s in scripts {
+		want[string(s)] = true
+	}
+	include_mempool := _get_bool_param(params, 2, false)
+
+	activity := make(json.Array, 0, context.temp_allocator)
+
+	_receive :: proc(activity: ^json.Array, amount: i64, txid: string, vout: int, blockhash: string, height: int, in_mempool: bool) {
+		e := make(json.Object, 6, context.temp_allocator)
+		e["type"] = json.Value(json.String("receive"))
+		e["amount"] = json.Value(json.Float(f64(amount) / 1e8))
+		e["txid"] = json.Value(json.String(txid))
+		e["vout"] = json.Value(json.Integer(i64(vout)))
+		if in_mempool {
+			e["mempool"] = json.Value(json.Boolean(true))
+		} else {
+			e["blockhash"] = json.Value(json.String(blockhash))
+			e["height"] = json.Value(json.Integer(i64(height)))
+		}
+		append(activity, json.Value(e))
+	}
+	_spend :: proc(activity: ^json.Array, amount: i64, prev_txid: string, prev_vout: u32, blockhash: string, height: int, in_mempool: bool) {
+		e := make(json.Object, 6, context.temp_allocator)
+		e["type"] = json.Value(json.String("spend"))
+		e["amount"] = json.Value(json.Float(f64(amount) / 1e8))
+		e["prevout_txid"] = json.Value(json.String(prev_txid))
+		e["prevout_vout"] = json.Value(json.Integer(i64(prev_vout)))
+		if in_mempool {
+			e["mempool"] = json.Value(json.Boolean(true))
+		} else {
+			e["blockhash"] = json.Value(json.String(blockhash))
+			e["height"] = json.Value(json.Integer(i64(height)))
+		}
+		append(activity, json.Value(e))
+	}
+
+	// Confirmed activity in the requested blocks.
+	if bhs, ok := _get_array_param(params, 0); ok {
+		for i in 0 ..< len(bhs) {
+			bh_str, s_ok := bhs[i].(json.String)
+			if !s_ok {
+				return _make_error(.Invalid_Params, "blockhash must be a string", srv._current_id)
+			}
+			hash, h_ok := _hex_to_hash(string(bh_str))
+			if !h_ok {
+				return _make_error(.Invalid_Params, "invalid block hash", srv._current_id)
+			}
+			entry, found := srv.chain.block_index.entries[hash]
+			if !found || .Has_Data not_in entry.status {
+				return _make_error(.Block_Not_Found, "Block not found or data unavailable", srv._current_id)
+			}
+			loc := storage.Block_Location{file_num = entry.file_num, data_offset = entry.data_offset, data_size = entry.data_size}
+			block, berr := storage.block_db_read(&srv.chain.block_db, loc, context.temp_allocator)
+			if berr != .None {
+				continue
+			}
+			hh := string(bh_str)
+			// receives: outputs paying a target script
+			for &tx in block.txs {
+				txid := _hash_to_hex(wire.tx_id(&tx))
+				for vout in 0 ..< len(tx.outputs) {
+					if want[string(tx.outputs[vout].script_pubkey)] {
+						_receive(&activity, tx.outputs[vout].value, txid, vout, hh, entry.height, false)
+					}
+				}
+			}
+			// spends: undo records carry the spent outpoint + its coin
+			if .Has_Undo in entry.status {
+				if undo, uerr := chain.read_block_undo(&srv.chain.undo_files, entry, context.temp_allocator); uerr == .None {
+					for uc in undo.spent_coins {
+						if want[string(uc.coin.script)] {
+							_spend(&activity, uc.coin.amount, _hash_to_hex(uc.outpoint.hash), uc.outpoint.index, hh, entry.height, false)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Unconfirmed activity in the mempool.
+	if include_mempool {
+		for _, ent in srv.mp.entries {
+			txid := _hash_to_hex(ent.txid)
+			for vout in 0 ..< len(ent.tx.outputs) {
+				if want[string(ent.tx.outputs[vout].script_pubkey)] {
+					_receive(&activity, ent.tx.outputs[vout].value, txid, vout, "", 0, true)
+				}
+			}
+			// spends: resolve each input's prevout script from the UTXO set
+			for &in_ in ent.tx.inputs {
+				if coin, found := chain.coins_cache_get(&srv.chain.coins, in_.previous_output); found {
+					if want[string(coin.script)] {
+						_spend(&activity, coin.amount, _hash_to_hex(in_.previous_output.hash), in_.previous_output.index, "", 0, true)
+					}
+				}
+			}
+		}
+	}
+
+	obj := make(json.Object, 1, context.temp_allocator)
+	obj["activity"] = json.Value(activity)
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
 // --- scanblocks ---
 
 _handle_scanblocks :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {

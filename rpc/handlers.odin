@@ -1891,6 +1891,7 @@ RPC_METHODS := [?]string{
 	"getchaintxstats",
 	"getconnectioncount",
 	"getdeploymentinfo",
+	"getdescriptoractivity",
 	"getdescriptorinfo",
 	"getdifficulty",
 	"getindexinfo",
@@ -2035,6 +2036,7 @@ _get_method_help :: proc(method: string) -> string {
 	case "getdeploymentinfo":           return "getdeploymentinfo ( \"blockhash\" )\nReturns soft-fork deployment status at the tip (or given block). forseti uses hardcoded activation heights, so all deployments are reported as buried."
 	case "getblockfrompeer":            return "getblockfrompeer \"blockhash\" peer_id\nRequests a block from a connected peer by nodeid (header must already be known). Returns an empty object; the block arrives asynchronously."
 	case "scanblocks":                  return "scanblocks \"action\" ( [scanobjects] start_height stop_height \"filtertype\" )\nUses BIP157 block filters (requires --blockfilterindex) to return blocks that may contain scriptPubKeys matching the given descriptors."
+	case "getdescriptoractivity":       return "getdescriptoractivity ( [blockhashes] [scanobjects] include_mempool )\nReturns spend/receive activity for the given descriptors within the given blocks (uses undo data for spends) and optionally the mempool."
 	case "waitfornewblock":             return "waitfornewblock ( timeout )\nWaits for a new block (any tip change) and returns {hash, height}. timeout in ms (0 = no timeout)."
 	case "waitforblock":                return "waitforblock \"blockhash\" ( timeout )\nWaits until the chain tip is the given block hash, then returns {hash, height}. timeout in ms (0 = no timeout)."
 	case "waitforblockheight":          return "waitforblockheight height ( timeout )\nWaits until the chain tip reaches the given height, then returns {hash, height}. timeout in ms (0 = no timeout)."
