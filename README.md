@@ -96,6 +96,16 @@ need:
 cp contrib/btcnode.conf.sample ~/btcnode/btcnode.conf
 ```
 
+## Performance
+
+Full mainnet initial block download (genesis → chain tip), measured:
+
+| Machine | Config | Time |
+|---------|--------|------|
+| NVIDIA DGX Spark (GB10 Grace-Blackwell, 20-core Arm64, 128 GB) | `--dbcache=16384`, assumevalid on | **~5.5 hours** |
+
+On a fast CPU with hardware SHA-256, IBD is **I/O-bound** — UTXO reads dominate over script verification — so a fast NVMe and a large `--dbcache` help most. See [docs/hardware.md](docs/hardware.md) for backend details and recommendations.
+
 ## Documentation
 
 | Doc | Contents |

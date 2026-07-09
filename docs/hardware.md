@@ -40,3 +40,11 @@ sysctl -a | grep hw.optional.armv8_2_sha
 
 **Minimum viable:** Any 64-bit x86 or ARM machine with 2+ GB RAM and 50+ GB disk will work — just slower. Use `--dbcache=256` on memory-constrained machines. Signet and testnet sync in minutes regardless of hardware.
 
+## Measured IBD times
+
+| Machine | Backend | Config | Full mainnet IBD (genesis → tip) |
+|---------|---------|--------|----------------------------------|
+| NVIDIA DGX Spark (GB10 Grace-Blackwell, 20-core Arm64, 128 GB) | ARMv8 crypto (`arm_shani`) | `--dbcache=16384`, assumevalid on | **~5.5 hours** |
+
+On a CPU this fast (hardware SHA-256 + wide parallel script verification), IBD stops being CPU-bound and becomes **I/O-bound**: the per-block profiler shows UTXO reads (prefetch + apply) dominating (~60%) while script verification drops to a minority (~40%), so a fast NVMe and a large `--dbcache` matter most. A full-validation pass (`--assumevalid=0`, every script re-verified from genesis) on the same box takes meaningfully longer.
+
