@@ -1094,40 +1094,47 @@ _handle_getblockheader :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Resp
 
 	verbose := _get_bool_param(params, 1, true)
 
-	if !verbose {
-		// Return raw 80-byte header hex
-		if .Has_Data not_in entry.status {
-			return _make_error(.Block_Not_Found, "Block data not available", srv._current_id)
-		}
+	// Served from the block INDEX like Bitcoin Core. The only header field the
+	// index doesn't keep is the merkle root: read it from the block data when
+	// present, else use the hardcoded genesis header for the data-less genesis
+	// block (peers never serve genesis via getdata, so it has no blk*.dat record).
+	// Without this, getblockheader(genesis) returned -5 "Block data not available"
+	// and stalled explorers like Esplora, which anchor their header chain on
+	// genesis.
+	merkle: Hash256
+	n_tx := 1
+	if .Has_Data in entry.status {
 		loc := storage.Block_Location {
 			file_num    = entry.file_num,
 			data_offset = entry.data_offset,
 			data_size   = entry.data_size,
 		}
-		raw, rerr := storage.block_db_read_raw(&srv.chain.block_db, loc, context.temp_allocator)
-		if rerr != .None {
-			return _make_error(.Internal_Error, "Failed to read block data", srv._current_id)
+		block, berr := storage.block_db_read(&srv.chain.block_db, loc, context.temp_allocator)
+		if berr != .None {
+			return _make_error(.Internal_Error, "Failed to read block", srv._current_id)
 		}
-		// Header is the first 80 bytes
-		header_size := 80
-		if len(raw) < header_size {
-			header_size = len(raw)
-		}
-		return _make_result(json.Value(json.String(_bytes_to_hex(raw[:header_size]))), srv._current_id)
-	}
-
-	// Verbose mode: need full block to get merkle_root (not stored in index)
-	if .Has_Data not_in entry.status {
+		merkle = block.header.merkle_root
+		n_tx = len(block.txs)
+	} else if entry.height == 0 {
+		merkle = srv.chain.params.genesis_header.merkle_root
+		n_tx = 1 // genesis is a single coinbase tx
+	} else {
 		return _make_error(.Block_Not_Found, "Block data not available", srv._current_id)
 	}
-	loc := storage.Block_Location {
-		file_num    = entry.file_num,
-		data_offset = entry.data_offset,
-		data_size   = entry.data_size,
-	}
-	block, berr := storage.block_db_read(&srv.chain.block_db, loc, context.temp_allocator)
-	if berr != .None {
-		return _make_error(.Internal_Error, "Failed to read block", srv._current_id)
+
+	if !verbose {
+		// Reconstruct the raw 80-byte header from the index entry + merkle root.
+		hdr := wire.Block_Header {
+			version     = entry.version,
+			prev_hash   = entry.prev_hash,
+			merkle_root = merkle,
+			timestamp   = entry.timestamp,
+			bits        = entry.bits,
+			nonce       = entry.nonce,
+		}
+		w := wire.writer_init(context.temp_allocator)
+		wire.serialize_block_header(&w, &hdr)
+		return _make_result(json.Value(json.String(_bytes_to_hex(wire.writer_bytes(&w)))), srv._current_id)
 	}
 
 	tip_height := chain.chain_height(srv.chain)
@@ -1139,14 +1146,14 @@ _handle_getblockheader :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Resp
 	obj["height"] = json.Value(json.Integer(entry.height))
 	obj["version"] = json.Value(json.Integer(i64(entry.version)))
 	obj["versionHex"] = json.Value(json.String(fmt.tprintf("%08x", u32(entry.version))))
-	obj["merkleroot"] = json.Value(json.String(_hash_to_hex(block.header.merkle_root)))
+	obj["merkleroot"] = json.Value(json.String(_hash_to_hex(merkle)))
 	obj["time"] = json.Value(json.Integer(i64(entry.timestamp)))
 	obj["mediantime"] = json.Value(json.Integer(i64(_get_median_time(srv, entry))))
 	obj["nonce"] = json.Value(json.Integer(i64(entry.nonce)))
 	obj["bits"] = json.Value(json.String(fmt.tprintf("%08x", entry.bits)))
 	obj["difficulty"] = json.Value(json.Float(consensus.get_difficulty(entry.bits)))
 	obj["chainwork"] = json.Value(json.String(_bytes_to_hex(entry.chain_work[:])))
-	obj["nTx"] = json.Value(json.Integer(len(block.txs)))
+	obj["nTx"] = json.Value(json.Integer(n_tx))
 
 	if entry.height > 0 {
 		obj["previousblockhash"] = json.Value(json.String(_hash_to_hex(entry.prev_hash)))

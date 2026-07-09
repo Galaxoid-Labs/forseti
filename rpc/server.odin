@@ -332,8 +332,14 @@ _read_http_request :: proc(socket: tcp.TCP_Socket) -> (body: []byte, auth_header
 	buf := make([dynamic]byte, 0, 4096, context.temp_allocator)
 	recv_buf: [4096]byte
 
-	// Read until we have the full header (\r\n\r\n)
+	// Read until we have the full header. Accept BOTH the CRLF terminator
+	// (\r\n\r\n) and a bare-LF one (\n\n): Bitcoin Core's HTTP server is lenient
+	// here, and JSON-RPC clients like Blockstream/electrs send LF-only requests
+	// ("POST / HTTP/1.1\nAuthorization: ...\n\n{body}"). Requiring CRLF made
+	// forseti hang forever waiting for a terminator that never arrived, which
+	// stalled those clients ("disconnected from daemon while receiving").
 	header_end := -1
+	term_len := 0
 	for {
 		n, err := tcp.recv_tcp(socket, recv_buf[:])
 		if err != nil || n == 0 {
@@ -341,13 +347,17 @@ _read_http_request :: proc(socket: tcp.TCP_Socket) -> (body: []byte, auth_header
 		}
 		append(&buf, ..recv_buf[:n])
 
-		// Search for header terminator
-		if len(buf) >= 4 {
-			for i in 0 ..< len(buf) - 3 {
-				if buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n' {
-					header_end = i
-					break
-				}
+		// Search for either header terminator.
+		for i in 0 ..< len(buf) - 1 {
+			if buf[i] == '\n' && buf[i + 1] == '\n' {
+				header_end = i
+				term_len = 2
+				break
+			}
+			if i + 3 < len(buf) && buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n' {
+				header_end = i
+				term_len = 4
+				break
 			}
 		}
 		if header_end >= 0 {
@@ -368,8 +378,8 @@ _read_http_request :: proc(socket: tcp.TCP_Socket) -> (body: []byte, auth_header
 		return nil, "", want_close, false
 	}
 
-	// Body starts after \r\n\r\n
-	body_start := header_end + 4
+	// Body starts after the terminator.
+	body_start := header_end + term_len
 	body_have := len(buf) - body_start
 
 	// Read remaining body bytes if needed
@@ -388,7 +398,9 @@ _read_http_request :: proc(socket: tcp.TCP_Socket) -> (body: []byte, auth_header
 // Did the client request Connection: close? (until-EOF readers and one-shot
 // clients depend on it being honored — a keep-alive-only server hangs them.)
 _parse_connection_close :: proc(headers: string) -> bool {
-	lines := strings.split(headers, "\r\n", context.temp_allocator)
+	// Split on bare LF so BOTH CRLF and LF-only requests parse (trim_space below
+	// strips any trailing \r). Bitcoin Core is lenient here; electrs sends LF-only.
+	lines := strings.split(headers, "\n", context.temp_allocator)
 	for line in lines {
 		lower := strings.to_lower(line, context.temp_allocator)
 		if strings.has_prefix(lower, "connection:") {
@@ -400,7 +412,9 @@ _parse_connection_close :: proc(headers: string) -> bool {
 
 // Extract Content-Length value from HTTP headers.
 _parse_content_length :: proc(headers: string) -> int {
-	lines := strings.split(headers, "\r\n", context.temp_allocator)
+	// Split on bare LF so BOTH CRLF and LF-only requests parse (trim_space below
+	// strips any trailing \r). Bitcoin Core is lenient here; electrs sends LF-only.
+	lines := strings.split(headers, "\n", context.temp_allocator)
 	for line in lines {
 		lower := strings.to_lower(line, context.temp_allocator)
 		if strings.has_prefix(lower, "content-length:") {
@@ -416,7 +430,9 @@ _parse_content_length :: proc(headers: string) -> int {
 
 // Extract Authorization header value from HTTP headers.
 _parse_authorization :: proc(headers: string) -> string {
-	lines := strings.split(headers, "\r\n", context.temp_allocator)
+	// Split on bare LF so BOTH CRLF and LF-only requests parse (trim_space below
+	// strips any trailing \r). Bitcoin Core is lenient here; electrs sends LF-only.
+	lines := strings.split(headers, "\n", context.temp_allocator)
 	for line in lines {
 		lower := strings.to_lower(line, context.temp_allocator)
 		if strings.has_prefix(lower, "authorization:") {
@@ -453,7 +469,7 @@ _check_auth :: proc(srv: ^RPC_Server, auth_header: string) -> bool {
 
 // Send an HTTP 401 Unauthorized response.
 _send_http_401 :: proc(socket: tcp.TCP_Socket) {
-	body := `{"result":null,"error":{"code":-32600,"message":"Unauthorized"},"id":null}`
+	body := "{\"result\":null,\"error\":{\"code\":-32600,\"message\":\"Unauthorized\"},\"id\":null}\n"
 	header := fmt.tprintf(
 		"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"jsonrpc\"\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
 		len(body))
@@ -463,13 +479,22 @@ _send_http_401 :: proc(socket: tcp.TCP_Socket) {
 
 // Send an HTTP 200 response with JSON body. Connection stays open
 // (keep-alive) — the per-connection loop serves the next request.
+//
+// The body gets a trailing '\n', and Content-Length counts it, matching Bitcoin
+// Core exactly. Some clients (Blockstream/electrs) read the JSON-RPC response as
+// a newline-terminated line and assume Content-Length includes that '\n'
+// (expected_length = content_length - 1). Without the newline their line-reader
+// blocks forever waiting for it — the node appears to hang mid-response.
 _send_http_response :: proc(socket: tcp.TCP_Socket, body: []byte, want_close := false) -> bool {
 	conn := want_close ? "close" : "keep-alive"
-	header := fmt.tprintf("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: %s\r\n\r\n", len(body), conn)
+	header := fmt.tprintf("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: %s\r\n\r\n", len(body) + 1, conn)
 	if _, err := tcp.send_tcp(socket, transmute([]byte)header); err != nil {
 		return false
 	}
 	if _, err := tcp.send_tcp(socket, body); err != nil {
+		return false
+	}
+	if _, err := tcp.send_tcp(socket, []byte{'\n'}); err != nil {
 		return false
 	}
 	return true
