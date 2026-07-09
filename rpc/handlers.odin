@@ -223,6 +223,7 @@ _handle_getblock :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 	obj["nonce"] = json.Value(json.Integer(i64(entry.nonce)))
 	obj["bits"] = json.Value(json.String(fmt.tprintf("%08x", entry.bits)))
 	obj["difficulty"] = json.Value(json.Float(consensus.get_difficulty(entry.bits)))
+	obj["chainwork"] = json.Value(json.String(_bytes_to_hex(entry.chain_work[:])))
 	obj["nTx"] = json.Value(json.Integer(len(block.txs)))
 
 	// Previous block hash
@@ -403,11 +404,18 @@ _handle_sendrawtransaction :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_
 _handle_getmempoolinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 	count := mempool.mempool_count(srv.mp)
 
-	obj := make(json.Object, 12, context.temp_allocator)
+	// Sum of base fees of all mempool txs (BTC) — Core's total_fee.
+	total_fee: i64 = 0
+	for _, e in srv.mp.entries {
+		total_fee += e.fee
+	}
+
+	obj := make(json.Object, 13, context.temp_allocator)
 	obj["loaded"] = json.Value(json.Boolean(true))
 	obj["size"] = json.Value(json.Integer(count))
 	obj["bytes"] = json.Value(json.Integer(srv.mp.usage))
 	obj["usage"] = json.Value(json.Integer(srv.mp.usage))
+	obj["total_fee"] = json.Value(json.Float(_satoshi_to_btc(total_fee)))
 	obj["maxmempool"] = json.Value(json.Integer(srv.mp.config.max_mempool_mb * 1_000_000))
 	obj["mempoolminfee"] = json.Value(json.Float(_satoshi_to_btc(srv.mp.min_fee)))
 	obj["minrelaytxfee"] = json.Value(json.Float(_satoshi_to_btc(srv.mp.config.min_relay_tx_fee)))
@@ -982,6 +990,10 @@ _get_block_stripped_size :: proc(block: ^wire.Block) -> int {
 
 _tx_to_json :: proc(tx: ^wire.Tx, entry: ^mempool.Mempool_Entry, params: ^consensus.Chain_Params) -> json.Object {
 	obj := _decode_tx_to_json(tx, params)
+	// getrawtransaction (verbose) includes the raw hex; decoderawtransaction does not.
+	w := wire.writer_init(context.temp_allocator)
+	wire.serialize_tx(&w, tx)
+	obj["hex"] = json.Value(json.String(_bytes_to_hex(wire.writer_bytes(&w))))
 	if entry != nil {
 		obj["vsize"] = json.Value(json.Integer(entry.vsize))
 	}
