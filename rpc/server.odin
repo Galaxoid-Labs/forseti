@@ -638,6 +638,8 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_getdeploymentinfo(srv, req.params)
 	case "getblockfrompeer":
 		return _handle_getblockfrompeer(srv, req.params)
+	case "scanblocks":
+		return _handle_scanblocks(srv, req.params)
 	case "waitfornewblock":
 		return _handle_waitfornewblock(srv, req.params)
 	case "waitforblock":

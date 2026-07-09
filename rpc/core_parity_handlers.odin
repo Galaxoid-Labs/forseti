@@ -1,14 +1,141 @@
 package rpc
 
 import "core:encoding/json"
+import "core:fmt"
 import "core:sync"
 import "core:time"
 
 import "../chain"
+import crypto "../crypto"
+import "../descriptor"
 import "../p2p"
+import "../storage"
 import "../wire"
 
 // Additional Bitcoin Core v30 non-wallet RPCs.
+
+// _expand_scan_objects turns a scanobjects array (descriptors or {desc,range})
+// into the set of scriptPubKeys they cover — shared by scanblocks and
+// getdescriptoractivity. Mirrors scantxoutset's expansion.
+_expand_scan_objects :: proc(srv: ^RPC_Server, objs: json.Array) -> (scripts: [dynamic][]byte, resp: RPC_Response, ok: bool) {
+	net := _desc_net(srv)
+	scripts = make([dynamic][]byte, 0, 64, context.temp_allocator)
+	for so in objs {
+		desc_str: string
+		begin, end := 0, 0
+		range_given := false
+		#partial switch v in so {
+		case json.String:
+			desc_str = string(v)
+		case json.Object:
+			ds, ds_ok := v["desc"].(json.String)
+			if !ds_ok {
+				return nil, _make_error(.Invalid_Params, "Scan object missing desc", srv._current_id), false
+			}
+			desc_str = string(ds)
+			if rv, has_rv := v["range"]; has_rv {
+				b, e, r_ok := _parse_range(rv)
+				if !r_ok {
+					return nil, _make_error(.Invalid_Params, "Invalid range", srv._current_id), false
+				}
+				begin, end = b, e
+				range_given = true
+			}
+		case:
+			return nil, _make_error(.Invalid_Params, "Invalid scan object", srv._current_id), false
+		}
+
+		d, derr := descriptor.parse(desc_str, net, context.temp_allocator)
+		if derr != "" {
+			return nil, _make_error(.Invalid_Params, fmt.tprintf("%s: %s", desc_str, derr), srv._current_id), false
+		}
+		if d.is_range && !range_given {
+			end = SCAN_DEFAULT_RANGE
+		}
+		if !d.is_range {
+			begin, end = 0, 0
+		}
+		if end - begin + 1 > 100_000 {
+			return nil, _make_error(.Invalid_Params, "Range too large", srv._current_id), false
+		}
+		for i in begin ..= end {
+			spk, s_ok := descriptor.script_pubkey(&d, i, context.temp_allocator)
+			if s_ok {
+				append(&scripts, spk)
+			}
+		}
+	}
+	return scripts, {}, true
+}
+
+// --- scanblocks ---
+
+_handle_scanblocks :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	if srv.chain.filter_db == nil {
+		return _make_error(.Misc_Error, "Index is not enabled for filtertype basic (start with --blockfilterindex)", srv._current_id)
+	}
+	action, ok := _get_string_param(params, 0)
+	if !ok {
+		return _make_error(.Invalid_Params, "Missing action parameter", srv._current_id)
+	}
+	switch action {
+	case "status", "abort":
+		// Scans here are synchronous — there is never an in-progress scan.
+		return _make_result(json.Value(json.Boolean(false)), srv._current_id)
+	case "start":
+	case:
+		return _make_error(.Invalid_Params, "Invalid action", srv._current_id)
+	}
+
+	objs, objs_ok := _get_array_param(params, 1)
+	if !objs_ok || len(objs) == 0 {
+		return _make_error(.Invalid_Params, "scanobjects argument is required", srv._current_id)
+	}
+	scripts, resp, sc_ok := _expand_scan_objects(srv, objs)
+	if !sc_ok {
+		return resp
+	}
+
+	tip_height := chain.chain_height(srv.chain)
+	start_height := 0
+	stop_height := tip_height
+	if s, s_ok := _get_int_param(params, 2); s_ok {
+		start_height = s
+	}
+	if s, s_ok := _get_int_param(params, 3); s_ok {
+		stop_height = s
+	}
+	if ft, ft_ok := _get_string_param(params, 4); ft_ok && ft != "basic" {
+		return _make_error(.Invalid_Params, fmt.tprintf("Unknown filtertype %s", ft), srv._current_id)
+	}
+	if start_height < 0 {
+		start_height = 0
+	}
+	if stop_height > tip_height {
+		stop_height = tip_height
+	}
+
+	relevant := make(json.Array, 0, context.temp_allocator)
+	for h in start_height ..= stop_height {
+		if h < 0 || h >= len(srv.chain.active_chain) {
+			continue
+		}
+		block_hash := srv.chain.active_chain[h]
+		filter_data, found := storage.filter_db_get_filter(srv.chain.filter_db, block_hash, context.temp_allocator)
+		if !found {
+			continue
+		}
+		if crypto.gcs_match_any(block_hash, filter_data, scripts[:]) {
+			append(&relevant, json.Value(json.String(_hash_to_hex(block_hash))))
+		}
+	}
+
+	obj := make(json.Object, 3, context.temp_allocator)
+	obj["from_height"] = json.Value(json.Integer(i64(start_height)))
+	obj["to_height"] = json.Value(json.Integer(i64(stop_height)))
+	obj["relevant_blocks"] = json.Value(relevant)
+	return _make_result(json.Value(obj), srv._current_id)
+}
 
 // --- waitfornewblock / waitforblock / waitforblockheight ---
 

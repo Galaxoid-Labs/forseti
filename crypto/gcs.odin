@@ -53,31 +53,59 @@ gcs_build_filter :: proc(block_hash: Hash256, elements: [][]byte, allocator := c
 
 // Check if any of the given elements match the filter.
 // Returns true if at least one element is likely in the set (with false positive rate 1/M).
+//
+// N (the element count that fixes F = N*M) is not stored alongside our filters,
+// but Golomb-Rice codes are self-delimiting: we decode deltas until the bit
+// stream is exhausted (byte-alignment padding is < one full code wide, so it
+// can never form a spurious extra element), which recovers both N and the full
+// sorted value set in one pass. Then we hash the queries into [0, N*M) and
+// merge-intersect.
 gcs_match_any :: proc(block_hash: Hash256, filter_data: []byte, elements: [][]byte) -> bool {
-	n_elements := u64(len(elements))
-	if n_elements == 0 || len(filter_data) == 0 {
+	if len(elements) == 0 || len(filter_data) == 0 {
 		return false
 	}
 
 	k0, k1 := gcs_filter_sipkeys(block_hash)
 
-	// We need to know N (number of items in the filter) to compute F.
-	// BIP158: N is encoded externally (in the cfilter message or known from block).
-	// For match_any, the caller doesn't know N. We use the standard approach:
-	// decode all values from the filter and check membership.
-	// But we need N to know F for the hash computation.
-	// Actually, BIP158 specifies N as a CompactSize prefix of the filter content
-	// when transmitted. But gcs_build_filter doesn't include it.
-	// For our use case, we'll accept N as implicit from the filter.
-	// The standard approach: hash query elements with F = N_query * M, then
-	// use a merge-intersect with the decoded filter deltas.
+	// Pass 1: decode every absolute value (recovers N).
+	values := make([dynamic]u64, 0, 64, context.temp_allocator)
+	br: Bit_Reader
+	_bit_reader_init(&br, filter_data)
+	acc: u64 = 0
+	for {
+		delta, ok := _golomb_rice_decode(&br, GCS_P)
+		if !ok {
+			break // end of stream (or trailing byte-alignment padding)
+		}
+		acc += delta
+		append(&values, acc)
+	}
+	n := u64(len(values))
+	if n == 0 {
+		return false
+	}
+	f := n * GCS_M
 
-	// Actually, the correct approach per BIP158: the filter is built with N = number
-	// of elements that went into it, and F = N * M. To match, we need to know N.
-	// We'll use gcs_match_any_n which takes N explicitly.
+	// Hash query elements into [0, F) and sort.
+	query := make([]u64, len(elements), context.temp_allocator)
+	for i in 0 ..< len(elements) {
+		query[i] = _fast_reduce(siphash_2_4(k0, k1, elements[i]), f)
+	}
+	slice.sort(query)
 
-	// We can't determine N from filter bytes alone without the count.
-	// Return false for safety — callers should use gcs_match_any_n.
+	// Merge-intersect the (ascending) filter values with the sorted queries.
+	qi := 0
+	for v in values {
+		for qi < len(query) && query[qi] < v {
+			qi += 1
+		}
+		if qi >= len(query) {
+			return false
+		}
+		if query[qi] == v {
+			return true
+		}
+	}
 	return false
 }
 

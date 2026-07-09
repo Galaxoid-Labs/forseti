@@ -640,16 +640,19 @@ test_gcs_match_any :: proc(t: ^testing.T) {
 	filter := gcs_build_filter(block_hash, elements[:], context.temp_allocator)
 	testing.expect(t, filter != nil, "filter should not be nil")
 
-	// All original elements should match.
+	// All original elements should match — via both the explicit-N form and
+	// gcs_match_any, which recovers N from the self-delimiting filter itself.
 	for i in 0 ..< 3 {
 		query := [1][]byte{elements[i]}
 		testing.expect(t, gcs_match_any_n(block_hash, filter, 3, query[:]), "original element should match")
+		testing.expect(t, gcs_match_any(block_hash, filter, query[:]), "original element should match (no-N form)")
 	}
 
-	// An element not in the set should not match.
+	// An element not in the set should not match (either form).
 	fake := []byte{0xff, 0xfe, 0xfd}
 	fake_q := [1][]byte{fake}
 	testing.expect(t, !gcs_match_any_n(block_hash, filter, 3, fake_q[:]), "non-member should not match")
+	testing.expect(t, !gcs_match_any(block_hash, filter, fake_q[:]), "non-member should not match (no-N form)")
 }
 
 @(test)
