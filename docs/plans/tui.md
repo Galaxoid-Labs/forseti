@@ -1,17 +1,17 @@
-# TUI Plan for bitcoin-node-odin
+# TUI Plan for forseti
 
 > **STATUS: DASHBOARD + WIZARD SHIPPED** — `tui/` renders Node_Status over
-> ncurses (`--tui`, plus `btcnode-gui --tui` remotely), and `btcnode --wizard`
+> ncurses (`--tui`, plus `forseti-gui --tui` remotely), and `forseti --wizard`
 > runs the interactive first-run setup (tui/wizard.odin: menu + text-field
-> widgets, 7 screens, RAM-aware dbcache, writes btcnode.conf).
+> widgets, 7 screens, RAM-aware dbcache, writes forseti.conf).
 
 ## Goal
 
 A terminal dashboard rendering the same `Node_Status` snapshot as the GUI —
 usable where the GUI can't go: SSH sessions on headless servers, no display,
 no tunnel gymnastics. Later, the same ncurses foundation powers a first-run
-**setup wizard** (`btcnode --wizard` or auto on missing config) that writes
-`btcnode.conf` interactively.
+**setup wizard** (`forseti --wizard` or auto on missing config) that writes
+`forseti.conf` interactively.
 
 ## Why ncurses (vs raw ANSI)
 
@@ -28,11 +28,11 @@ ncurses/   — curated FFI bindings (package ncurses)
 tui/       — dashboard renderer over p2p.Node_Status (mirrors gui/ panels)
 ```
 
-- **In-process**: `./btcnode --tui` — main thread runs the curses loop where
+- **In-process**: `./forseti --tui` — main thread runs the curses loop where
   `--gui` would run raylib (mutually exclusive flags). Same Status_Fetch
   source, same 1 Hz data cadence. `q` quits = graceful shutdown (same as
   closing the GUI window).
-- **Remote**: `btcnode-gui --tui --connect=...` — the existing RPC-polling
+- **Remote**: `forseti-gui --tui --connect=...` — the existing RPC-polling
   client grows a terminal renderer. SSH straight into the server and run it
   there against localhost; no tunnel needed.
 - The `gui.Status_Fetch` seam is reused as-is; the TUI takes the same
@@ -54,14 +54,14 @@ dependency surface than libform.
 ## Dashboard layout (mirrors the GUI)
 
 ```
-┌ bitcoin-node-odin ── mainnet ── In Sync ─────────────────────────────┐
+┌ forseti ── mainnet ── In Sync ─────────────────────────────┐
 │ Height 956,945 / 956,945   ██████████████████████ 100.0%   ETA —     │
 │ Peers (8)  ID DIR ADDRESS AGENT HEIGHT BLKS LAST SENT RECV           │
 │ ...                                                                  │
 │ Net  in ▁▂▅▇█▆▃▂▁ 22.5M/s   out ▁▁▁▁ 4K/s        (sparklines)        │
 │ Mempool 5,258 tx / 2.2 MvB   UTXO 43.0M / 8.2G eff 16.4G  Flush: —   │
 │ Profile 9.7ms/blk  read 24% prefetch 22% utxo 75% scripts 0%         │
-└ :8332 │ dbcache 16384 │ prune 2000 │ disk 103G │ ~/btcnode-mainnet ──┘
+└ :8332 │ dbcache 16384 │ prune 2000 │ disk 103G │ ~/forseti-mainnet ──┘
 ```
 
 Network history renders as block-character sparklines (▁▂▃▄▅▆▇█) from the
@@ -74,9 +74,9 @@ the profile row; resize handled per frame.
 
 ## Wizard (phase 2, separate effort)
 
-`--wizard` (and auto-prompt when no btcnode.conf exists AND stdin is a TTY):
+`--wizard` (and auto-prompt when no forseti.conf exists AND stdin is a TTY):
 network picker, datadir, dbcache slider (with RAM detection), prune target,
-RPC credentials or cookie, v2transport/GUI defaults — writes btcnode.conf
+RPC credentials or cookie, v2transport/GUI defaults — writes forseti.conf
 and offers to start syncing immediately. Runs on the same bindings + a small
 hand-rolled field/focus widget layer.
 

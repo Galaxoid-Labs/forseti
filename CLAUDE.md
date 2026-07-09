@@ -1,13 +1,13 @@
-# Bitcoin Node Odin - Project Instructions
+# Forseti - Project Instructions
 
 ## Build & Test
 
 ```bash
 make              # Build deps + binary
 make test         # Run all tests (12 packages, ~364)
-make gui          # Build standalone remote dashboard (btcnode-gui)
+make gui          # Build standalone remote dashboard (forseti-gui)
 make debug        # Build with debug symbols
-odin build . -out:btcnode   # Build binary only
+odin build . -out:forseti   # Build binary only
 odin test <pkg>   # Test single package (crypto, wire, script, consensus, storage, chain, p2p, mempool, rpc, zmq, drivechain)
 ```
 
@@ -16,17 +16,17 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 ## Running
 
 ```bash
-./btcnode --network=signet --datadir=/tmp/btcnode-signet   # Sync signet
-./btcnode --network=regtest --no-p2p                       # RPC-only regtest
-./btcnode --rpcuser=user --rpcpassword=pass                # Explicit RPC auth
-./btcnode --server=0                                       # Disable RPC server
-./btcnode --help                                           # All options
-./btcnode --gui                                            # In-process dashboard window
-./btcnode --daemon                                         # Fork/detach, log to <datadir>/debug.log (like bitcoind -daemon)
-./btcnode --wizard                                         # menuconfig-style first-run setup, writes btcnode.conf
-./btcnode --prune=2000                                     # Prune old block files to ~2GB
-./btcnode --drivechain=track                               # BIP300/301 observation mode (enforce = reject violations)
-./btcnode-gui --connect=127.0.0.1:8332 --cookie=<datadir>/.cookie  # Remote dashboard (make gui)
+./forseti --network=signet --datadir=/tmp/forseti-signet   # Sync signet
+./forseti --network=regtest --no-p2p                       # RPC-only regtest
+./forseti --rpcuser=user --rpcpassword=pass                # Explicit RPC auth
+./forseti --server=0                                       # Disable RPC server
+./forseti --help                                           # All options
+./forseti --gui                                            # In-process dashboard window
+./forseti --daemon                                         # Fork/detach, log to <datadir>/debug.log (like bitcoind -daemon)
+./forseti --wizard                                         # menuconfig-style first-run setup, writes forseti.conf
+./forseti --prune=2000                                     # Prune old block files to ~2GB
+./forseti --drivechain=track                               # BIP300/301 observation mode (enforce = reject violations)
+./forseti-gui --connect=127.0.0.1:8332 --cookie=<datadir>/.cookie  # Remote dashboard (make gui)
 ```
 
 ## Project Structure
@@ -44,9 +44,9 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 - `drivechain/` — BIP300/301: M1-M6 + BMM message codecs, D1/D2 state machine (apply/undo snapshots), enforce-mode validation (CTIP tracking, blinded m6id per CUSF enforcer), persistence codec (4 files + tests)
 - `zmq/` — native ZMTP 3.0 PUB sockets (no libzmq): Core zmqpub* parity (hashblock/hashtx/rawblock/rawtx/sequence), verified against real libzmq
 - `gui/` — raylib/raygui dashboard (in-process --gui and remote rendering; Cascadia Code embedded via #load)
-- `guiapp/` — standalone `btcnode-gui` binary: polls getnodestatus RPC, renders the gui package remotely (--probe for one-shot CLI check, --tui for terminal rendering)
+- `guiapp/` — standalone `forseti-gui` binary: polls getnodestatus RPC, renders the gui package remotely (--probe for one-shot CLI check, --tui for terminal rendering)
 - `ncurses/` — minimal libncurses FFI bindings (system lib, secp256k1-binding style)
-- `tui/` — terminal dashboard over Node_Status (`--tui`, SSH-friendly; ASCII-safe glyphs — non-wide system curses garbles multibyte) + first-run setup wizard (`--wizard`, tui/wizard.odin): menuconfig/lxdialog-styled ncurses flow (network/datadir/prune/dbcache/rpc-auth + Advanced toggles) that writes `<datadir>/btcnode.conf` then prints a cheat sheet of ALL start modes (foreground/--gui/--tui/--daemon) + remote btcnode-gui connect commands (auth + port filled in) — run mode is a launch flag, not baked into config; runs before any node init, TTY-only
+- `tui/` — terminal dashboard over Node_Status (`--tui`, SSH-friendly; ASCII-safe glyphs — non-wide system curses garbles multibyte) + first-run setup wizard (`--wizard`, tui/wizard.odin): menuconfig/lxdialog-styled ncurses flow (network/datadir/prune/dbcache/rpc-auth + Advanced toggles) that writes `<datadir>/forseti.conf` then prints a cheat sheet of ALL start modes (foreground/--gui/--tui/--daemon) + remote forseti-gui connect commands (auth + port filled in) — run mode is a launch flag, not baked into config; runs before any node init, TTY-only
 - `deps/` — libsecp256k1 (submodule), ripemd160 (vendored C), leveldb (vendored C++), sha256 (vendored from Bitcoin Core, multi-backend), static libs in deps/lib/
 
 ## Key Architecture
@@ -60,17 +60,17 @@ Note: Script tests have a known flaky secp256k1 thread-safety issue with paralle
 - **Assumevalid**: Skip script verification below hardcoded heights, matched to Bitcoin Core v30.x defaultAssumeValid (mainnet=938343, testnet3=4842348, testnet4=123613, signet=293175). Height-based (Core is hash-based; equivalent on the honest chain — hashes noted in consensus/params.odin). `--assumevalid=<height>` CLI flag (0=disable).
 - **Pruning**: `--prune=<MB>` (min 550) deletes whole blk/rev files whose every block is below min(tip−288, last_flushed_height), oldest-first until under target, after each UTXO flush + once at startup. Index status (Has_Data/Has_Undo) batch-persisted BEFORE file deletion. Download queue must never include connected blocks (Valid_Chain) — pruned blocks lack Has_Data. Pruned nodes advertise NODE_NETWORK_LIMITED without NODE_NETWORK.
 - **Sync progress/ETA**: measured in transactions (Core chainTxData style): Chain_Params carries an anchor (assumed_chain_tx/time/rate, mainnet anchored at block 956,927); verification_progress = tip chain_tx / extrapolated total; ETA from a 2-min throughput ring in the status tick.
-- **Node status / GUI**: P2P thread publishes a Node_Status snapshot (1 Hz, mutex) — read by the in-process `--gui` dashboard and served by the `getnodestatus` RPC for the standalone `btcnode-gui` remote client (guiapp/). Closing the in-process window = graceful shutdown; the remote client is a pure viewer.
+- **Node status / GUI**: P2P thread publishes a Node_Status snapshot (1 Hz, mutex) — read by the in-process `--gui` dashboard and served by the `getnodestatus` RPC for the standalone `forseti-gui` remote client (guiapp/). Closing the in-process window = graceful shutdown; the remote client is a pure viewer.
 - **Txid optimization**: `deserialize_block_with_txids` computes txids from raw bytes during deserialization — non-witness: `sha256d(raw)`, witness: `sha256d_multi(version, body, locktime)`. Pre-computed txids passed through `connect_block` → `check_block`.
 - **Outbound topology (p2p/topology.odin)**: 8 full-relay + 2 block-relay-only (fRelay=0, no tx/addr relay, skip feefilter/getaddr) + periodic feelers (probe-then-drop). anchors.dat persists block-relay peers on shutdown, redialed first at startup (deleted on read — crash loop can't re-pin). --maxuploadtarget MiB/day gates historical (>1wk) block serving to inbound once the rolling 24h budget is spent. getpeerinfo connection_type. Connection_Type enum on Peer; _count_outbound_peers counts Full_Relay+Manual only. GUARD: peer_start_connect dedups against already-connected addresses (addr manager returns randoms, multiple dial paths per tick) EXCEPT Manual. Bug fixed: getpeerinfo had a SECOND connection_type assignment hardcoding inbound/full-relay that overwrote the real conn_type.
 - **Inbound connections**: TCP listener via `nbio.listen_tcp` + `nbio.accept_poly`. `--maxconnections=125` (default), `--listen=0|1`. Budget: 8 outbound + max(N-9,0) inbound. V2 responder mode with V1 fallback. 60s handshake timeout.
 - **Thread model**: Main (setup+wait), RPC thread, P2P thread (`core:nbio` event loop — no per-peer threads), N script verification worker threads (`--par`).
 - **Logging / daemon**: default logs to the console. `--tui` and `--daemon` route ALL logging to `<datadir>/debug.log` by **dup2'ing the stdout+stderr fds onto the file at the OS level** (`_redirect_stdio_to_log`) and keeping plain **console** loggers everywhere. Do NOT use `log.create_file_logger` for this: os2's file-logger write path (`fmt.fprintf`→`os.to_stream`) SILENTLY DROPS writes from worker threads (the P2P thread) — only the main thread's file logger worked. `os.stdout` writes reliably from all threads, so console-logger + fd-redirect is the robust path (also how bitcoind does it). `_make_logger(level)` RETURNS a logger the caller assigns to `context.logger` (Odin `context` has per-scope value semantics — a helper setting it internally loses the change on return); each thread (main, node, rpc, p2p conn_manager_run) assigns its own. `--tui` renders via ncurses `newterm("/dev/tty")` (tui/tui.odin) so the dashboard shows on the terminal while stdout→debug.log. `--daemon` forks BEFORE the lock/threads, parent prints PID + exits, child setsid + stdin→/dev/null + stdout/stderr→debug.log; mutually exclusive with --gui/--tui.
-- **Node status snapshot**: `cm.status_enabled` must be TRUE always (main.odin) — the 1 Hz `_update_node_status` tick feeds BOTH the in-process GUI/TUI and the `getnodestatus` RPC that remote dashboards (btcnode-gui, `--tui` over RPC) poll. It was historically gated on `cfg.gui`, leaving headless/daemon nodes reporting an all-zero status (uptime=0, no peers) to remote viewers.
+- **Node status snapshot**: `cm.status_enabled` must be TRUE always (main.odin) — the 1 Hz `_update_node_status` tick feeds BOTH the in-process GUI/TUI and the `getnodestatus` RPC that remote dashboards (forseti-gui, `--tui` over RPC) poll. It was historically gated on `cfg.gui`, leaving headless/daemon nodes reporting an all-zero status (uptime=0, no peers) to remote viewers.
 - **RBF (BIP125)**: Full replace-by-fee with fullrbf=true default. `--mempoolfullrbf=0|1` CLI flag. Bandwidth fee uses configurable `--incrementalrelayfee`.
 - **Mempool config**: `Mempool_Config` struct with 16 settings (Bitcoin Core parity). Memory-based size limiting (usage tracking, fee-based eviction, dynamic min_fee). Tx expiry (`--mempoolexpiry`). Ancestor/descendant chain limits (`--limitancestorcount/size`, `--limitdescendantcount/size`). Blocks-only mode (`--blocksonly`). Configurable relay/dust/incremental fees. 15 CLI flags + config file support.
 - **Difficulty validation**: Header nBits verified against `get_next_work_required` (Bitcoin Core's GetNextWorkRequired). Testnet 20-minute minimum difficulty rule (`allow_min_difficulty`). BIP94 testnet4 retarget fix (`enforce_bip94`): uses first block of retarget period's nBits instead of parent's.
-- **RPC**: 73 methods, 69/78 Core non-wallet coverage (getnodestatus feeds the GUI/remote dashboards) including getpeerinfo (18 fields), getmininginfo, getnetworkhashps, getnettotals, validateaddress, savemempool, ping, help, getmemoryinfo, getrpcinfo, logging, createrawtransaction, combinerawtransaction, signrawtransactionwithkey, getchaintxstats, gettxoutsetinfo, getmempoolancestors, getmempooldescendants, gettxoutproof, verifytxoutproof, signmessagewithprivkey, verifymessage. HTTP Basic Auth via `--rpcuser`/`--rpcpassword` or auto-generated `.cookie` file (Bitcoin Core compatible). `--server=0` disables RPC; `--rpcbind`/`--rpcallowip` (IPv4 CIDR allowlist enforced at accept; non-loopback bind refused without allowlist; 0.0.0.0 needs bind_set flag — zero value is a valid bind) open RPC to trusted LANs. Server is thread-per-connection with HTTP keep-alive and JSON-RPC batch (array) support; estimatesmartfee runs a Core CBlockPolicyEstimator port (3 decay horizons, fee_estimates.dat persistence, mempool-floor fallback until warmed). Electrum-server compatible: electrs v0.10 runs against btcnode (RPC + inbound P2P getheaders/getdata serving). Node-control RPCs (disconnect/precious/prune/setnetworkactive) route through a mutex-guarded control queue drained by the P2P tick. generatetoaddress/generateblock mine real regtest blocks through accept_block; getblocktemplate/submitblock/submitheader serve real miners (submitblock routes through the control queue and announces to peers + ZMQ); prioritisetransaction fee deltas apply in template selection. --repairutxo sweeps stale UTXO entries from block data.
+- **RPC**: 73 methods, 69/78 Core non-wallet coverage (getnodestatus feeds the GUI/remote dashboards) including getpeerinfo (18 fields), getmininginfo, getnetworkhashps, getnettotals, validateaddress, savemempool, ping, help, getmemoryinfo, getrpcinfo, logging, createrawtransaction, combinerawtransaction, signrawtransactionwithkey, getchaintxstats, gettxoutsetinfo, getmempoolancestors, getmempooldescendants, gettxoutproof, verifytxoutproof, signmessagewithprivkey, verifymessage. HTTP Basic Auth via `--rpcuser`/`--rpcpassword` or auto-generated `.cookie` file (Bitcoin Core compatible). `--server=0` disables RPC; `--rpcbind`/`--rpcallowip` (IPv4 CIDR allowlist enforced at accept; non-loopback bind refused without allowlist; 0.0.0.0 needs bind_set flag — zero value is a valid bind) open RPC to trusted LANs. Server is thread-per-connection with HTTP keep-alive and JSON-RPC batch (array) support; estimatesmartfee runs a Core CBlockPolicyEstimator port (3 decay horizons, fee_estimates.dat persistence, mempool-floor fallback until warmed). Electrum-server compatible: electrs v0.10 runs against forseti (RPC + inbound P2P getheaders/getdata serving). Node-control RPCs (disconnect/precious/prune/setnetworkactive) route through a mutex-guarded control queue drained by the P2P tick. generatetoaddress/generateblock mine real regtest blocks through accept_block; getblocktemplate/submitblock/submitheader serve real miners (submitblock routes through the control queue and announces to peers + ZMQ); prioritisetransaction fee deltas apply in template selection. --repairutxo sweeps stale UTXO entries from block data.
 
 - **Single-instance lock**: fcntl write-lock on `<datadir>/.lock`, held for the whole process lifetime; second instance on the same datadir refuses at startup (Core parity).
 - **txindex** (`--txindex`): own LevelDB at <datadir>/txindex/, txid -> (block_hash, tx_index) + "best" marker; hooks in connect/disconnect (like filter_db); startup catch-up from best marker (walks back via coinbase probe if best left the active chain after an offline reorg); prune-incompatible (refused at startup); getrawtransaction historical path + getindexinfo. GOTCHA: tx_index_catchup free_alls the temp allocator per block — callers must not hold temp data across it.

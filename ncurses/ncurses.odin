@@ -1,4 +1,4 @@
-// Minimal ncurses bindings — curated for the btcnode TUI dashboard and the
+// Minimal ncurses bindings — curated for the forseti TUI dashboard and the
 // future setup wizard. libncurses ships with macOS and every Linux distro;
 // binding style follows crypto/secp256k1.odin. Binds stdscr plus per-panel
 // windows (newwin/box/werase/mvwaddnstr/wnoutrefresh/doupdate); panels/forms

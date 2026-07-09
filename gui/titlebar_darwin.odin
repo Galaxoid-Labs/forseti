@@ -46,7 +46,7 @@ apply_transparent_titlebar :: proc(bg: [4]u8) {
 
 // macOS-only: set the Dock (application) icon at runtime from embedded PNG
 // bytes. This works for a CLI binary launched from Terminal — no .app bundle
-// needed — so `btcnode --gui` and `btcnode-gui` both get a Dock icon without
+// needed — so `forseti --gui` and `forseti-gui` both get a Dock icon without
 // packaging. NSImage.initWithData: and NSApplication.setApplicationIconImage:
 // aren't wrapped in core:sys/darwin/Foundation, so call them via the objc
 // runtime directly (intrinsics.objc_send == the bindings' private msgSend).

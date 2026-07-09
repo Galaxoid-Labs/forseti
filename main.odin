@@ -24,7 +24,7 @@ import "rpc"
 import "storage"
 import "wire"
 
-DEFAULT_DATA_DIR :: "/tmp/btcnode-data"
+DEFAULT_DATA_DIR :: "/tmp/forseti-data"
 
 // Global pointers for signal handler (C-calling-convention, no closures).
 _g_rpc_server: ^rpc.RPC_Server
@@ -89,7 +89,7 @@ Filter_Index_Flag :: distinct bool
 // help text, so parse behavior and documentation cannot drift apart.
 CLI_Config :: struct {
 	network:  string `args:"name=network" usage:"Network: mainnet, testnet3, testnet4, signet, regtest (default: regtest)."`,
-	data_dir: string `args:"name=datadir" usage:"Data directory (default: /tmp/btcnode-data)."`,
+	data_dir: string `args:"name=datadir" usage:"Data directory (default: /tmp/forseti-data)."`,
 
 	// RPC
 	rpc_port:     int    `args:"name=rpcport" usage:"RPC port (default: network-appropriate)."`,
@@ -146,7 +146,7 @@ CLI_Config :: struct {
 	drivechain: string `args:"name=drivechain" usage:"BIP 300/301: off (default), track, or enforce.\ntrack: parse M1-M6/BMM messages and maintain the sidechain + withdrawal\ndatabases without rejecting anything (zero risk).\nenforce: additionally reject blocks violating BIP300/301 rules.\nWARNING: enforce is a CUSF-style voluntary soft fork — while the rest of\nthe network does not enforce these rules, a violating block would be\nrejected by this node but accepted by everyone else, forking this node\noff the network."`,
 
 	// Maintenance / UI
-	wizard:      bool `args:"name=wizard" usage:"Interactive first-run setup: write a btcnode.conf, then exit."`,
+	wizard:      bool `args:"name=wizard" usage:"Interactive first-run setup: write a forseti.conf, then exit."`,
 	repair_utxo: bool `args:"name=repairutxo" usage:"Sweep stale UTXO entries from local block data, then exit."`,
 	check_utxo:  bool `args:"name=checkutxo" usage:"Verify UTXO-set integrity (supply cap + rolling-stats reconciliation) at the current tip, then exit."`,
 	gui:         bool `args:"name=gui" usage:"Show GUI dashboard window (default: headless)."`,
@@ -682,7 +682,7 @@ main :: proc() {
 
 
 	// Load config file (CLI flags take precedence).
-	_load_config_file(fmt.tprintf("%s/btcnode.conf", cfg.data_dir), &cfg, cli_seen)
+	_load_config_file(fmt.tprintf("%s/forseti.conf", cfg.data_dir), &cfg, cli_seen)
 
 	if cfg.gui && cfg.tui {
 		fmt.eprintln("Error: --gui and --tui are mutually exclusive")
@@ -714,7 +714,7 @@ main :: proc() {
 		}
 		if pid > 0 {
 			// Parent: report where the node went and exit immediately.
-			fmt.printfln("btcnode started in the background (PID %d)", pid)
+			fmt.printfln("forseti started in the background (PID %d)", pid)
 			fmt.printfln("Logging to %s/debug.log", cfg.data_dir)
 			fmt.printfln("Stop it with:  kill %d   (or the `stop` RPC)", pid)
 			os.exit(0)
@@ -761,7 +761,7 @@ main :: proc() {
 			l_len    = 0, // whole file
 		}
 		if posix.fcntl(lock_fd, .SETLK, &lk) == -1 {
-			fmt.eprintfln("Error: another btcnode instance is already running on %s (datadir is locked)", cfg.data_dir)
+			fmt.eprintfln("Error: another forseti instance is already running on %s (datadir is locked)", cfg.data_dir)
 			return
 		}
 		// Deliberately never closed/unlocked — the OS releases it at process
@@ -878,7 +878,7 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 	crypto.init_secp256k1()
 	defer crypto.destroy_secp256k1()
 
-	log.infof("bitcoin-node-odin v%s starting...", wire.NODE_VERSION)
+	log.infof("Forseti v%s starting...", wire.NODE_VERSION)
 
 	// Select network params.
 	params, default_rpc_port, params_ok := _select_params(cfg.network)
@@ -1160,7 +1160,7 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 
 			// Publish the 1 Hz status snapshot always: the in-process GUI/TUI read
 			// it, AND the getnodestatus RPC serves it to remote dashboards
-			// (btcnode-gui, --tui over RPC). Gating on cfg.gui left headless/daemon
+			// (forseti-gui, --tui over RPC). Gating on cfg.gui left headless/daemon
 			// nodes reporting an all-zero status. The map walk is cheap.
 			cm.status_enabled = true
 

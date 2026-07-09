@@ -1,4 +1,4 @@
-# Chain Reorganization Plan for bitcoin-node-odin
+# Chain Reorganization Plan for forseti
 
 > **STATUS: IMPLEMENTED** — `chain/reorg.odin` (`activate_best_chain`):
 > work-based fork choice, pre-flight data checks, newest-first disconnects

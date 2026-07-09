@@ -18,7 +18,7 @@ import "../wire"
 
 _make_test_dir :: proc(name: string) -> string {
 	rng := rand.uint64()
-	path := fmt.tprintf("/tmp/btcnode_rpc_%s_%x", name, rng)
+	path := fmt.tprintf("/tmp/forseti_rpc_%s_%x", name, rng)
 	os.make_directory(path)
 	return path
 }

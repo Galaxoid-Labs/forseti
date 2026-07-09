@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/btcnode_icon.png" width="128" alt="bitcoin-node-odin">
+  <img src="assets/forseti_icon.png" width="128" alt="forseti">
 </p>
 
-# bitcoin-node-odin
+# forseti
 
 A Bitcoin full node written from scratch in [Odin](https://odin-lang.org/) —
 consensus validation, P2P networking, mempool, storage, RPC, and dashboards,
@@ -31,9 +31,9 @@ testnet3. 364 tests across 12 packages.
 - **Drivechain (BIP300/301)** — opt-in `--drivechain=track|enforce`: sidechain
   proposal/withdrawal tracking, escrow (CTIP) validation, blind merged mining
 - **Dashboards** — instant-start GUI window (raylib), SSH-friendly TUI
-  (ncurses), and a standalone remote client (`btcnode-gui`)
+  (ncurses), and a standalone remote client (`forseti-gui`)
 - **First-run setup wizard** (`--wizard`) — a `menuconfig`-style ncurses flow
-  that writes your `btcnode.conf` and prints the exact command to start
+  that writes your `forseti.conf` and prints the exact command to start
 - **Runs headless or as a daemon** (`--daemon`) — forks, detaches, and logs to
   `<datadir>/debug.log`, like `bitcoind -daemon`
 
@@ -43,11 +43,11 @@ Prebuilt binaries (macOS arm64, Linux x64/arm64) are on the
 [releases page](../../releases). Or build from source:
 
 ```bash
-git clone --recursive https://github.com/Galaxoid-Labs/bitcoin-node-odin.git
-cd bitcoin-node-odin && make
+git clone --recursive https://github.com/Galaxoid-Labs/forseti.git
+cd forseti && make
 
-./btcnode --network=signet --datadir=~/btcnode-signet --gui   # small network, syncs fast
-./btcnode --network=mainnet --datadir=~/btcnode --dbcache=4096 --prune=2000 --gui
+./forseti --network=signet --datadir=~/forseti-signet --gui   # small network, syncs fast
+./forseti --network=mainnet --datadir=~/forseti --dbcache=4096 --prune=2000 --gui
 ```
 
 Requires the Odin compiler, LLVM 15+, and `make` — full details in
@@ -58,11 +58,11 @@ Requires the Odin compiler, LLVM 15+, and `make` — full details in
 Not sure what to configure? Run the wizard — a `menuconfig`-style ncurses flow
 that asks the handful of decisions that actually vary per user (network, data
 directory, full vs pruned, cache size, RPC auth, dashboard, plus an Advanced
-toggles screen), then creates the data directory, writes a `btcnode.conf`, and
+toggles screen), then creates the data directory, writes a `forseti.conf`, and
 prints the exact command to start:
 
 ```bash
-./btcnode --wizard
+./forseti --wizard
 ```
 
 It writes the config and exits without touching the network — everything it
@@ -70,13 +70,13 @@ doesn't ask keeps its default and can be edited in the conf afterward.
 
 ### Configuration file
 
-Instead of passing everything on the command line, drop a `btcnode.conf` in
-your data directory — the node reads `<datadir>/btcnode.conf` at startup. The
+Instead of passing everything on the command line, drop a `forseti.conf` in
+your data directory — the node reads `<datadir>/forseti.conf` at startup. The
 format is INI-style, mirroring Bitcoin Core's `bitcoin.conf` (`#` comments,
 `key=value`, optional `[network]` sections). CLI flags override the file.
 
 ```bash
-# ~/btcnode/btcnode.conf
+# ~/forseti/forseti.conf
 network=mainnet
 dbcache=1024
 prune=2000
@@ -85,15 +85,15 @@ rpcpassword=hunter2
 ```
 
 ```bash
-./btcnode --datadir=~/btcnode --gui        # everything else comes from the conf
+./forseti --datadir=~/forseti --gui        # everything else comes from the conf
 ```
 
-A fully-commented [`contrib/btcnode.conf.sample`](contrib/btcnode.conf.sample)
+A fully-commented [`contrib/forseti.conf.sample`](contrib/forseti.conf.sample)
 lists every supported key with its default. Copy it and uncomment what you
 need:
 
 ```bash
-cp contrib/btcnode.conf.sample ~/btcnode/btcnode.conf
+cp contrib/forseti.conf.sample ~/forseti/forseti.conf
 ```
 
 ## Performance

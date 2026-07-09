@@ -1,4 +1,4 @@
-# Release: build btcnode + btcnode-gui (-o:speed via the Makefile) for
+# Release: build forseti + forseti-gui (-o:speed via the Makefile) for
 # macOS arm64 and Linux x64/arm64, run the full test suite, and attach the
 # tarballs + SHA256SUMS to a GitHub Release.
 #
@@ -104,8 +104,8 @@ jobs:
 
       - name: Smoke test binaries
         run: |
-          ./btcnode --help > /dev/null
-          ./btcnode-gui --help > /dev/null
+          ./forseti --help > /dev/null
+          ./forseti-gui --help > /dev/null
           echo "smoke OK"
 
       - name: Package
@@ -114,9 +114,9 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
             VERSION="$(git rev-parse --short HEAD)"
           fi
-          NAME="btcnode-${VERSION}-${{ matrix.target }}"
+          NAME="forseti-${VERSION}-${{ matrix.target }}"
           mkdir "$NAME"
-          cp btcnode btcnode-gui README.md LICENSE "$NAME/"
+          cp forseti forseti-gui README.md LICENSE "$NAME/"
           cp -R docs "$NAME/docs"
           tar -czf "$NAME.tar.gz" "$NAME"
           ls -la "$NAME.tar.gz"
@@ -124,8 +124,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: btcnode-${{ matrix.target }}
-          path: btcnode-*.tar.gz
+          name: forseti-${{ matrix.target }}
+          path: forseti-*.tar.gz
           if-no-files-found: error
 
   release:
@@ -143,14 +143,14 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum btcnode-*.tar.gz > SHA256SUMS
+          sha256sum forseti-*.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/btcnode-*.tar.gz dist/SHA256SUMS \
+          gh release create "$GITHUB_REF_NAME" dist/forseti-*.tar.gz dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
-            --title "btcnode $GITHUB_REF_NAME" \
+            --title "forseti $GITHUB_REF_NAME" \
             --generate-notes

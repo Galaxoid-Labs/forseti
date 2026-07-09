@@ -1,6 +1,6 @@
 # Full-Validation Sync Test (`--assumevalid=0`)
 
-The strongest correctness test btcnode can run: a mainnet IBD that **executes
+The strongest correctness test forseti can run: a mainnet IBD that **executes
 the script interpreter and verifies every signature from genesis**, instead of
 trusting historical scripts. Run it on a fast box (a Grace/DGX Spark is ideal —
 fast enough to make full validation tractable).
@@ -10,7 +10,7 @@ fast enough to make full validation tractable).
 Assumevalid skips *script/signature* verification below a hardcoded height
 (mainnet 880k). Everything else — PoW, merkle roots, block/tx structure, the
 UTXO set (inputs exist, no double-spends, amounts), and all consensus rules — is
-always validated. But it means **btcnode has never script-verified most of
+always validated. But it means **forseti has never script-verified most of
 mainnet history**; only the last ~77k blocks (880k→tip) had their scripts run.
 
 `--assumevalid=0` turns full script + signature verification on for the entire
@@ -37,12 +37,12 @@ Full build details in [docs/build.md](build.md). Quick version:
 - **Prereqs:** the Odin compiler, LLVM 15+, `make`, `git`. (On Linux also the raylib X11/GL dev packages if you want `--gui`; not needed for a headless validation run.)
 - **Clone with submodules** (libsecp256k1 is a submodule):
   ```bash
-  git clone --recursive https://github.com/Galaxoid-Labs/bitcoin-node-odin.git
-  cd bitcoin-node-odin
+  git clone --recursive https://github.com/Galaxoid-Labs/forseti.git
+  cd forseti
   ```
 - **Build:**
   ```bash
-  make            # builds C deps (libsecp256k1, LevelDB, ripemd160, sha256) + btcnode
+  make            # builds C deps (libsecp256k1, LevelDB, ripemd160, sha256) + forseti
   make test       # optional sanity: 364 tests / 12 pkgs
   ```
   If C-dep link warnings appear on a fresh toolchain, see the build-notes in the repo CLAUDE.md (`rm -f deps/lib/*.a && ./deps/build.sh`).
@@ -56,7 +56,7 @@ Use a **throwaway datadir** so it never touches a real node, and a big cache
 ulimit -c unlimited                                   # arm core dumps in case it crashes
 sudo sysctl -w kernel.core_pattern=$HOME/core.%e.%p   # (Linux)
 
-./btcnode --network=mainnet \
+./forseti --network=mainnet \
   --datadir=$HOME/mainnet-fullvalidate \
   --assumevalid=0 \
   --dbcache=16384 \

@@ -178,7 +178,7 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 	state_label, state_pair := sync_state_label(st.sync_state)
 
 	// Header line (no box).
-	_put(nc.stdscr, 0, 1, fmt.tprintf("bitcoin-node-odin — %s", info.network), P_TEXT, nc.A_BOLD)
+	_put(nc.stdscr, 0, 1, fmt.tprintf("Forseti — %s", info.network), P_TEXT, nc.A_BOLD)
 	_put(nc.stdscr, 0, w - len(state_label) - 2, state_label, state_pair, nc.A_BOLD)
 	if !connected {
 		_put(nc.stdscr, 0, 26, "[ CONNECTION LOST — retrying ]", P_RED, nc.A_BOLD)

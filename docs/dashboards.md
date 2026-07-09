@@ -2,27 +2,27 @@
 
 Two ways to get the dashboard (raylib/raygui, Cascadia Code, dark theme):
 
-**In-process** — `./btcnode --gui ...` renders on the otherwise-idle main
+**In-process** — `./forseti --gui ...` renders on the otherwise-idle main
 thread. Closing the window is a graceful shutdown. Without `--gui` the node is
 fully headless (the status snapshot is still maintained for RPC).
 
-**Standalone remote client** — `make gui` builds `btcnode-gui`, which polls any
+**Standalone remote client** — `make gui` builds `forseti-gui`, which polls any
 node's `getnodestatus` RPC once a second and renders the same dashboard:
 
 ```bash
 # Local node
-./btcnode-gui --cookie=<datadir>/.cookie
+./forseti-gui --cookie=<datadir>/.cookie
 
 # Remote node (RPC binds localhost only — tunnel first)
 ssh -L 8332:localhost:8332 myserver
-./btcnode-gui --connect=127.0.0.1:8332 --rpcuser=user --rpcpassword=pass
+./forseti-gui --connect=127.0.0.1:8332 --rpcuser=user --rpcpassword=pass
 
 # One-shot health check, no window
-./btcnode-gui --probe --cookie=<datadir>/.cookie
+./forseti-gui --probe --cookie=<datadir>/.cookie
 
 # Terminal dashboard (SSH-friendly, no window server needed; q quits)
-./btcnode --tui ...                       # in-process
-./btcnode-gui --tui --cookie=...          # remote, e.g. inside an SSH session
+./forseti --tui ...                       # in-process
+./forseti-gui --tui --cookie=...          # remote, e.g. inside an SSH session
 ```
 
 The client shows a "connection lost" banner and retries when the node goes

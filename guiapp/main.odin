@@ -1,11 +1,11 @@
-// btcnode-gui: standalone dashboard for a (possibly remote) btcnode.
+// forseti-gui: standalone dashboard for a (possibly remote) forseti.
 //
 // Polls the node's getnodestatus RPC once a second over HTTP JSON-RPC and
 // renders the same dashboard the in-process --gui shows. The node's RPC binds
 // localhost only — reach a remote node with an SSH tunnel:
 //
 //   ssh -L 8332:localhost:8332 myserver
-//   btcnode-gui --connect=127.0.0.1:8332 --cookie=~/btcnode-mainnet/.cookie
+//   forseti-gui --connect=127.0.0.1:8332 --cookie=~/forseti-mainnet/.cookie
 //
 // Auth: --rpcuser/--rpcpassword, or --cookie=<path to .cookie file>.
 package main
@@ -49,7 +49,7 @@ main :: proc() {
 		} else if arg == "--tui" {
 			use_tui = true
 		} else if arg == "--help" || arg == "-h" {
-			fmt.println("btcnode-gui — remote dashboard for btcnode")
+			fmt.println("forseti-gui — remote dashboard for Forseti")
 			fmt.println("  --connect=<ip:port>    Node RPC address (default: 127.0.0.1:8332)")
 			fmt.println("  --rpcuser=<u> --rpcpassword=<p>   RPC credentials")
 			fmt.println("  --cookie=<path>        Read credentials from a .cookie file")
@@ -124,7 +124,7 @@ main :: proc() {
 		tui.run_with_source(tinfo, fetch, &client)
 		return
 	}
-	title := fmt.ctprintf("btcnode-gui — %s", address)
+	title := fmt.ctprintf("forseti-gui — %s", address)
 	gui.run_with_source(title, client.info, fetch, &client)
 }
 
@@ -136,7 +136,7 @@ _fetch_status :: proc(c: ^Client) -> (st: p2p.Node_Status, ok: bool) {
 
 	body :: `{"jsonrpc":"1.0","id":"gui","method":"getnodestatus","params":[]}`
 	req := fmt.tprintf(
-		"POST / HTTP/1.1\r\nHost: btcnode\r\nAuthorization: Basic %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		"POST / HTTP/1.1\r\nHost: forseti\r\nAuthorization: Basic %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 		c.auth_b64, len(body), body)
 
 	sent := 0
@@ -147,7 +147,7 @@ _fetch_status :: proc(c: ^Client) -> (st: p2p.Node_Status, ok: bool) {
 		sent += n
 	}
 
-	// Read by Content-Length — a keep-alive server (btcnode is one now)
+	// Read by Content-Length — a keep-alive server (forseti is one now)
 	// never closes the socket, so reading until EOF hangs forever.
 	resp := make([dynamic]byte, 0, 8192, context.temp_allocator)
 	buf: [8192]byte

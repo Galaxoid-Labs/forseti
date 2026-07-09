@@ -131,7 +131,7 @@ test_estimator_failures_matter :: proc(t: ^testing.T) {
 
 @(test)
 test_estimator_persistence_roundtrip :: proc(t: ^testing.T) {
-	dir := fmt.tprintf("/tmp/btcnode_feeest_%x", rand.uint64())
+	dir := fmt.tprintf("/tmp/forseti_feeest_%x", rand.uint64())
 	os.make_directory(dir)
 	defer {
 		os.remove(fmt.tprintf("%s/fee_estimates.dat", dir))

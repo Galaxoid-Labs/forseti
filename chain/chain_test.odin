@@ -16,7 +16,7 @@ import "core:mem"
 
 make_test_dir :: proc(name: string) -> string {
 	rng := rand.uint64()
-	path := fmt.tprintf("/tmp/btcnode_chain_%s_%x", name, rng)
+	path := fmt.tprintf("/tmp/forseti_chain_%s_%x", name, rng)
 	os.make_directory(path)
 	return path
 }
@@ -1345,7 +1345,7 @@ test_block_index_load_skip_lists :: proc(t: ^testing.T) {
 // window (56.6M BTC where ~19.85M belong; caught by the gettxoutsetinfo audit).
 @(test)
 test_add_over_db_respend_deletes :: proc(t: ^testing.T) {
-	dir := fmt.tprintf("%s/btcnode-test-add-leak", os.temp_dir(context.temp_allocator))
+	dir := fmt.tprintf("%s/forseti-test-add-leak", os.temp_dir(context.temp_allocator))
 	defer os.remove_all(dir)
 	cc, db, store := _make_test_coins_cache(dir)
 	defer _cleanup_test_coins(&cc, db, store)
@@ -1384,7 +1384,7 @@ test_add_over_db_respend_deletes :: proc(t: ^testing.T) {
 // mainnet chainstate across two recovery cycles; caught by gettxoutsetinfo).
 @(test)
 test_restore_respend_deletes_from_db :: proc(t: ^testing.T) {
-	dir := fmt.tprintf("%s/btcnode-test-restore-leak", os.temp_dir(context.temp_allocator))
+	dir := fmt.tprintf("%s/forseti-test-restore-leak", os.temp_dir(context.temp_allocator))
 	defer os.remove_all(dir)
 	cc, db, store := _make_test_coins_cache(dir)
 	defer _cleanup_test_coins(&cc, db, store)

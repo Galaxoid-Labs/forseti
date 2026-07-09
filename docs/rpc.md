@@ -4,7 +4,7 @@ The node exposes a JSON-RPC 1.0 interface over HTTP with authentication. By defa
 
 ```bash
 # Using curl with cookie auth (default)
-curl -s -u "$(cat /tmp/btcnode-data/.cookie)" \
+curl -s -u "$(cat /tmp/forseti-data/.cookie)" \
      --data '{"method":"getblockchaininfo","params":[],"id":1}' \
      http://127.0.0.1:18443/
 
@@ -19,7 +19,7 @@ bitcoin-cli -rpcport=18443 getblockchaininfo
 
 ## Bitcoin Core RPC Coverage (69 / 78 non-wallet RPCs)
 
-Plus four btcnode-specific methods: `getnodestatus` (feeds the GUI/TUI
+Plus four forseti-specific methods: `getnodestatus` (feeds the GUI/TUI
 dashboards) and the drivechain views `listsidechains`, `getsidechaininfo`,
 and `listwithdrawalstatus` (see below).
 
@@ -138,7 +138,7 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `validateaddress` | Yes | |
 | `verifymessage` | Yes | |
 
-## Drivechain RPCs (btcnode-specific)
+## Drivechain RPCs (forseti-specific)
 
 Available when the node runs with `--drivechain=track` or `enforce` (BIP 300/301);
 they error with "Drivechain support is disabled" otherwise.

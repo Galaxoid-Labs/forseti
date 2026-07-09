@@ -17,7 +17,7 @@ REGTEST_MAGIC  :: u32(0xDAB5BFFA)
 PROTOCOL_VERSION :: u32(70016)
 
 NODE_VERSION    :: "0.2.0"
-NODE_USER_AGENT :: "/btcnode-odin:" + NODE_VERSION + "/"
+NODE_USER_AGENT :: "/Forseti:" + NODE_VERSION + "/"
 
 MAX_BLOCK_WEIGHT    :: 4_000_000
 MAX_BLOCK_SIZE      :: 1_000_000 // legacy pre-SegWit limit

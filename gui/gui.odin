@@ -26,7 +26,7 @@ FONT_DATA := #load("fonts/CascadiaCode-VariableFont_wght.ttf")
 // App/window icon, embedded (256x256 PNG). raylib SetWindowIcon sets the
 // taskbar/window icon at runtime on Linux/Windows; it's a no-op on macOS,
 // where the Dock icon comes from a .app bundle instead.
-ICON_DATA := #load("../assets/btcnode_icon.png")
+ICON_DATA := #load("../assets/forseti_icon.png")
 
 // One atlas per text size in use, each baked at 2x so HiDPI framebuffers map
 // atlas pixels 1:1 (a single scaled atlas renders soft on retina).
@@ -196,7 +196,7 @@ Boot :: struct {
 // thread; switch to the live dashboard when it's ready. Returns false only
 // if no window could be created (headless session).
 run_boot :: proc(boot: ^Boot) -> bool {
-	if !_window_open("bitcoin-node-odin") {
+	if !_window_open("Forseti") {
 		return false
 	}
 	defer _window_close()
@@ -246,7 +246,7 @@ run_boot :: proc(boot: ^Boot) -> bool {
 
 _draw_shutdown :: proc(boot: ^Boot, frame: int) {
 	cy := i32(WIN_H/2 - 60)
-	_text_centered("bitcoin-node-odin", cy, 26, COL_TEXT)
+	_text_centered("Forseti", cy, 26, COL_TEXT)
 	_text_centered("Shutting down", cy + 40, 20, COL_ORANGE)
 
 	// Real UTXO-flush progress when the shutdown flush is running (the coins
@@ -303,7 +303,7 @@ _draw_shutdown :: proc(boot: ^Boot, frame: int) {
 
 _draw_boot :: proc(boot: ^Boot, frame: int) {
 	cy := i32(WIN_H/2 - 60)
-	_text_centered("bitcoin-node-odin", cy, 26, COL_TEXT)
+	_text_centered("Forseti", cy, 26, COL_TEXT)
 	_text_centered(fmt.ctprintf("network: %s", boot.info.network), cy + 34, 15, COL_DIM)
 
 	// Stage centered WITHOUT the animated dots (centering a changing string

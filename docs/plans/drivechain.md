@@ -1,4 +1,4 @@
-# Drivechain (BIP300/301) Plan for bitcoin-node-odin
+# Drivechain (BIP300/301) Plan for forseti
 
 > **STATUS (2026-07-07): IMPLEMENTED** — phases 1 and 2 shipped (`drivechain/`
 > package, chain integration + persistence, `--drivechain` flag, 3 RPCs, docs).
@@ -29,16 +29,16 @@ semantics and rejects violating blocks — natively, with no sidecar process.
   rules for nodes that opt in. No L1 code changes; enforcement is voluntary.
 - Sztorc has announced an **"eCash" hard fork at block 964,000 (~August 2026)**
   activating BIP300/301 with a 1:1 BTC split, cancelled only if Bitcoin activates
-  first. Whatever happens there, a native toggle in btcnode covers both worlds:
+  first. Whatever happens there, a native toggle in forseti covers both worlds:
   CUSF-style voluntary enforcement today, and ready-made validation if any chain
   activates the rules for real.
-- Because btcnode *is* the full node, we implement the rules in-process — strictly
+- Because forseti *is* the full node, we implement the rules in-process — strictly
   less machinery than the enforcer (no ZMQ, no gRPC, no second process).
 
 **The opt-in caveat (must go in `--help`):** enabling enforcement while the rest of
 the network doesn't enforce means a block violating BIP300 rules would be rejected
 by us but accepted by everyone else → we fork ourselves off. That is inherent to
-CUSF-style activation, not a btcnode defect. Default-off, clearly documented.
+CUSF-style activation, not a forseti defect. Default-off, clearly documented.
 
 ---
 
@@ -155,7 +155,7 @@ Keeps BIP300/301 logic out of `consensus/` core. Contents:
 
 - `listsidechains`, `getsidechaininfo <n>`, `listwithdrawalstatus <n>` — read-only
   views of D1/D2 for debugging and for sidechain software polling us the way the
-  enforcer's gRPC ValidatorService is polled. btcnode does not mine, so the
+  enforcer's gRPC ValidatorService is polled. forseti does not mine, so the
   miner-side messages (generating M2/M4/BMM Accepts) are out of scope.
 
 ---
@@ -190,7 +190,7 @@ Keeps BIP300/301 logic out of `consensus/` core. Contents:
 
 1. ~~Track-vs-enforce as one flag or two?~~ **Decided: `--drivechain=off|track|enforce`.**
    Track mode is genuinely useful and zero-risk.
-2. If the August block-964,000 fork happens and btcnode should *follow* that
+2. If the August block-964,000 fork happens and forseti should *follow* that
    chain, enforcement flag alone is not enough — that fork reportedly changes
    more than BIP300 (coin split). Out of scope until the fork ships something
    concrete to validate against. **P2P note:** following the fork chain will

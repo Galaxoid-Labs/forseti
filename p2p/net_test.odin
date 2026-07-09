@@ -1123,7 +1123,7 @@ test_parse_proxy_endpoint :: proc(t: ^testing.T) {
 
 @(test)
 test_anchors_roundtrip :: proc(t: ^testing.T) {
-	dir := fmt.tprintf("/tmp/btcnode_anchors_%d", 42)
+	dir := fmt.tprintf("/tmp/forseti_anchors_%d", 42)
 	os.make_directory(dir)
 	defer os.remove(fmt.tprintf("%s/anchors.dat", dir))
 	defer os.remove(dir)

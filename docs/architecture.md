@@ -3,10 +3,10 @@
 ## Project Structure
 
 ```
-bitcoin-node-odin/
+forseti/
 ├── main.odin              # Entry point, CLI parsing (core:flags), config file, thread orchestration
 ├── Makefile               # Build system
-├── contrib/               # btcnode.conf.sample (commented reference config)
+├── contrib/               # forseti.conf.sample (commented reference config)
 ├── crypto/                # SHA-256d, RIPEMD-160, HASH160, secp256k1 (verify+sign+ElligatorSwift), Merkle root, address encoding, WIF, SipHash-2-4, GCS (BIP158)
 ├── wire/                  # Protocol types, CompactSize, tx/block serialization, message framing, compact blocks (BIP152), addrv2 (BIP155), filter messages (BIP157)
 ├── script/                # Script interpreter, opcodes, standard types, Taproot (BIP341/342)
@@ -20,7 +20,7 @@ bitcoin-node-odin/
 ├── drivechain/            # BIP300/301: M1-M6 + BMM codecs, D1/D2 state machine, enforce-mode validation
 ├── zmq/                   # Native ZMTP 3.0 PUB sockets (Core zmqpub* parity, no libzmq)
 ├── gui/                   # raylib/raygui dashboard renderer (in-process + remote)
-├── guiapp/                # Standalone btcnode-gui remote client (GUI + TUI + --probe)
+├── guiapp/                # Standalone forseti-gui remote client (GUI + TUI + --probe)
 ├── tui/                   # ncurses terminal dashboard renderers/formatters
 ├── ncurses/               # Minimal libncurses FFI bindings
 └── deps/                  # C/C++ dependencies
@@ -75,7 +75,7 @@ Cache sizes are configurable via `--dbcache=<MB>` (default 450 MiB), split follo
 - **Parallel script verification**: Two-phase block validation — Phase 1 processes UTXO updates sequentially (single-threaded, no locking), Phase 2 dispatches all script checks to a persistent thread pool (`--par=N`). Sighash caches are eagerly pre-computed before dispatch so workers read immutable data without synchronization. Serial fallback for small blocks (<16 inputs) or `--par=1`. Workers use growing virtual arenas (8MB initial) from a mutex-protected pool — tapscripts have no size cap, so fixed arenas are unsafe
 - **UTXO prefetch**: Before connecting each block, input outpoints not already in the coins cache are collected and read from LevelDB in parallel across the script verification thread pool. This converts sequential LevelDB reads into parallel reads, warming the cache so Phase 1 gets map lookups instead of disk I/O. Especially impactful below assumevalid where the thread pool would otherwise be idle
 - **Per-input verification arena**: A growing scratch arena is reset between each input's script verification (serial path), preventing sighash writer accumulation from exhausting the 64MB block arena on large transactions
-- **Mempool configuration**: 16 configurable settings matching Bitcoin Core defaults — memory-based size limiting (`--maxmempool`, default 300 MB) with fee-based eviction and dynamic minimum fee, transaction expiry (`--mempoolexpiry`, default 336 hours), ancestor/descendant chain limits (count and size), configurable relay/dust/incremental fees, datacarrier toggle, bare multisig toggle, blocks-only mode (`--blocksonly`), and optional persistence (`--persistmempool`). All settings supported via CLI flags and `btcnode.conf`
+- **Mempool configuration**: 16 configurable settings matching Bitcoin Core defaults — memory-based size limiting (`--maxmempool`, default 300 MB) with fee-based eviction and dynamic minimum fee, transaction expiry (`--mempoolexpiry`, default 336 hours), ancestor/descendant chain limits (count and size), configurable relay/dust/incremental fees, datacarrier toggle, bare multisig toggle, blocks-only mode (`--blocksonly`), and optional persistence (`--persistmempool`). All settings supported via CLI flags and `forseti.conf`
 - **Memory-based mempool limiting**: Tracks total vsize of all entries. When usage exceeds the limit, lowest fee-rate transactions are evicted and the dynamic minimum fee (`mempoolminfee` in `getmempoolinfo`) is raised. Resets when usage drops below the limit after a block connect
 - **Mempool persistence**: Mempool is saved to `<datadir>/mempool.dat` on shutdown and reloaded/revalidated on startup (controlled by `--persistmempool`)
 - **Fee estimation**: Port of Core's `CBlockPolicyEstimator` — mempool entries are tracked by feerate bucket (×1.05 spacing, 1k–10M sat/kvB) and entry height; block connects record blocks-to-confirm into exponentially decaying moving averages over three horizons (decay 0.962/0.9952/0.99931, scales 1/2/24, up to 1008 blocks); unconfirmed departures count as failures. `estimatesmartfee` returns the median feerate of the lowest bucket range clearing Core's success thresholds (60% half-target / 85% target / 95% double-target, `conservative` mode supported), falling back to the dynamic mempool floor until warmed up. History persists across restarts in `<datadir>/fee_estimates.dat`

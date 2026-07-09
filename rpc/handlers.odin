@@ -2957,7 +2957,7 @@ _handle_getnodestatus :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respo
 	obj["best_header"] = json.Value(json.Integer(i64(st.best_header)))
 	obj["sync_state"] = json.Value(json.Integer(i64(st.sync_state)))
 	// Validation-halt banner data — without these the remote dashboard
-	// (btcnode-gui) can never show the red HALTED banner.
+	// (forseti-gui) can never show the red HALTED banner.
 	obj["halt_height"] = json.Value(json.Integer(i64(st.halt_height)))
 	obj["halt_reason"] = json.Value(json.String(string(st.halt_reason[:st.halt_reason_len])))
 	obj["blocks_remaining"] = json.Value(json.Integer(i64(st.blocks_remaining)))

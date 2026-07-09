@@ -1,7 +1,7 @@
 .claude/
 .DS_Store
-btcnode
-btcnode-gui
+forseti
+forseti-gui
 deps/lib/
 deps/libsecp256k1/.libs/
 deps/libsecp256k1/*.o

@@ -56,7 +56,7 @@ mine_block :: proc(cs: ^Chain_State, selected: []Mine_Tx, total_fees: i64, coinb
 		}
 		append(&height_push, byte(len(num)))
 		append(&height_push, ..num[:])
-		append(&height_push, "/btcnode/")
+		append(&height_push, "/forseti/")
 	}
 
 	subsidy := consensus.get_block_subsidy(height, cs.params)

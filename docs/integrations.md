@@ -2,7 +2,7 @@
 
 ## Electrum Wallets (BDK / Electrum / Sparrow)
 
-btcnode speaks enough Bitcoin Core RPC + P2P that [electrs](https://github.com/romanz/electrs)
+forseti speaks enough Bitcoin Core RPC + P2P that [electrs](https://github.com/romanz/electrs)
 v0.10 runs against it unmodified, giving any Electrum-protocol wallet
 (BDK's `bdk_electrum`, Electrum, Sparrow) address balances, histories, and
 UTXOs backed by your own node.
@@ -19,22 +19,22 @@ the mempool + chain info over **RPC** — no ZMQ required.
 
 **Signet:**
 ```bash
-./btcnode --network=signet --datadir=~/btcnode-signet --daemon
+./forseti --network=signet --datadir=~/forseti-signet --daemon
 electrs --network signet \
   --daemon-rpc-addr 127.0.0.1:38332 \
   --daemon-p2p-addr 127.0.0.1:38333 \
-  --cookie-file ~/btcnode-signet/.cookie \
+  --cookie-file ~/forseti-signet/.cookie \
   --db-dir ~/electrs-db
 # wallets connect to electrs at tcp://127.0.0.1:60601
 ```
 
 **Mainnet:**
 ```bash
-./btcnode --network=mainnet --datadir=~/btcnode --daemon   # must be unpruned
+./forseti --network=mainnet --datadir=~/forseti --daemon   # must be unpruned
 electrs --network bitcoin \
   --daemon-rpc-addr 127.0.0.1:8332 \
   --daemon-p2p-addr 127.0.0.1:8333 \
-  --cookie-file ~/btcnode/.cookie \
+  --cookie-file ~/forseti/.cookie \
   --db-dir ~/electrs-db
 # wallets connect to electrs at tcp://127.0.0.1:50001
 ```
@@ -50,7 +50,7 @@ auth = "youruser:yourpassword"
 
 ### Exposing electrs to other machines
 
-Both links from electrs to btcnode (`daemon-rpc-addr` 8332, `daemon-p2p-addr`
+Both links from electrs to forseti (`daemon-rpc-addr` 8332, `daemon-p2p-addr`
 8333) are localhost — **no firewall rules, and never open the node's 8332/8333
 to the internet.** Only the Electrum port that *wallets* connect to needs
 opening, and only if they run on another machine. By default electrs binds it
@@ -69,11 +69,11 @@ you must open it, use SSL (port 50002) or restrict the firewall rule to specific
 client IPs (`sudo ufw allow from <client-ip> to any port 50001`).
 
 For consumers that DO want ZMQ (LND's bitcoind backend, custom indexers),
-btcnode implements Bitcoin Core's publisher interface natively (no libzmq
+forseti implements Bitcoin Core's publisher interface natively (no libzmq
 dependency — ZMTP 3.0 spoken directly):
 
 ```bash
-./btcnode --zmqpubrawblock=tcp://127.0.0.1:28332 --zmqpubrawtx=tcp://127.0.0.1:28333
+./forseti --zmqpubrawblock=tcp://127.0.0.1:28332 --zmqpubrawtx=tcp://127.0.0.1:28333
 ```
 
 Topics: `hashblock`, `hashtx`, `rawblock`, `rawtx`, `sequence` — payloads

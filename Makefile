@@ -15,10 +15,10 @@ deps:
 	./deps/raylib-arm64.sh   # arm64 Linux: build vendored raylib/raygui (no-op elsewhere)
 
 build: deps
-	odin build . -out:btcnode -o:speed -extra-linker-flags:"$(CXX_LINK)"
+	odin build . -out:forseti -o:speed -extra-linker-flags:"$(CXX_LINK)"
 
 gui: deps
-	odin build guiapp -out:btcnode-gui -o:speed -extra-linker-flags:"$(CXX_LINK)"
+	odin build guiapp -out:forseti-gui -o:speed -extra-linker-flags:"$(CXX_LINK)"
 
 test: deps
 	odin test crypto -extra-linker-flags:"$(CXX_LINK)" -define:ODIN_TEST_THREADS=1
@@ -35,9 +35,9 @@ test: deps
 	odin test descriptor -extra-linker-flags:"$(CXX_LINK)" -define:ODIN_TEST_THREADS=1
 
 debug: deps
-	odin build . -out:btcnode -debug -extra-linker-flags:"$(CXX_LINK)"
+	odin build . -out:forseti -debug -extra-linker-flags:"$(CXX_LINK)"
 
 clean:
-	rm -f btcnode
+	rm -f forseti
 	rm -f deps/lib/*.a
 	cd deps/libsecp256k1 && [ -f Makefile ] && make clean || true

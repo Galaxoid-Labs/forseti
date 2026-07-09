@@ -2,10 +2,10 @@
 
 ```bash
 # Show help
-./btcnode --help
+./forseti --help
 
 # Start in regtest mode (no peers needed, good for RPC testing)
-./btcnode --network=regtest --no-p2p --rpcuser=user --rpcpassword=pass
+./forseti --network=regtest --no-p2p --rpcuser=user --rpcpassword=pass
 
 # Query it
 curl -s -u user:pass --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:18443/
@@ -16,7 +16,7 @@ curl -s -u user:pass --data '{"method":"getblockchaininfo","params":[],"id":1}' 
 If you'd rather not assemble a command line or config by hand, run the wizard:
 
 ```bash
-./btcnode --wizard
+./forseti --wizard
 ```
 
 It's a `menuconfig`-style ncurses flow that walks through the decisions that
@@ -33,10 +33,10 @@ actually vary per user, then does the setup for you:
 
 Navigate with the arrow keys, `Space` toggles checkboxes, `←/→` move between
 the bottom buttons, and `Enter` activates the focused one. On finish it creates
-the data directory, writes `<datadir>/btcnode.conf` (only keys that differ from
+the data directory, writes `<datadir>/forseti.conf` (only keys that differ from
 the defaults), and prints a cheat sheet of **every way to start the node**
 (foreground, `--gui`, `--tui`, `--daemon`) and **every way to watch it**
-(`btcnode-gui` desktop/TUI over RPC, with the right auth flags and port filled
+(`forseti-gui` desktop/TUI over RPC, with the right auth flags and port filled
 in for your network). The run mode is a launch-time flag, not a config setting,
 so nothing is baked in — you pick when you start. It never touches the network;
 everything it doesn't ask keeps its default and can be edited in the conf
@@ -49,13 +49,13 @@ the terminal, and redirects all logging to `<datadir>/debug.log`. The launching
 command prints the child PID and returns immediately.
 
 ```bash
-./btcnode --network=mainnet --datadir=~/btcnode --prune=2000 --daemon
-# btcnode started in the background (PID 12345)
-# Logging to /home/you/btcnode/debug.log
+./forseti --network=mainnet --datadir=~/forseti --prune=2000 --daemon
+# forseti started in the background (PID 12345)
+# Logging to /home/you/forseti/debug.log
 # Stop it with:  kill 12345   (or the `stop` RPC)
 
-tail -f ~/btcnode/debug.log                          # follow the log
-./btcnode-gui --tui --cookie=~/btcnode/.cookie       # or watch it live over RPC
+tail -f ~/forseti/debug.log                          # follow the log
+./forseti-gui --tui --cookie=~/forseti/.cookie       # or watch it live over RPC
 ```
 
 Because a daemon has no terminal, `--daemon` is mutually exclusive with
@@ -74,11 +74,11 @@ Each network syncs via P2P and stores data in its own directory. The examples be
 **Mainnet:**
 ```bash
 # Start syncing mainnet (full validation, ~939k blocks)
-nohup ./btcnode --network=mainnet --datadir=/tmp/btcnode-mainnet --dbcache=4096 \
-  --rpcuser=user --rpcpassword=pass > /tmp/btcnode-mainnet.log 2>&1 &
+nohup ./forseti --network=mainnet --datadir=/tmp/forseti-mainnet --dbcache=4096 \
+  --rpcuser=user --rpcpassword=pass > /tmp/forseti-mainnet.log 2>&1 &
 
 # Monitor sync progress
-tail -f /tmp/btcnode-mainnet.log | grep "Blocks:"
+tail -f /tmp/forseti-mainnet.log | grep "Blocks:"
 
 # Check current block height via RPC
 curl -s -u user:pass \
@@ -95,55 +95,55 @@ curl -s -u user:pass \
 # Stop gracefully (saves mempool, flushes UTXO cache)
 curl -s -u user:pass \
      --data '{"method":"stop","params":[],"id":1}' http://127.0.0.1:8332/
-# or: kill -SIGINT $(pgrep -f "btcnode.*mainnet")
+# or: kill -SIGINT $(pgrep -f "forseti.*mainnet")
 ```
 
 **Signet:**
 ```bash
-nohup ./btcnode --network=signet --datadir=/tmp/btcnode-signet --dbcache=4096 \
-  --rpcuser=user --rpcpassword=pass > /tmp/btcnode-signet.log 2>&1 &
+nohup ./forseti --network=signet --datadir=/tmp/forseti-signet --dbcache=4096 \
+  --rpcuser=user --rpcpassword=pass > /tmp/forseti-signet.log 2>&1 &
 
-tail -f /tmp/btcnode-signet.log | grep "Blocks:"
+tail -f /tmp/forseti-signet.log | grep "Blocks:"
 curl -s -u user:pass \
      --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:38332/
 ```
 
 **Testnet4:**
 ```bash
-nohup ./btcnode --network=testnet4 --datadir=/tmp/btcnode-testnet4 --dbcache=4096 \
-  --rpcuser=user --rpcpassword=pass > /tmp/btcnode-testnet4.log 2>&1 &
+nohup ./forseti --network=testnet4 --datadir=/tmp/forseti-testnet4 --dbcache=4096 \
+  --rpcuser=user --rpcpassword=pass > /tmp/forseti-testnet4.log 2>&1 &
 
-tail -f /tmp/btcnode-testnet4.log | grep "Blocks:"
+tail -f /tmp/forseti-testnet4.log | grep "Blocks:"
 curl -s -u user:pass \
      --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:48332/
 ```
 
 **Testnet3:**
 ```bash
-nohup ./btcnode --network=testnet3 --datadir=/tmp/btcnode-testnet3 --dbcache=4096 \
-  --rpcuser=user --rpcpassword=pass > /tmp/btcnode-testnet3.log 2>&1 &
+nohup ./forseti --network=testnet3 --datadir=/tmp/forseti-testnet3 --dbcache=4096 \
+  --rpcuser=user --rpcpassword=pass > /tmp/forseti-testnet3.log 2>&1 &
 
-tail -f /tmp/btcnode-testnet3.log | grep "Blocks:"
+tail -f /tmp/forseti-testnet3.log | grep "Blocks:"
 curl -s -u user:pass \
      --data '{"method":"getblockchaininfo","params":[],"id":1}' http://127.0.0.1:18332/
 ```
 
-> **Tip:** If you omit `--rpcuser`/`--rpcpassword`, a `.cookie` file is generated in the data directory (Bitcoin Core compatible). Use `-u "$(cat /tmp/btcnode-signet/.cookie)"` with curl in that case. Use `--server=0` to disable the RPC server entirely.
+> **Tip:** If you omit `--rpcuser`/`--rpcpassword`, a `.cookie` file is generated in the data directory (Bitcoin Core compatible). Use `-u "$(cat /tmp/forseti-signet/.cookie)"` with curl in that case. Use `--server=0` to disable the RPC server entirely.
 
 ### Monitoring
 
 ```bash
 # Watch block progress (any network)
-tail -f /tmp/btcnode-mainnet.log | grep "Blocks:"
+tail -f /tmp/forseti-mainnet.log | grep "Blocks:"
 
 # Check for validation errors
-grep -iE "FAIL|Bad_Script|halting|consensus" /tmp/btcnode-mainnet.log
+grep -iE "FAIL|Bad_Script|halting|consensus" /tmp/forseti-mainnet.log
 
 # Check memory/resource usage
-ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "$6/1024"MB"}'
+ps aux | grep forseti | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "$6/1024"MB"}'
 
 # Reduce memory usage on constrained machines
-./btcnode --network=signet --dbcache=64 --rpcuser=user --rpcpassword=pass
+./forseti --network=signet --dbcache=64 --rpcuser=user --rpcpassword=pass
 ```
 
 ### CLI Flags
@@ -153,12 +153,12 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--network=<name>` | `mainnet`, `testnet3`, `testnet4`, `signet`, `regtest` | `regtest` |
-| `--wizard` | Interactive first-run setup: write a `btcnode.conf`, then exit (see above) | — |
+| `--wizard` | Interactive first-run setup: write a `forseti.conf`, then exit (see above) | — |
 | `--daemon` | Run in the background: fork, detach from the terminal, log to `<datadir>/debug.log`. Prints the PID and exits. Mutually exclusive with `--gui`/`--tui` | foreground |
 | `--gui` | GUI dashboard window (raylib; node stays headless without it) | headless |
 | `--tui` | Terminal dashboard (ncurses, SSH-friendly; `q` quits gracefully) | headless |
 | `--prune=<MB>` | Delete old block files, keep blk+rev usage under target (min 550, 0=off). Pruned nodes advertise `NODE_NETWORK_LIMITED` only | 0 (keep all) |
-| `--datadir=<path>` | Data directory for blocks, index, UTXO database | `/tmp/btcnode-data` |
+| `--datadir=<path>` | Data directory for blocks, index, UTXO database | `/tmp/forseti-data` |
 | `--rpcport=<port>` | JSON-RPC port | Network default |
 | `--rpcuser=<user>` | RPC auth username | Cookie auth |
 | `--rpcpassword=<pass>` | RPC auth password (must set both user and password) | Cookie auth |
@@ -206,21 +206,21 @@ ps aux | grep btcnode | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 
 ### Config File
 
-The node reads an optional `btcnode.conf` from the data directory (`<datadir>/btcnode.conf`). The format mirrors Bitcoin Core's `bitcoin.conf` — INI-style with `#` comments and `[section]` network overrides.
+The node reads an optional `forseti.conf` from the data directory (`<datadir>/forseti.conf`). The format mirrors Bitcoin Core's `bitcoin.conf` — INI-style with `#` comments and `[section]` network overrides.
 
 **Precedence:** CLI flags > config file > defaults
 
-A fully-commented [`contrib/btcnode.conf.sample`](../contrib/btcnode.conf.sample) in the repo lists every supported key with its default. Copy it to your data directory to get started:
+A fully-commented [`contrib/forseti.conf.sample`](../contrib/forseti.conf.sample) in the repo lists every supported key with its default. Copy it to your data directory to get started:
 
 ```bash
-cp contrib/btcnode.conf.sample ~/btcnode/btcnode.conf
-./btcnode --datadir=~/btcnode        # reads ~/btcnode/btcnode.conf
+cp contrib/forseti.conf.sample ~/forseti/forseti.conf
+./forseti --datadir=~/forseti        # reads ~/forseti/forseti.conf
 ```
 
 Each config key matches a `--flag` of the same name (drop the `--`). Example:
 
 ```ini
-# ~/btcnode/btcnode.conf
+# ~/forseti/forseti.conf
 
 network=mainnet
 dbcache=1024

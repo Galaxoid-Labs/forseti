@@ -1,6 +1,6 @@
-# Sample btcnode configuration file.
+# Sample forseti configuration file.
 #
-# Copy this to <datadir>/btcnode.conf (e.g. ~/.btcnode/btcnode.conf or the
+# Copy this to <datadir>/forseti.conf (e.g. ~/.forseti/forseti.conf or the
 # path you pass with --datadir) and uncomment the settings you want.
 #
 # Format: INI-style, mirroring Bitcoin Core's bitcoin.conf. Lines beginning
@@ -9,12 +9,12 @@
 # that network only (mainnet, testnet3, testnet4, signet, regtest).
 #
 # Precedence: command-line flags > config file > built-in defaults. Every
-# key below corresponds to a --flag of the same name; see `btcnode --help`.
+# key below corresponds to a --flag of the same name; see `forseti --help`.
 
 # ── Global settings (apply to all networks) ─────────────────────────────
 
 # network = mainnet          # mainnet | testnet3 | testnet4 | signet | regtest
-# datadir = /home/you/.btcnode
+# datadir = /home/you/.forseti
 
 # Database cache in MiB. Use a large value for initial sync (e.g. 8192+),
 # then a smaller one for steady-state at the tip.

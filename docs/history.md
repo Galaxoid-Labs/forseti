@@ -47,7 +47,7 @@ Every build phase in order. See the [README](../README.md) for the current summa
 | 38 | Inbound P2P Connections + Core 28 Parity | Complete |
 | 39 | UTXO Prefetch (Parallel LevelDB Reads) | Complete |
 | 40 | Block Pruning (`--prune`) + NODE_NETWORK_LIMITED | Complete |
-| 41 | GUI Dashboard (raylib, in-process + remote `btcnode-gui`) | Complete |
+| 41 | GUI Dashboard (raylib, in-process + remote `forseti-gui`) | Complete |
 | 42 | TUI Dashboard (ncurses, `--tui`, SSH-friendly) | Complete |
 | 43 | Chain Reorganization (chainwork fork choice, undo-based disconnect) | Complete |
 | 44 | Background UTXO Flush (memtable rotation, no sync freeze) | Complete |

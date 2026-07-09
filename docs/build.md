@@ -14,7 +14,7 @@ publishes a release; the workflow can also be dispatched manually as a dry run.
 - `make`
 - `autoconf`, `automake`, `libtool` (for building libsecp256k1)
 - **ncurses** (for the `--tui` terminal dashboard) — ships with macOS; on Linux install the dev package for the linker symlink: `apt install libncurses-dev` / `dnf install ncurses-devel`
-- **GUI (`--gui` / `btcnode-gui`)** — raylib ships inside the Odin toolchain (`vendor:raylib`), nothing to install on macOS; on Linux the prebuilt raylib links against system X11/GL: `apt install libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev`. Headless builds/servers can skip this: the node runs fully without either dashboard, and `--tui` needs only ncurses. **Linux arm64:** Odin's vendored Linux raylib libs are x64-only — build raylib 5.5 + raygui 4.0 from source and replace `$(odin root)/vendor/raylib/linux/lib{raylib,raygui}.a` (see the "Build arm64 raylib/raygui vendor libs" step in `.github/workflows/release.yml` for the exact recipe)
+- **GUI (`--gui` / `forseti-gui`)** — raylib ships inside the Odin toolchain (`vendor:raylib`), nothing to install on macOS; on Linux the prebuilt raylib links against system X11/GL: `apt install libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev`. Headless builds/servers can skip this: the node runs fully without either dashboard, and `--tui` needs only ncurses. **Linux arm64:** Odin's vendored Linux raylib libs are x64-only — build raylib 5.5 + raygui 4.0 from source and replace `$(odin root)/vendor/raylib/linux/lib{raylib,raygui}.a` (see the "Build arm64 raylib/raygui vendor libs" step in `.github/workflows/release.yml` for the exact recipe)
 
 **C/C++ libraries (built automatically):**
 - [libsecp256k1](https://github.com/bitcoin-core/secp256k1) v0.7.1 — git submodule, built with schnorrsig + recovery + extrakeys + ellswift modules
@@ -26,8 +26,8 @@ publishes a release; the workflow can also be dispatched manually as a dry run.
 
 ```bash
 # Clone with submodules
-git clone --recursive https://github.com/Galaxoid-Labs/bitcoin-node-odin.git
-cd bitcoin-node-odin
+git clone --recursive https://github.com/Galaxoid-Labs/forseti.git
+cd forseti
 
 # If you already cloned without --recursive:
 git submodule update --init --recursive
@@ -39,10 +39,10 @@ make
 make deps    # Build C/C++ libraries
 make build   # Build the node binary
 make debug   # Build with debug symbols
-make gui     # Build the standalone dashboard client (btcnode-gui)
+make gui     # Build the standalone dashboard client (forseti-gui)
 ```
 
-The binary is output as `btcnode` in the project root.
+The binary is output as `forseti` in the project root.
 
 
 ## Testing

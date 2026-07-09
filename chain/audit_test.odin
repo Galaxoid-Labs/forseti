@@ -13,10 +13,10 @@ foreign import leveldb "../deps/lib/libleveldb.a"
 // Ground-truth audit of a REAL datadir's chainstate: scans the DB, decodes each
 // UTXO's height + is_coinbase + amount, and buckets the total amount by coin
 // height to localize corruption. Env-gated so `make test` skips it.
-//   BTCNODE_AUDIT_DIR=/path/to/datadir odin test chain -define:ODIN_TEST_NAMES=chain.test_audit_datadir
+//   FORSETI_AUDIT_DIR=/path/to/datadir odin test chain -define:ODIN_TEST_NAMES=chain.test_audit_datadir
 @(test)
 test_audit_datadir :: proc(t: ^testing.T) {
-	dir, has := os.lookup_env("BTCNODE_AUDIT_DIR", context.temp_allocator)
+	dir, has := os.lookup_env("FORSETI_AUDIT_DIR", context.temp_allocator)
 	if !has || dir == "" {
 		return
 	}
@@ -42,7 +42,7 @@ test_audit_datadir :: proc(t: ^testing.T) {
 	total_amt: i64 = 0
 	total_cnt: i64 = 0
 	// Coins above a cutoff (crash-recovery straggler check).
-	cutoff_s, _ := os.lookup_env("BTCNODE_AUDIT_CUTOFF", context.temp_allocator)
+	cutoff_s, _ := os.lookup_env("FORSETI_AUDIT_CUTOFF", context.temp_allocator)
 	cutoff := -1
 	if cutoff_s != "" { cutoff, _ = strconv.parse_int(cutoff_s) }
 	above_cnt: i64 = 0
