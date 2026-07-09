@@ -235,7 +235,7 @@ prefetch_utxos_parallel :: proc(
 		items[i].outpoint = outpoints[i]
 	}
 
-	num_workers := cs.script_threads
+	num_workers := cs.prevout_fetch_threads
 	if num_workers > n {
 		num_workers = n
 	}

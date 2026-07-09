@@ -113,6 +113,7 @@ CLI_Config :: struct {
 	// Chain / storage
 	db_cache_mb:        int  `args:"name=dbcache" usage:"Database cache size in MiB (default: 450, min: 4)."`,
 	par_threads:        int  `args:"name=par" usage:"Script verification threads (0=auto, 1=serial, 2+=parallel; default: 0)."`,
+	prevout_fetch_threads: int `args:"name=prevoutfetchthreads" usage:"Parallel UTXO prefetch threads for connect_block (I/O; independent of --par; -1=auto, 0=off, N=threads capped 16)."`,
 	assumevalid:        int  `args:"name=assumevalid" usage:"Skip script verification below height (0=disable; default: network-specific)."`,
 	prune_mb:           int  `args:"name=prune" usage:"Delete old block files, keep usage under target MB (min 550, 0=off)."`,
 	txindex:            bool `args:"name=txindex" usage:"Full transaction index for getrawtransaction (default: 0; incompatible with --prune)."`,
@@ -194,6 +195,7 @@ _parse_cli :: proc() -> (cfg: CLI_Config, cli_seen: map[string]bool) {
 		data_dir                 = DEFAULT_DATA_DIR,
 		mempool_fullrbf          = true,
 		db_cache_mb              = 450,
+		prevout_fetch_threads    = -1, // auto (independent of --par)
 		assumevalid              = -1, // use network default
 		max_mempool_mb           = 300,
 		mempool_expiry_hours     = 336,
@@ -610,6 +612,24 @@ _resolve_par_threads :: proc(par: int) -> int {
 	return min(result, 15)
 }
 
+// Returns the resolved prevout-prefetch worker count. Prefetch is I/O-bound
+// (parallel LevelDB reads to warm the coins cache before connect_block), so it
+// is tuned independently of script verification: -1 = auto (up to 16, based on
+// cores, regardless of --par), 0/1 = off, N = N workers capped at 16.
+_resolve_prevout_threads :: proc(val: int) -> int {
+	if val < 0 {
+		n := os.get_processor_core_count()
+		if n <= 1 {
+			return 0 // no parallelism possible
+		}
+		return min(n, 16)
+	}
+	if val <= 1 {
+		return 0 // explicitly disabled (a single worker gives no speedup)
+	}
+	return min(val, 16)
+}
+
 _select_params :: proc(network: string) -> (params: ^consensus.Chain_Params, rpc_port: int, ok: bool) {
 	params = new(consensus.Chain_Params)
 
@@ -896,8 +916,9 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 		params.assumevalid_height = cfg.assumevalid
 	}
 
-	// Resolve parallel script verification threads.
+	// Resolve parallel script verification + prevout-prefetch threads.
 	script_threads := _resolve_par_threads(cfg.par_threads)
+	prevout_fetch_threads := _resolve_prevout_threads(cfg.prevout_fetch_threads)
 
 	log.infof("Network: %s", params.name)
 	log.infof("Data directory: %s", cfg.data_dir)
@@ -906,6 +927,11 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 		log.infof("Script verification: %d threads", script_threads)
 	} else {
 		log.info("Script verification: serial")
+	}
+	if prevout_fetch_threads >= 2 {
+		log.infof("Prevout prefetch: %d threads", prevout_fetch_threads)
+	} else {
+		log.info("Prevout prefetch: disabled")
 	}
 	if params.assumevalid_height > 0 {
 		log.infof("Assumevalid: skip script verification below height %d", params.assumevalid_height)
@@ -926,7 +952,7 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 
 	// Initialize chain state.
 	cs := new(chain.Chain_State)
-	cs_err := chain.chain_state_init(cs, cfg.data_dir, params, cfg.db_cache_mb, script_threads, cfg.prune_mb * 1024 * 1024, dc_mode)
+	cs_err := chain.chain_state_init(cs, cfg.data_dir, params, cfg.db_cache_mb, script_threads, cfg.prune_mb * 1024 * 1024, dc_mode, prevout_fetch_threads)
 	if cs_err != .None {
 		log.errorf("Failed to initialize chain state: %v", cs_err)
 		return

@@ -32,6 +32,7 @@ Chain_State :: struct {
 	verify_pool:    thread.Pool,
 	verify_wg:      sync.Wait_Group,
 	script_threads: int, // >= 2 = parallel (pool active), < 2 = serial (no pool)
+	prevout_fetch_threads: int, // >= 2 = parallel UTXO prefetch (I/O), independent of script_threads
 	// Growing-arena pool for parallel workers (avoids alloc/free per check)
 	arena_pool_arenas: []virtual.Arena, // one growing arena per worker thread
 	arena_pool_stack:  [dynamic]int,    // indices of available arenas (protected by mutex)
@@ -81,7 +82,7 @@ Boot_Stage: cstring = ""
 Boot_Rollback_Done: int
 Boot_Rollback_Total: int
 
-chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.Chain_Params, db_cache_mb: int = 450, script_threads: int = 0, prune_target: int = 0, dc_mode: drivechain.Mode = .Off) -> Chain_Error {
+chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.Chain_Params, db_cache_mb: int = 450, script_threads: int = 0, prune_target: int = 0, dc_mode: drivechain.Mode = .Off, prevout_fetch_threads: int = 0) -> Chain_Error {
 	cs.params = params
 	cs.prune_target = prune_target
 	cs.dc_mode = dc_mode
@@ -211,13 +212,21 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	}
 	cs.verify_alloc = virtual.arena_allocator(&cs.verify_arena)
 
-	// Initialize parallel script verification thread pool
+	// Initialize the shared worker pool. It backs BOTH parallel script
+	// verification (script_threads) and parallel UTXO prefetch
+	// (prevout_fetch_threads) — the latter is I/O-bound and independent, so
+	// the pool is sized to whichever wants more workers. This lets prefetch
+	// run even when script verification is serial (e.g. --par=1 or assumevalid).
 	cs.script_threads = script_threads
-	if script_threads >= 2 {
-		thread.pool_init(&cs.verify_pool, context.allocator, script_threads)
+	cs.prevout_fetch_threads = prevout_fetch_threads
+	pool_size := max(script_threads, prevout_fetch_threads)
+	if pool_size >= 2 {
+		thread.pool_init(&cs.verify_pool, context.allocator, pool_size)
 		thread.pool_start(&cs.verify_pool)
+	}
 
-		// Pre-initialize growing arenas for workers (avoids alloc/free per check).
+	// Growing arenas are used only by parallel script-check workers.
+	if script_threads >= 2 {
 		cs.arena_pool_arenas = make([]virtual.Arena, script_threads)
 		cs.arena_pool_stack = make([dynamic]int, 0, script_threads)
 		for i in 0 ..< script_threads {
@@ -247,10 +256,14 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 
 // Destroy chain state, flushing everything to disk.
 chain_state_destroy :: proc(cs: ^Chain_State) {
-	// Shut down parallel verification pool before flushing
-	if cs.script_threads >= 2 {
+	// Shut down the shared worker pool before flushing (exists if either
+	// script verification or prevout prefetch requested >= 2 workers).
+	if max(cs.script_threads, cs.prevout_fetch_threads) >= 2 {
 		thread.pool_join(&cs.verify_pool)
 		thread.pool_destroy(&cs.verify_pool)
+	}
+	// Script-worker arenas exist only when script verification is parallel.
+	if cs.script_threads >= 2 {
 		for &arena in cs.arena_pool_arenas {
 			virtual.arena_destroy(&arena)
 		}
@@ -1158,9 +1171,10 @@ connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 =
 		}
 		cs.prof.t_read += time.tick_diff(t_read_start, time.tick_now())
 
-		// Prefetch UTXOs: parallel LevelDB reads to warm coins cache.
-		// Reuses the script verification thread pool (idle under assumevalid).
-		if cs.script_threads >= 2 {
+		// Prefetch UTXOs: parallel LevelDB reads to warm the coins cache.
+		// Runs on the shared worker pool, independent of script verification —
+		// so it speeds up cold-cache IBD even at --par=1 or under assumevalid.
+		if cs.prevout_fetch_threads >= 2 {
 			t_pf_start := time.tick_now()
 			_prefetch_block_utxos(cs, &block, block_alloc)
 			cs.prof.t_prefetch += time.tick_diff(t_pf_start, time.tick_now())
