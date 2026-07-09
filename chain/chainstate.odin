@@ -1268,6 +1268,14 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 		log.infof("Crash recovery: index tip %d > meta tip %d, rolling back %d blocks via undo data",
 			best_valid.height, meta_height, best_valid.height - meta_height)
 
+		// The rolled-back range (meta_height, best_valid.height] is where a
+		// pre-crash partial flush may have stranded coins in the DB. Those blocks
+		// get re-connected over that dirty state, so coins re-created at or below
+		// the crash tip must NOT be marked Fresh (else a later spend leaks the
+		// stale DB copy — the 775k-805k UTXO inflation, 2026-07-09). Coins above
+		// this mark are genuinely new (clean DB) and keep the Fresh fast path.
+		cs.coins.fresh_unsafe_at_or_below = best_valid.height
+
 		// Records written before format v3 lack undo locations — rebuild
 		// them from the rev files before rolling back.
 		needs_rebuild := false

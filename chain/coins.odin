@@ -73,6 +73,16 @@ Coins_Cache :: struct {
 	flush_stat_count:  i64,
 	flush_stat_amount: i64,
 	flush_stats_valid: bool,
+	// Crash-recovery high-water mark. After an undo-based rollback the DB may
+	// still hold coins from a pre-crash PARTIAL flush anywhere in the rolled-back
+	// range; those blocks get re-connected (re-downloaded) over that dirty state.
+	// coins_cache_add's Fresh flag asserts "provably never in the DB" — TRUE in
+	// forward sync (a txid commits to its inputs, so outpoints are unique) but
+	// FALSE when re-creating a coin whose stale DB copy survived. A Fresh coin
+	// that is later spent is dropped with no delete sentinel, leaking the DB
+	// copy. So for coins created at height <= this mark, add is NOT Fresh (it
+	// leaves a delete sentinel on spend). 0 = disabled (normal forward sync).
+	fresh_unsafe_at_or_below: int,
 }
 
 UTXO_STATS_KEY :: "utxostats"
@@ -213,6 +223,15 @@ coins_cache_add :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: storage
 		copy(new_script, coin.script)
 	}
 
+	// Fresh = "provably never reached the DB", so a later spend can drop it with
+	// no delete sentinel. Safe in forward sync, UNSAFE for coins re-created over
+	// a crash-recovery dirty region (their stale DB copy would leak). Below the
+	// recovery high-water mark, withhold Fresh so a spend leaves a delete.
+	flags := bit_set[Cache_Entry_Flag; u8]{.Dirty, .Fresh}
+	if cc.fresh_unsafe_at_or_below != 0 && int(coin.height) <= cc.fresh_unsafe_at_or_below {
+		flags = {.Dirty}
+	}
+
 	cc.cache[outpoint] = Cache_Entry {
 		coin  = storage.UTXO_Coin {
 			height      = coin.height,
@@ -220,7 +239,7 @@ coins_cache_add :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint, coin: storage
 			amount      = coin.amount,
 			script      = new_script,
 		},
-		flags = {.Dirty, .Fresh},
+		flags = flags,
 	}
 	cc.mem_usage += CACHE_ENTRY_OVERHEAD + len(new_script)
 }

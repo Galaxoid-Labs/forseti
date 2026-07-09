@@ -1334,6 +1334,49 @@ test_block_index_load_skip_lists :: proc(t: ^testing.T) {
 	testing.expect(t, consensus.u256_compare(tip.chain_work, idx.genesis.chain_work) > 0, "tip work > genesis work")
 }
 
+// Regression: the ADD twin of the restore-Fresh leak. During recovery replay,
+// connect_block re-creates outputs via coins_cache_add over a DB that may still
+// hold a copy from a pre-crash partial flush. coins_cache_add marks the coin
+// Fresh ("provably never in the DB") — TRUE in forward sync (a txid commits to
+// its inputs, so the outpoint is unique) but FALSE during replay. If that coin
+// is then spent, the Fresh path drops it from the cache with no delete sentinel
+// and the stale DB copy survives forever. This is exactly what inflated the
+// mainnet full-validation datadir's UTXO set in the 775k-805k recovery-replay
+// window (56.6M BTC where ~19.85M belong; caught by the gettxoutsetinfo audit).
+@(test)
+test_add_over_db_respend_deletes :: proc(t: ^testing.T) {
+	dir := fmt.tprintf("%s/btcnode-test-add-leak", os.temp_dir(context.temp_allocator))
+	defer os.remove_all(dir)
+	cc, db, store := _make_test_coins_cache(dir)
+	defer _cleanup_test_coins(&cc, db, store)
+
+	op := wire.Outpoint{index = 3}
+	op.hash[0] = 0xbe
+	coin := storage.UTXO_Coin{height = 785_000, amount = 12_345_6789, script = []byte{0x51}}
+
+	// A partial-flush chunk landed this coin in the DB (recovery re-connects
+	// over this dirty state); the cache knows nothing about it.
+	batch := storage.ldb_batch_create()
+	storage.utxo_db_batch_put(db, batch, op, coin)
+	_ = storage.ldb_batch_write(store.chainstate_db, store.sync_opts, batch)
+	storage.ldb_batch_destroy(batch)
+
+	// We are inside the crash-recovery dirty region (crash tip was above this
+	// coin's height), so adds here must withhold Fresh.
+	cc.fresh_unsafe_at_or_below = 800_000
+
+	// Replay re-creates the output (add), then a later block spends it, then flush.
+	coins_cache_add(&cc, op, coin)
+	_, spent_ok := coins_cache_spend(&cc, op)
+	testing.expect(t, spent_ok, "respend of re-added coin")
+	ferr := coins_cache_flush(&cc, Hash256{}, 785_000)
+	testing.expect_value(t, ferr, Chain_Error.None)
+
+	// The stale DB copy must be gone. (A Fresh add skips the delete sentinel.)
+	_, still := storage.utxo_db_get(db, op, context.temp_allocator)
+	testing.expect(t, !still, "re-added+respent coin must be deleted from DB (no leak)")
+}
+
 // Regression: a restored coin must NEVER be marked Fresh. Recovery rollback
 // restores coins over arbitrary partial-flush DB states; a Fresh restore
 // that gets re-spent is dropped from the cache with no delete sentinel, so
