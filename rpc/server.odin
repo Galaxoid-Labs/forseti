@@ -612,6 +612,22 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_combinerawtransaction(srv, req.params)
 	case "signrawtransactionwithkey":
 		return _handle_signrawtransactionwithkey(srv, req.params)
+	case "decodepsbt":
+		return _handle_decodepsbt(srv, req.params)
+	case "createpsbt":
+		return _handle_createpsbt(srv, req.params)
+	case "converttopsbt":
+		return _handle_converttopsbt(srv, req.params)
+	case "combinepsbt":
+		return _handle_combinepsbt(srv, req.params)
+	case "joinpsbts":
+		return _handle_joinpsbts(srv, req.params)
+	case "finalizepsbt":
+		return _handle_finalizepsbt(srv, req.params)
+	case "analyzepsbt":
+		return _handle_analyzepsbt(srv, req.params)
+	case "utxoupdatepsbt":
+		return _handle_utxoupdatepsbt(srv, req.params)
 	case "gettxoutsetinfo":
 		return _handle_gettxoutsetinfo(srv, req.params)
 	case "gettxoutproof":

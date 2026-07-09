@@ -17,7 +17,7 @@ curl -s -u myuser:mypassword \
 bitcoin-cli -rpcport=18443 getblockchaininfo
 ```
 
-## Bitcoin Core RPC Coverage (69 / 78 non-wallet RPCs)
+## Bitcoin Core RPC Coverage (77 / 78 non-wallet RPCs)
 
 Plus four forseti-specific methods: `getnodestatus` (feeds the GUI/TUI
 dashboards) and the drivechain views `listsidechains`, `getsidechaininfo`,
@@ -103,27 +103,27 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `setban` | Yes | Address-level (subnets: /32 only) |
 | `setnetworkactive` | Yes | Disconnects all peers when false |
 
-**Raw Transactions (8/17):**
+**Raw Transactions (16/17):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
-| `analyzepsbt` | — | PSBT not implemented |
-| `combinepsbt` | — | PSBT not implemented |
+| `analyzepsbt` | Yes | Per-input status, next role, fee (BIP174) |
+| `combinepsbt` | Yes | Combiner role — union of maps for a shared unsigned tx |
 | `combinerawtransaction` | Yes | |
-| `converttopsbt` | — | PSBT not implemented |
-| `createpsbt` | — | PSBT not implemented |
+| `converttopsbt` | Yes | Strips scriptSigs/witness |
+| `createpsbt` | Yes | Returns base64 PSBT |
 | `createrawtransaction` | Yes | |
-| `decodepsbt` | — | PSBT not implemented |
+| `decodepsbt` | Yes | Base64 PSBT → JSON, computes fee when UTXOs present |
 | `decoderawtransaction` | Yes | |
 | `decodescript` | Yes | |
-| `finalizepsbt` | — | PSBT not implemented |
+| `finalizepsbt` | Yes | Standard scripts (single-sig/multisig/P2TR key-path); extracts network tx when complete |
 | `fundrawtransaction` | — | Requires wallet UTXO selection |
 | `getrawtransaction` | Yes | Mempool + full history with `--txindex` (blockhash/confirmations/blocktime in verbose mode) |
-| `joinpsbts` | — | PSBT not implemented |
+| `joinpsbts` | Yes | Unions distinct PSBTs' inputs/outputs |
 | `sendrawtransaction` | Yes | |
 | `signrawtransactionwithkey` | Yes | P2PKH, P2WPKH, P2SH-P2WPKH |
 | `testmempoolaccept` | Yes | |
-| `utxoupdatepsbt` | — | PSBT not implemented |
+| `utxoupdatepsbt` | Yes | Adds witness UTXOs from the node's UTXO set |
 
 **Util (8/8):**
 

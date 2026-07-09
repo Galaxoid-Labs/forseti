@@ -36,6 +36,7 @@
 | 157 | Client Side Block Filtering | P2P (serve getcfilters/getcfheaders/getcfcheckpt) |
 | 158 | Compact Block Filters (Basic) | GCS construction, filter building, filter DB |
 | 173 | Bech32 Addresses (v0) | Address encoding/decoding (P2WPKH, P2WSH) |
+| 174 | Partially Signed Bitcoin Transactions | `psbt/` + RPC: decodepsbt/createpsbt/converttopsbt/combinepsbt/joinpsbts/finalizepsbt/analyzepsbt/utxoupdatepsbt (non-wallet subset — no signing/funding) |
 | 300 | Hashrate Escrows (Drivechain) | `drivechain/` package: M1-M6 message codecs, D1/D2 databases, CTIP tracking, OP_DRIVECHAIN — opt-in via `--drivechain` |
 | 301 | Blind Merged Mining | `drivechain/` package: BMM accept/request parsing and matching — opt-in via `--drivechain` |
 | 324 | Version 2 P2P Encrypted Transport | P2P (ElligatorSwift ECDH, FSChaCha20Poly1305, v1 fallback) |
@@ -61,9 +62,14 @@ BIPs that are merged and in use on the network but **not** (fully) supported her
   are recognized (peers that send them without the service bit are disconnected per
   BIP111), but no bloom matching or `merkleblock` serving is implemented. Deprecated
   and off by default in Bitcoin Core.
-- **BIP174 / BIP370 (PSBT)** — not implemented. Forseti has no wallet; raw-transaction
-  RPCs (`createrawtransaction`, `combinerawtransaction`, `signrawtransactionwithkey`)
-  cover the non-PSBT path only.
+- **BIP174 (PSBT)** — the **non-wallet** RPCs are implemented (see the table above):
+  decode/create/converttopsbt/combine/join/finalize/analyze/utxoupdate. The
+  **wallet-side** operations (`walletprocesspsbt`, `walletcreatefundedpsbt`,
+  `descriptorprocesspsbt`) are absent — Forseti has no wallet. `finalizepsbt`
+  assembles standard script types (single-sig, multisig, P2TR key-path); exotic
+  scripts are left unfinalized. `utxoupdatepsbt` populates witness UTXOs from the
+  node's UTXO set; non-witness inputs need the full prev tx (txindex).
+- **BIP370 (PSBTv2)** — not implemented; the codec is PSBT v0 only.
 - **BIP384 (`combo()` descriptor)** — explicitly unsupported by the descriptor parser.
 - **BIP9 (versionbits)** — Forseti uses hardcoded per-network activation heights
   (see `consensus/params.odin`) instead of versionbits deployment tracking. Equivalent

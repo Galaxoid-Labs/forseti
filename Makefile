@@ -33,6 +33,7 @@ test: deps
 	odin test zmq -extra-linker-flags:"$(CXX_LINK)"
 	odin test drivechain -extra-linker-flags:"$(CXX_LINK)"
 	odin test descriptor -extra-linker-flags:"$(CXX_LINK)" -define:ODIN_TEST_THREADS=1
+	odin test psbt -extra-linker-flags:"$(CXX_LINK)"
 
 debug: deps
 	odin build . -out:forseti -debug -extra-linker-flags:"$(CXX_LINK)"

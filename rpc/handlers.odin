@@ -1857,15 +1857,21 @@ _script_to_address :: proc(spk: []byte, params: ^consensus.Chain_Params) -> (str
 // a `case` to _dispatch, add it here, sorted.
 RPC_METHODS := [?]string{
 	"addnode",
+	"analyzepsbt",
 	"clearbanned",
+	"combinepsbt",
 	"combinerawtransaction",
+	"converttopsbt",
 	"createmultisig",
+	"createpsbt",
 	"createrawtransaction",
+	"decodepsbt",
 	"decoderawtransaction",
 	"decodescript",
 	"deriveaddresses",
 	"disconnectnode",
 	"estimatesmartfee",
+	"finalizepsbt",
 	"generateblock",
 	"generatetoaddress",
 	"generatetodescriptor",
@@ -1905,6 +1911,7 @@ RPC_METHODS := [?]string{
 	"gettxoutproof",
 	"gettxoutsetinfo",
 	"help",
+	"joinpsbts",
 	"listbanned",
 	"listsidechains",
 	"listwithdrawalstatus",
@@ -1925,6 +1932,7 @@ RPC_METHODS := [?]string{
 	"submitheader",
 	"testmempoolaccept",
 	"uptime",
+	"utxoupdatepsbt",
 	"validateaddress",
 	"verifychain",
 	"verifymessage",
@@ -2004,6 +2012,14 @@ _get_method_help :: proc(method: string) -> string {
 	case "createrawtransaction":        return "createrawtransaction [{\"txid\":\"hex\",\"vout\":n},...] [{\"address\":amount},...] ( locktime replaceable )\nCreate a transaction spending the given inputs and creating new outputs."
 	case "combinerawtransaction":       return "combinerawtransaction [\"hex\",...]\nCombine multiple partially signed transactions into one transaction."
 	case "signrawtransactionwithkey":   return "signrawtransactionwithkey \"hex\" [\"privatekey\",...] ( [{\"txid\":\"hex\",\"vout\":n,\"scriptPubKey\":\"hex\",\"amount\":n},...] \"sighashtype\" )\nSign inputs for raw transaction with provided private keys."
+	case "decodepsbt":                  return "decodepsbt \"psbt\"\nReturn a JSON object representing the serialized, base64-encoded partially signed Bitcoin transaction."
+	case "createpsbt":                  return "createpsbt [{\"txid\":\"hex\",\"vout\":n},...] [{\"address\":amount},...] ( locktime replaceable )\nCreates a transaction in the Partially Signed Transaction format. Returns base64 PSBT."
+	case "converttopsbt":               return "converttopsbt \"hexstring\"\nConverts a network serialized transaction to a PSBT. ScriptSigs and witnesses are stripped."
+	case "combinepsbt":                 return "combinepsbt [\"psbt\",...]\nCombine multiple partially signed transactions (same unsigned tx) into one. Returns base64 PSBT."
+	case "joinpsbts":                   return "joinpsbts [\"psbt\",...]\nJoins multiple distinct PSBTs into one, unioning their inputs and outputs. Returns base64 PSBT."
+	case "finalizepsbt":                return "finalizepsbt \"psbt\" ( extract )\nFinalize the inputs of a PSBT. If complete and extract=true, returns the network tx hex; otherwise returns the finalized PSBT."
+	case "analyzepsbt":                 return "analyzepsbt \"psbt\"\nAnalyzes and provides information about the current status of a PSBT and its inputs (next role, missing UTXOs, fee)."
+	case "utxoupdatepsbt":              return "utxoupdatepsbt \"psbt\"\nUpdates a PSBT with witness UTXOs retrieved from the node's UTXO set. Non-witness inputs require txindex."
 	case "verifytxoutproof":           return "verifytxoutproof \"proof\"\nVerifies that a proof points to a transaction in a block, returning the txids."
 	case "getblockfilter":             return "getblockfilter \"blockhash\" ( \"filtertype\" )\nRetrieve a BIP 158 content filter for a particular block."
 	case "listsidechains":             return "listsidechains\nList active BIP300 sidechains (D1) and pending sidechain proposals. Requires --drivechain=track or enforce."
