@@ -71,9 +71,10 @@ _init_params :: proc "contextless" () {
 		p2sh_prefix              = 0x05,
 		bech32_hrp               = "bc",
 	}
-	// Assumevalid: skip script verification below this height.
-	// Height 880,000 is well-established mainnet (mined early 2024).
-	MAINNET_PARAMS.assumevalid_height = 880_000
+	// Assumevalid: skip script verification below this height. Matches Bitcoin
+	// Core's defaultAssumeValid (kernel/chainparams.cpp, v30.x): block 938,343
+	// = 00000000000000000000ccebd6d74d9194d8dcdc1d177c478e094bfad51ba5ac.
+	MAINNET_PARAMS.assumevalid_height = 938_343
 	// Anchor from our own validated chain at block 956,927 (2026-07-06).
 	MAINNET_PARAMS.assumed_chain_tx = 1_391_821_549
 	MAINNET_PARAMS.assumed_chain_tx_time = 1_783_348_198
@@ -114,7 +115,9 @@ _init_params :: proc "contextless" () {
 		bech32_hrp               = "tb",
 	}
 	TESTNET3_PARAMS.pow_limit = MAINNET_PARAMS.pow_limit
-	TESTNET3_PARAMS.assumevalid_height = 2_100_000
+	// Bitcoin Core defaultAssumeValid (v30.x): block 4,842,348
+	// = 000000007a61e4230b28ac5cb6b5e5a0130de37ac1faf2f8987d2fa6505b67f4.
+	TESTNET3_PARAMS.assumevalid_height = 4_842_348
 	TESTNET3_PARAMS.assumed_chain_tx = 480_000_000
 	TESTNET3_PARAMS.assumed_chain_tx_time = 1_783_300_000
 	TESTNET3_PARAMS.assumed_tx_rate = 2.0
@@ -142,7 +145,9 @@ _init_params :: proc "contextless" () {
 		bech32_hrp               = "tb",
 	}
 	TESTNET4_PARAMS.pow_limit = MAINNET_PARAMS.pow_limit
-	TESTNET4_PARAMS.assumevalid_height = 200_000
+	// Bitcoin Core defaultAssumeValid (v30.x): block 123,613
+	// = 0000000002368b1e4ee27e2e85676ae6f9f9e69579b29093e9a82c170bf7cf8a.
+	TESTNET4_PARAMS.assumevalid_height = 123_613
 	TESTNET4_PARAMS.assumed_chain_tx = 8_000_000
 	TESTNET4_PARAMS.assumed_chain_tx_time = 1_783_300_000
 	TESTNET4_PARAMS.assumed_tx_rate = 0.5
@@ -260,7 +265,9 @@ _init_params :: proc "contextless" () {
 	SIGNET_PARAMS.signet_challenge[70] = 0xae // OP_CHECKMULTISIG
 
 	// Assumevalid: skip script verification below this height
-	SIGNET_PARAMS.assumevalid_height = 267_665
+	// Bitcoin Core defaultAssumeValid for the default signet challenge (v30.x):
+	// block 293,175 = 00000008414aab61092ef93f1aacc54cf9e9f16af29ddad493b908a01ff5c329.
+	SIGNET_PARAMS.assumevalid_height = 293_175
 	SIGNET_PARAMS.assumed_chain_tx = 15_000_000
 	SIGNET_PARAMS.assumed_chain_tx_time = 1_783_300_000
 	SIGNET_PARAMS.assumed_tx_rate = 0.2
