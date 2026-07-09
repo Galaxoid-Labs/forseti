@@ -199,6 +199,22 @@ test_is_valid_amount :: proc(t: ^testing.T) {
 // --- Script flags tests ---
 
 @(test)
+test_cumulative_subsidy :: proc(t: ^testing.T) {
+	params := MAINNET_PARAMS
+	// Genesis alone: one 50-BTC subsidy.
+	testing.expect_value(t, get_cumulative_subsidy(0, &params), i64(50) * COIN)
+	// Last block of the first halving epoch: 210000 blocks x 50 BTC.
+	testing.expect_value(t, get_cumulative_subsidy(209_999, &params), i64(210_000) * 50 * COIN)
+	// First block after the halving adds 25 BTC.
+	testing.expect_value(t, get_cumulative_subsidy(210_000, &params), i64(210_000) * 50 * COIN + 25 * COIN)
+	// Must never exceed the 21M cap, even far in the future.
+	testing.expect(t, get_cumulative_subsidy(100_000_000, &params) <= MAX_MONEY, "cumulative supply <= MAX_MONEY")
+	testing.expect(t, get_cumulative_subsidy(100_000_000, &params) > 20_900_000 * COIN, "approaches 21M")
+	// Below genesis is zero.
+	testing.expect_value(t, get_cumulative_subsidy(-1, &params), i64(0))
+}
+
+@(test)
 test_get_script_flags :: proc(t: ^testing.T) {
 	// Pre-BIP66 mainnet height (< 363725)
 	params := MAINNET_PARAMS

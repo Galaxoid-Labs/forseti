@@ -630,6 +630,38 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 	cs.prof.t_index   += time.tick_diff(t_undo, t_end)
 	cs.prof.t_total   += time.tick_diff(t_start, t_end)
 
+	// Global correctness tripwire: the live UTXO set's total value can never
+	// exceed the cumulative block subsidy at this height (coins are only created
+	// by coinbases; spends only shrink the set). A breach is proof of an
+	// inflation / UTXO-accounting bug (e.g. leaked stale coins) — halt LOUDLY
+	// rather than silently build on a corrupt set, which is how the 2026-07-09
+	// recovery leak went unnoticed. Cheap O(halvings), only acts on violation.
+	if verr := check_supply_invariant(cs, entry.height); verr != .None {
+		return verr
+	}
+
+	return .None
+}
+
+// Verify the rolling UTXO-set total does not exceed the maximum possible supply
+// at `height`. Only meaningful when the rolling stats are valid (from-genesis or
+// loaded); a no-op otherwise. Returns .Supply_Invariant_Violation on breach.
+check_supply_invariant :: proc(cs: ^Chain_State, height: int) -> Chain_Error {
+	if !cs.coins.stats_valid {
+		return .None
+	}
+	if cs.coins.stat_amount < 0 || cs.coins.stat_count < 0 {
+		log.errorf("SUPPLY INVARIANT VIOLATED at height %d: negative UTXO stats (count=%d amount=%d) — UTXO accounting is corrupt",
+			height, cs.coins.stat_count, cs.coins.stat_amount)
+		return .Supply_Invariant_Violation
+	}
+	max_supply := consensus.get_cumulative_subsidy(height, cs.params)
+	if cs.coins.stat_amount > max_supply {
+		log.errorf("SUPPLY INVARIANT VIOLATED at height %d: UTXO set totals %d sat but max possible supply is %d sat (excess %d sat / %.4f BTC) — inflation or UTXO-accounting bug",
+			height, cs.coins.stat_amount, max_supply, cs.coins.stat_amount - max_supply,
+			f64(cs.coins.stat_amount - max_supply) / f64(consensus.COIN))
+		return .Supply_Invariant_Violation
+	}
 	return .None
 }
 
