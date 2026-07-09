@@ -1941,6 +1941,9 @@ RPC_METHODS := [?]string{
 	"verifychain",
 	"verifymessage",
 	"verifytxoutproof",
+	"waitforblock",
+	"waitforblockheight",
+	"waitfornewblock",
 }
 
 _handle_help :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
@@ -2028,6 +2031,9 @@ _get_method_help :: proc(method: string) -> string {
 	case "getaddrmaninfo":              return "getaddrmaninfo\nReturns per-network address counts from the address manager. forseti has no new/tried split, so all are reported as new."
 	case "gettxspendingprevout":        return "gettxspendingprevout [{\"txid\":\"hex\",\"vout\":n},...]\nScans the mempool to see if any transaction spends the given outputs; returns spendingtxid when found."
 	case "getdeploymentinfo":           return "getdeploymentinfo ( \"blockhash\" )\nReturns soft-fork deployment status at the tip (or given block). forseti uses hardcoded activation heights, so all deployments are reported as buried."
+	case "waitfornewblock":             return "waitfornewblock ( timeout )\nWaits for a new block (any tip change) and returns {hash, height}. timeout in ms (0 = no timeout)."
+	case "waitforblock":                return "waitforblock \"blockhash\" ( timeout )\nWaits until the chain tip is the given block hash, then returns {hash, height}. timeout in ms (0 = no timeout)."
+	case "waitforblockheight":          return "waitforblockheight height ( timeout )\nWaits until the chain tip reaches the given height, then returns {hash, height}. timeout in ms (0 = no timeout)."
 	case "verifytxoutproof":           return "verifytxoutproof \"proof\"\nVerifies that a proof points to a transaction in a block, returning the txids."
 	case "getblockfilter":             return "getblockfilter \"blockhash\" ( \"filtertype\" )\nRetrieve a BIP 158 content filter for a particular block."
 	case "listsidechains":             return "listsidechains\nList active BIP300 sidechains (D1) and pending sidechain proposals. Requires --drivechain=track or enforce."

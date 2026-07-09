@@ -636,6 +636,12 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_gettxspendingprevout(srv, req.params)
 	case "getdeploymentinfo":
 		return _handle_getdeploymentinfo(srv, req.params)
+	case "waitfornewblock":
+		return _handle_waitfornewblock(srv, req.params)
+	case "waitforblock":
+		return _handle_waitforblock(srv, req.params)
+	case "waitforblockheight":
+		return _handle_waitforblockheight(srv, req.params)
 	case "gettxoutsetinfo":
 		return _handle_gettxoutsetinfo(srv, req.params)
 	case "gettxoutproof":

@@ -2,12 +2,101 @@ package rpc
 
 import "core:encoding/json"
 import "core:sync"
+import "core:time"
 
 import "../chain"
 import "../p2p"
 import "../wire"
 
 // Additional Bitcoin Core v30 non-wallet RPCs.
+
+// --- waitfornewblock / waitforblock / waitforblockheight ---
+
+_WAIT_POLL :: 50 * time.Millisecond
+
+// _wait_current returns the current tip as {hash, height}.
+_wait_current :: proc(srv: ^RPC_Server) -> RPC_Response {
+	h, ht := chain.chain_tip(srv.chain)
+	obj := make(json.Object, 2, context.temp_allocator)
+	obj["hash"] = json.Value(json.String(_hash_to_hex(h)))
+	obj["height"] = json.Value(json.Integer(i64(ht)))
+	return _make_result(json.Value(obj), srv._current_id)
+}
+
+// _timed_out reports whether timeout_ms (0 = no timeout) has elapsed since tick.
+_timed_out :: proc(tick: time.Tick, timeout_ms: int) -> bool {
+	return timeout_ms > 0 && time.duration_milliseconds(time.tick_since(tick)) >= f64(timeout_ms)
+}
+
+_handle_waitfornewblock :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	timeout_ms := 0
+	if t, ok := _get_int_param(params, 0); ok {
+		timeout_ms = t
+	}
+	start_hash, _ := chain.chain_tip(srv.chain)
+	tick := time.tick_now()
+	for {
+		h, _ := chain.chain_tip(srv.chain)
+		if h != start_hash {
+			break
+		}
+		if _timed_out(tick, timeout_ms) {
+			break
+		}
+		time.sleep(_WAIT_POLL)
+	}
+	return _wait_current(srv)
+}
+
+_handle_waitforblock :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	target_hex, ok := _get_string_param(params, 0)
+	if !ok {
+		return _make_error(.Invalid_Params, "Missing blockhash parameter", srv._current_id)
+	}
+	target, h_ok := _hex_to_hash(target_hex)
+	if !h_ok {
+		return _make_error(.Invalid_Params, "Invalid block hash", srv._current_id)
+	}
+	timeout_ms := 0
+	if t, t_ok := _get_int_param(params, 1); t_ok {
+		timeout_ms = t
+	}
+	tick := time.tick_now()
+	for {
+		h, _ := chain.chain_tip(srv.chain)
+		if h == target {
+			break
+		}
+		if _timed_out(tick, timeout_ms) {
+			break
+		}
+		time.sleep(_WAIT_POLL)
+	}
+	return _wait_current(srv)
+}
+
+_handle_waitforblockheight :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	target, ok := _get_int_param(params, 0)
+	if !ok {
+		return _make_error(.Invalid_Params, "Missing height parameter", srv._current_id)
+	}
+	timeout_ms := 0
+	if t, t_ok := _get_int_param(params, 1); t_ok {
+		timeout_ms = t
+	}
+	tick := time.tick_now()
+	for {
+		_, ht := chain.chain_tip(srv.chain)
+		if ht >= target {
+			break
+		}
+		if _timed_out(tick, timeout_ms) {
+			break
+		}
+		time.sleep(_WAIT_POLL)
+	}
+	return _wait_current(srv)
+}
 
 // --- getprioritisedtransactions ---
 
