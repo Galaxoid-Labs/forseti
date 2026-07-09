@@ -5,6 +5,7 @@ import "../storage"
 import "core:c"
 import "core:fmt"
 import "core:os"
+import "core:strconv"
 import "core:testing"
 
 foreign import leveldb "../deps/lib/libleveldb.a"
@@ -40,6 +41,14 @@ test_audit_datadir :: proc(t: ^testing.T) {
 	over_50btc_amt: i64 = 0
 	total_amt: i64 = 0
 	total_cnt: i64 = 0
+	// Coins above a cutoff (crash-recovery straggler check).
+	cutoff_s, _ := os.lookup_env("BTCNODE_AUDIT_CUTOFF", context.temp_allocator)
+	cutoff := -1
+	if cutoff_s != "" { cutoff, _ = strconv.parse_int(cutoff_s) }
+	above_cnt: i64 = 0
+	min_above := max(int)
+	above_heights: [12]int  // first few offending heights
+	above_n := 0
 
 	iter := leveldb_create_iterator(cs.utxo_db.store.chainstate_db, cs.utxo_db.store.read_opts)
 	defer leveldb_iter_destroy(iter)
@@ -60,6 +69,11 @@ test_audit_datadir :: proc(t: ^testing.T) {
 				total_cnt += 1
 				if amt > max_amt { max_amt = amt }
 				if amt > 50_0000_0000 { over_50btc_cnt += 1; over_50btc_amt += amt }
+				if cutoff >= 0 && int(h) > cutoff {
+					above_cnt += 1
+					if int(h) < min_above { min_above = int(h) }
+					if above_n < len(above_heights) { above_heights[above_n] = int(h); above_n += 1 }
+				}
 				bi := int(h) / 100_000
 				if bi >= NB { bi = NB - 1 }
 				bucket_amt[bi] += amt
@@ -75,6 +89,10 @@ test_audit_datadir :: proc(t: ^testing.T) {
 
 	fmt.printf("\n===== UTXO AMOUNT AUDIT (tip %d) =====\n", height)
 	fmt.printf("total: %d coins, %.8f BTC\n", total_cnt, f64(total_amt)/1e8)
+	if cutoff >= 0 {
+		fmt.printf("coins with height > %d: %d (min height %d) sample=%v\n",
+			cutoff, above_cnt, min_above if above_cnt > 0 else 0, above_heights[:above_n])
+	}
 	fmt.printf("max single UTXO: %.8f BTC\n", f64(max_amt)/1e8)
 	fmt.printf("coins > 50 BTC: %d, summing %.8f BTC\n", over_50btc_cnt, f64(over_50btc_amt)/1e8)
 	fmt.printf("--- amount by 100k height bucket ---\n")

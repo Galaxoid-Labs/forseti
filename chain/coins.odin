@@ -132,6 +132,21 @@ coins_cache_destroy :: proc(cc: ^Coins_Cache) {
 	delete(cc.flush_dc_state)
 }
 
+// Drop every cached entry, returning all script memory to the OS. ONLY safe when
+// no dirty entries remain (call right after a flush): it discards the map and
+// arena wholesale without writing anything back. Used by crash recovery after the
+// DB-level straggler sweep so the replay reads the (swept) DB as the sole source
+// of truth — a live cache entry the sweep can't see would otherwise mask a stale
+// coin and trip BIP30 on re-connect.
+coins_cache_evict_all :: proc(cc: ^Coins_Cache) {
+	coins_cache_flush_join(cc)
+	delete(cc.cache)
+	cc.cache = make(map[wire.Outpoint]Cache_Entry, 1024, cc.allocator)
+	cc.mem_usage = 0
+	virtual.arena_destroy(&cc.script_arena)
+	_ = virtual.arena_init_growing(&cc.script_arena, 64 * 1024 * 1024)
+}
+
 // Look up a UTXO. Checks cache first, then falls through to DB.
 coins_cache_get :: proc(cc: ^Coins_Cache, outpoint: wire.Outpoint) -> (storage.UTXO_Coin, bool) {
 	entry, found := cc.cache[outpoint]

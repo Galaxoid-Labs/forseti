@@ -1342,6 +1342,27 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 			return
 		}
 
+		// Belt-and-suspenders convergence guarantee. The undo rollback SHOULD have
+		// removed every coin created above meta_height, but a partial BACKGROUND
+		// flush can strand entries the rollback misses — surfacing as a Bip30
+		// halt below bip34_height, or SILENT UTXO-set inflation above it (the
+		// 775k-805k mainnet corruption, 2026-07-09). A coin whose stored height is
+		// above meta_height provably cannot exist @meta_height, so sweep-delete
+		// any that remain. The cache holds only <=meta_height live entries here, so
+		// this touches nothing it knows about. O(DB) but recovery is rare.
+		swept := storage.utxo_db_sweep_above_height(&cs.utxo_db, meta_height)
+		if swept > 0 {
+			log.warnf("Crash recovery: swept %d stray UTXO(s) created above meta tip %d (partial-flush stragglers)",
+				swept, meta_height)
+		}
+
+		// Drop the cache so the forward replay reads the swept DB as the sole
+		// source of truth. The rollback can leave a LIVE cache entry for a coin
+		// the DB sweep just deleted; coins_cache_has checks the cache first, so
+		// that ghost would trip BIP30 on re-connect (below bip34) or re-leak
+		// (above). All dirty state was just flushed, so eviction loses nothing.
+		coins_cache_evict_all(&cs.coins)
+
 		for _, entry in cs.block_index.entries {
 			if .Valid_Chain in entry.status && entry.height > meta_height {
 				entry.status -= {.Valid_Chain}

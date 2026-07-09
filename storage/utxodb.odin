@@ -114,6 +114,53 @@ utxo_db_scan_stats :: proc(db: ^UTXO_DB) -> (count: u32, total_amount: i64) {
 	return
 }
 
+// Delete every UTXO whose stored creation-height > cutoff. Crash recovery uses
+// this to GUARANTEE the chainstate converges to exactly @meta_tip after a
+// partial background flush: a coin created above the tip cannot exist at the
+// tip, so any such entry left in the DB is a partial-flush straggler the
+// undo-rollback failed to remove. Iterates the read snapshot and batch-deletes;
+// batch deletes are chunked so the WAL stays bounded. Returns entries deleted.
+utxo_db_sweep_above_height :: proc(db: ^UTXO_DB, cutoff: int) -> (deleted: int) {
+	iter := leveldb_create_iterator(db.store.chainstate_db, db.store.read_opts)
+	defer leveldb_iter_destroy(iter)
+
+	batch := ldb_batch_create()
+	defer ldb_batch_destroy(batch)
+	pending := 0
+
+	leveldb_iter_seek_to_first(iter)
+	for leveldb_iter_valid(iter) != 0 {
+		klen: c.size_t
+		kptr := leveldb_iter_key(iter, &klen)
+		if klen == 36 {
+			vlen: c.size_t
+			vptr := leveldb_iter_value(iter, &vlen)
+			if vptr != nil && vlen >= 4 {
+				val := ([^]byte)(vptr)[:vlen]
+				h := u32(val[0]) | u32(val[1]) << 8 | u32(val[2]) << 16 | u32(val[3]) << 24
+				if int(h) > cutoff {
+					// WriteBatch copies the key immediately, so passing the
+					// transient iterator key slice is safe.
+					ldb_batch_delete(batch, ([^]byte)(kptr)[:klen])
+					deleted += 1
+					pending += 1
+					if pending >= 100_000 {
+						_ = ldb_batch_write(db.store.chainstate_db, db.store.write_opts, batch)
+						ldb_batch_destroy(batch)
+						batch = ldb_batch_create()
+						pending = 0
+					}
+				}
+			}
+		}
+		leveldb_iter_next(iter)
+	}
+	if pending > 0 {
+		_ = ldb_batch_write(db.store.chainstate_db, db.store.write_opts, batch)
+	}
+	return
+}
+
 // Add a put to a WriteBatch (for coins_cache_flush).
 utxo_db_batch_put :: proc(db: ^UTXO_DB, batch: LDB_WriteBatch, outpoint: wire.Outpoint, coin: UTXO_Coin) {
 	key := _utxo_key(outpoint)
