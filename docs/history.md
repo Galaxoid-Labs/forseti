@@ -71,10 +71,14 @@ Every build phase in order. See the [README](../README.md) for the current summa
 | 62 | Descriptor engine (getdescriptorinfo/deriveaddresses/scantxoutset/generatetodescriptor) | Complete |
 | 63 | txindex (--txindex, historical getrawtransaction) | Complete |
 | 64 | P2P topology hardening (block-relay-only, anchors, feelers, --maxuploadtarget) | Complete |
+| 65 | PSBT (BIP174) — codec + 8 non-wallet RPCs (decode/create/convert/combine/join/finalize/analyze/utxoupdate) | Complete |
+| 66 | Core v30 RPC parity — getprioritisedtransactions, getaddrmaninfo, gettxspendingprevout, getdeploymentinfo, getdescriptoractivity, getblockfrompeer, scanblocks, waitfor{block,blockheight,newblock} | Complete |
 
-**RPC coverage: 69/78 Core non-wallet RPCs** (73 methods total). Remaining
-Core RPCs are the PSBT family (9) + `fundrawtransaction`, and the package-relay
-RPC `submitpackage`.
+**RPC coverage: 87/94 Core v30 non-wallet RPCs** (91 methods total). The 7 not
+covered: the assumeutxo quartet (`dumptxoutset`/`loadtxoutset`/`getchainstates`/
+`importmempool`), `submitpackage` (package relay), `descriptorprocesspsbt`
+(needs a signing/private-key descriptor engine; ours is watch-only), and
+`fundrawtransaction` (wallet).
 
 ## What's Left to Build
 
@@ -89,6 +93,6 @@ RPC `submitpackage`.
 ### Features
 
 - **Package relay / TRUC (v3)** — `submitpackage`, 1-parent-1-child acceptance
-- **PSBT family** — the 9 BIP174 RPCs + `fundrawtransaction` (wallet-adjacent)
-- **assumeutxo** — `dumptxoutset`/`loadtxoutset` fast bootstrap
+- **assumeutxo** — `dumptxoutset`/`loadtxoutset`/`getchainstates`/`importmempool` fast bootstrap
+- **Signing descriptor engine** — private-key descriptors would unlock `descriptorprocesspsbt` (PSBT signing); `fundrawtransaction` needs a wallet
 - **REST interface** (`-rest`), `-reindex`

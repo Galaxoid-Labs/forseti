@@ -43,7 +43,7 @@ Full build details in [docs/build.md](build.md). Quick version:
 - **Build:**
   ```bash
   make            # builds C deps (libsecp256k1, LevelDB, ripemd160, sha256) + forseti
-  make test       # optional sanity: 364 tests / 12 pkgs
+  make test       # optional sanity: 378 tests / 13 pkgs
   ```
   If C-dep link warnings appear on a fresh toolchain, see the build-notes in the repo CLAUDE.md (`rm -f deps/lib/*.a && ./deps/build.sh`).
 

@@ -48,7 +48,7 @@ The binary is output as `forseti` in the project root.
 ## Testing
 
 ```bash
-make test         # all 364 tests across 12 packages
+make test         # all 378 tests across 13 packages
 ```
 
 | Package | Tests | | Package | Tests |

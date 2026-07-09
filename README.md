@@ -10,7 +10,7 @@ with only C dependencies Bitcoin Core itself uses (libsecp256k1, LevelDB).
 
 **Fully synced and verified on mainnet** — tip hash and UTXO totals
 cross-checked against the public network — plus signet, testnet4, and
-testnet3. 364 tests across 12 packages.
+testnet3. 378 tests across 13 packages.
 
 ## Highlights
 
@@ -18,9 +18,9 @@ testnet3. 364 tests across 12 packages.
   all deployed soft forks, parallel script verification, assumevalid
 - **Headers-first IBD** with multi-peer download, compact blocks (BIP152),
   and encrypted v2 transport (BIP324) with automatic v1 fallback both ways
-- **Bitcoin Core-compatible surface** — 69 of Core's 78 non-wallet RPCs,
-  cookie auth, `bitcoin.conf`-style config, Core CLI flag names,
-  [electrs](https://github.com/romanz/electrs) runs against it unmodified
+- **Bitcoin Core-compatible surface** — 87 of Core v30's 94 non-wallet RPCs
+  (incl. the BIP174 PSBT family), cookie auth, `bitcoin.conf`-style config,
+  Core CLI flag names, [electrs](https://github.com/romanz/electrs) runs against it unmodified
 - **ZMQ notifications** — Core's `zmqpub*` interface via a native ZMTP 3.0
   implementation (no libzmq), LND-ready
 - **Crash-safe by construction** — chunked atomic flushes, undo-based
@@ -116,7 +116,7 @@ On a fast CPU with hardware SHA-256, IBD is **I/O-bound** — UTXO reads dominat
 | [docs/integrations.md](docs/integrations.md) | Electrum wallets via electrs (BDK/Sparrow), ZMQ notifications |
 | [docs/dashboards.md](docs/dashboards.md) | GUI window, terminal TUI, remote client |
 | [docs/architecture.md](docs/architecture.md) | Project layout, storage design, threading, sync internals |
-| [docs/bips.md](docs/bips.md) | All 36 implemented BIPs |
+| [docs/bips.md](docs/bips.md) | All 50 implemented BIPs |
 | [docs/hardware.md](docs/hardware.md) | What to run it on (SHA-256 backends, IBD times) |
 | [docs/full-validation-test.md](docs/full-validation-test.md) | Full-consensus sync from genesis (`--assumevalid=0`) — the strongest correctness test |
 | [docs/history.md](docs/history.md) | The 50 build phases and what's left |
