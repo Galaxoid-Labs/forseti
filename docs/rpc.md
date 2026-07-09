@@ -17,7 +17,9 @@ curl -s -u myuser:mypassword \
 bitcoin-cli -rpcport=18443 getblockchaininfo
 ```
 
-## Bitcoin Core RPC Coverage (77 / 78 non-wallet RPCs)
+## Bitcoin Core RPC Coverage (87 / 94 non-wallet RPCs, v30)
+
+The 7 not covered: `dumptxoutset`/`loadtxoutset`/`getchainstates`/`importmempool` (assumeutxo snapshot machinery), `submitpackage` (package relay), `descriptorprocesspsbt` (needs a signing/private-key descriptor engine; ours is watch-only), and `fundrawtransaction` (wallet).
 
 Plus four forseti-specific methods: `getnodestatus` (feeds the GUI/TUI
 dashboards) and the drivechain views `listsidechains`, `getsidechaininfo`,
@@ -25,20 +27,25 @@ and `listwithdrawalstatus` (see below).
 
 The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are intentionally excluded.
 
-**Blockchain (25/25):**
+**Blockchain (33/37):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
+| `dumptxoutset` | — | assumeutxo snapshot machinery (not implemented) |
 | `getbestblockhash` | Yes | |
 | `getblock` | Yes | Verbosity 0, 1, 2 |
 | `getblockchaininfo` | Yes | |
 | `getblockcount` | Yes | |
 | `getblockfilter` | Yes | BIP 157 compact block filter (basic) |
+| `getblockfrompeer` | Yes | Enqueues a getdata(block) to a peer via the P2P control queue |
 | `getblockhash` | Yes | |
 | `getblockheader` | Yes | |
 | `getblockstats` | Yes | |
+| `getchainstates` | — | assumeutxo (not implemented) |
 | `getchaintips` | Yes | |
 | `getchaintxstats` | Yes | |
+| `getdeploymentinfo` | Yes | Buried-style (hardcoded activation heights, no versionbits) |
+| `getdescriptoractivity` | Yes | Receives from block outputs, spends from undo data; optional mempool |
 | `getdifficulty` | Yes | |
 | `getmempoolancestors` | Yes | Verbose and non-verbose modes |
 | `getmempooldescendants` | Yes | Verbose and non-verbose modes |
@@ -48,12 +55,19 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `gettxout` | Yes | |
 | `gettxoutproof` | Yes | Partial merkle tree proof |
 | `gettxoutsetinfo` | Yes | Instant on datadirs with rolling UTXO stats (coinstatsindex-style); full scan on older datadirs |
+| `gettxspendingprevout` | Yes | Mempool scan for the tx spending each outpoint |
+| `importmempool` | — | assumeutxo/snapshot-adjacent (not implemented) |
+| `loadtxoutset` | — | assumeutxo (not implemented) |
 | `preciousblock` | Yes | Routed through the P2P control queue |
 | `pruneblockchain` | Yes | Requires `--prune` mode |
 | `savemempool` | Yes | |
+| `scanblocks` | Yes | BIP158 filter scan (requires `--blockfilterindex`); descriptor expansion |
 | `scantxoutset` | Yes | Synchronous scan of DB + cache; descriptor expansion with default range 1000 |
 | `verifychain` | Yes | Levels 0-2 (data reads, context-free validity, undo data); 3/4 run the level-2 checks |
 | `verifytxoutproof` | Yes | Merkle proof verification |
+| `waitforblock` | Yes | Blocks until the tip is the given hash (timeout ms) |
+| `waitforblockheight` | Yes | Blocks until the tip reaches a height (timeout ms) |
+| `waitfornewblock` | Yes | Blocks until any new tip (timeout ms) |
 
 **Control (6/6):**
 
@@ -74,18 +88,19 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `generatetoaddress` | Yes | Regtest only; mines mempool txs + coinbase |
 | `generatetodescriptor` | Yes | Non-ranged descriptors |
 
-**Mining (6/6):**
+**Mining (7/7):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
 | `getblocktemplate` | Yes | segwit rule required; feerate-ordered selection with in-mempool parents; mode=proposal; per-tx sigops reported as 0; no longpoll |
 | `getmininginfo` | Yes | |
 | `getnetworkhashps` | Yes | |
+| `getprioritisedtransactions` | Yes | Dumps the mempool fee-delta map (in_mempool, modified_fee) |
 | `prioritisetransaction` | Yes | Fee delta applied in template selection |
 | `submitblock` | Yes | Routed through the P2P control queue (chain single-writer); announces to peers + ZMQ |
 | `submitheader` | Yes | |
 
-**Network (13/13):**
+**Network (14/14):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
@@ -93,6 +108,7 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `clearbanned` | Yes | |
 | `disconnectnode` | Yes | By address or nodeid |
 | `getaddednodeinfo` | Yes | |
+| `getaddrmaninfo` | Yes | Per-network counts (flat table — all reported as `new`, `tried`=0) |
 | `getconnectioncount` | Yes | |
 | `getnettotals` | Yes | |
 | `getnetworkinfo` | Yes | |
@@ -103,7 +119,7 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `setban` | Yes | Address-level (subnets: /32 only) |
 | `setnetworkactive` | Yes | Disconnects all peers when false |
 
-**Raw Transactions (16/17):**
+**Raw Transactions (16/19):**
 
 | Method | Status | Notes |
 |--------|--------|-------|
@@ -116,12 +132,14 @@ The tables below show every non-wallet RPC from Bitcoin Core. Wallet RPCs are in
 | `decodepsbt` | Yes | Base64 PSBT → JSON, computes fee when UTXOs present |
 | `decoderawtransaction` | Yes | |
 | `decodescript` | Yes | |
+| `descriptorprocesspsbt` | — | Requires signing with descriptor private keys; the descriptor engine is watch-only (no xprv/WIF), so blocked |
 | `finalizepsbt` | Yes | Standard scripts (single-sig/multisig/P2TR key-path); extracts network tx when complete |
 | `fundrawtransaction` | — | Requires wallet UTXO selection |
 | `getrawtransaction` | Yes | Mempool + full history with `--txindex` (blockhash/confirmations/blocktime in verbose mode) |
 | `joinpsbts` | Yes | Unions distinct PSBTs' inputs/outputs |
 | `sendrawtransaction` | Yes | |
 | `signrawtransactionwithkey` | Yes | P2PKH, P2WPKH, P2SH-P2WPKH |
+| `submitpackage` | — | Package relay / package mempool acceptance (not implemented) |
 | `testmempoolaccept` | Yes | |
 | `utxoupdatepsbt` | Yes | Adds witness UTXOs from the node's UTXO set |
 
