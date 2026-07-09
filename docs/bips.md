@@ -4,9 +4,13 @@
 |-----|-------|---------------|
 | 11 | M-of-N Standard Transactions | Script interpreter (OP_CHECKMULTISIG) |
 | 13 | Address Format for P2SH | Address encoding/decoding |
+| 14 | Protocol Version and User Agent | P2P version handshake (`/Forseti:x.y.z/` subversion) |
 | 16 | Pay to Script Hash | Script interpreter (P2SH evaluation) |
-| 22 | getblocktemplate | — (not yet) |
+| 22 | getblocktemplate (Fundamentals) | RPC (getblocktemplate/submitblock; partial — no longpoll, greedy feerate selection, per-tx sigops reported 0) |
+| 23 | getblocktemplate (Pooled Mining) | RPC (mode=proposal, coinbaseaux/target/mutable fields) |
 | 30 | Duplicate Transactions | Consensus validation (reject duplicate coinbase txids) |
+| 31 | Pong Message | P2P (ping nonce → pong reply, liveness/RTT) |
+| 32 | Hierarchical Deterministic Wallets | `descriptor/` (CKDpub, xpub-only watch-only derivation) |
 | 35 | mempool P2P Message | P2P (reply with inv of mempool txids, gated by `--peerbloomfilters`) |
 | 34 | Block v2 (Height in Coinbase) | Consensus validation |
 | 65 | OP_CHECKLOCKTIMEVERIFY | Script interpreter |
@@ -23,6 +27,9 @@
 | 141 | Segregated Witness (Consensus) | Script interpreter, consensus validation |
 | 143 | Segwit Sighash (v0) | Sighash computation + caching |
 | 144 | Segregated Witness (Peer Services) | P2P (NODE_WITNESS service bit) |
+| 145 | getblocktemplate Updates for Segwit | RPC (segwit rule required; witness commitment in template) |
+| 146 | Signature Encoding Malleability | Script interpreter (Low_S, Null_Fail — policy flags, standardness) |
+| 147 | Dealing with Dummy Stack Element (NULLDUMMY) | Script interpreter + **consensus** (enforced from SegWit height) |
 | 152 | Compact Block Relay | P2P (send + receive, SipHash short IDs, reconstruction) |
 | 155 | addrv2 | P2P (addr relay, address manager, v1↔v2 conversion) |
 | 159 | NODE_NETWORK_LIMITED | P2P (service bit for nodes serving recent 288 blocks) |
@@ -38,6 +45,29 @@
 | 341 | Taproot (SegWit v1) | Script interpreter, sighash computation + caching |
 | 342 | Tapscript | Script interpreter (OP_CHECKSIGADD, leaf versioning) |
 | 350 | Bech32m Addresses (v1+) | Address encoding/decoding (P2TR) |
+| 380 | Output Script Descriptors (General) | `descriptor/` (checksum, parser, key expressions) |
+| 381 | Non-Segwit Descriptors | `descriptor/` (pkh, sh) |
+| 382 | Segwit Descriptors | `descriptor/` (wpkh, wsh) |
+| 383 | Multisig Descriptors | `descriptor/` (multi, sortedmulti) |
+| 385 | raw() and addr() Descriptors | `descriptor/` (raw, addr) |
+| 386 | tr() Descriptors | `descriptor/` (Taproot key-path + script tree) |
+
+## Not implemented / partial
+
+BIPs that are merged and in use on the network but **not** (fully) supported here:
+
+- **BIP37 (Connection Bloom Filtering)** — *stubbed only*. `NODE_BLOOM` is advertised
+  under `--peerbloomfilters` and the `filterload`/`filteradd`/`filterclear` commands
+  are recognized (peers that send them without the service bit are disconnected per
+  BIP111), but no bloom matching or `merkleblock` serving is implemented. Deprecated
+  and off by default in Bitcoin Core.
+- **BIP174 / BIP370 (PSBT)** — not implemented. Forseti has no wallet; raw-transaction
+  RPCs (`createrawtransaction`, `combinerawtransaction`, `signrawtransactionwithkey`)
+  cover the non-PSBT path only.
+- **BIP384 (`combo()` descriptor)** — explicitly unsupported by the descriptor parser.
+- **BIP9 (versionbits)** — Forseti uses hardcoded per-network activation heights
+  (see `consensus/params.odin`) instead of versionbits deployment tracking. Equivalent
+  on the settled honest chain; deployment status is not surfaced dynamically.
 
 ## BIP300/301 (Drivechain) notes
 
