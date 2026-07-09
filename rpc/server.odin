@@ -628,6 +628,14 @@ _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
 		return _handle_analyzepsbt(srv, req.params)
 	case "utxoupdatepsbt":
 		return _handle_utxoupdatepsbt(srv, req.params)
+	case "getprioritisedtransactions":
+		return _handle_getprioritisedtransactions(srv, req.params)
+	case "getaddrmaninfo":
+		return _handle_getaddrmaninfo(srv, req.params)
+	case "gettxspendingprevout":
+		return _handle_gettxspendingprevout(srv, req.params)
+	case "getdeploymentinfo":
+		return _handle_getdeploymentinfo(srv, req.params)
 	case "gettxoutsetinfo":
 		return _handle_gettxoutsetinfo(srv, req.params)
 	case "gettxoutproof":

@@ -1876,6 +1876,7 @@ RPC_METHODS := [?]string{
 	"generatetoaddress",
 	"generatetodescriptor",
 	"getaddednodeinfo",
+	"getaddrmaninfo",
 	"getbestblockhash",
 	"getblock",
 	"getblockchaininfo",
@@ -1888,6 +1889,7 @@ RPC_METHODS := [?]string{
 	"getchaintips",
 	"getchaintxstats",
 	"getconnectioncount",
+	"getdeploymentinfo",
 	"getdescriptorinfo",
 	"getdifficulty",
 	"getindexinfo",
@@ -1903,6 +1905,7 @@ RPC_METHODS := [?]string{
 	"getnodeaddresses",
 	"getnodestatus",
 	"getpeerinfo",
+	"getprioritisedtransactions",
 	"getrawmempool",
 	"getrawtransaction",
 	"getrpcinfo",
@@ -1910,6 +1913,7 @@ RPC_METHODS := [?]string{
 	"gettxout",
 	"gettxoutproof",
 	"gettxoutsetinfo",
+	"gettxspendingprevout",
 	"help",
 	"joinpsbts",
 	"listbanned",
@@ -2020,6 +2024,10 @@ _get_method_help :: proc(method: string) -> string {
 	case "finalizepsbt":                return "finalizepsbt \"psbt\" ( extract )\nFinalize the inputs of a PSBT. If complete and extract=true, returns the network tx hex; otherwise returns the finalized PSBT."
 	case "analyzepsbt":                 return "analyzepsbt \"psbt\"\nAnalyzes and provides information about the current status of a PSBT and its inputs (next role, missing UTXOs, fee)."
 	case "utxoupdatepsbt":              return "utxoupdatepsbt \"psbt\"\nUpdates a PSBT with witness UTXOs retrieved from the node's UTXO set. Non-witness inputs require txindex."
+	case "getprioritisedtransactions": return "getprioritisedtransactions\nReturns a map of all fee deltas set via prioritisetransaction, keyed by txid (with in_mempool and modified_fee)."
+	case "getaddrmaninfo":              return "getaddrmaninfo\nReturns per-network address counts from the address manager. forseti has no new/tried split, so all are reported as new."
+	case "gettxspendingprevout":        return "gettxspendingprevout [{\"txid\":\"hex\",\"vout\":n},...]\nScans the mempool to see if any transaction spends the given outputs; returns spendingtxid when found."
+	case "getdeploymentinfo":           return "getdeploymentinfo ( \"blockhash\" )\nReturns soft-fork deployment status at the tip (or given block). forseti uses hardcoded activation heights, so all deployments are reported as buried."
 	case "verifytxoutproof":           return "verifytxoutproof \"proof\"\nVerifies that a proof points to a transaction in a block, returning the txids."
 	case "getblockfilter":             return "getblockfilter \"blockhash\" ( \"filtertype\" )\nRetrieve a BIP 158 content filter for a particular block."
 	case "listsidechains":             return "listsidechains\nList active BIP300 sidechains (D1) and pending sidechain proposals. Requires --drivechain=track or enforce."
