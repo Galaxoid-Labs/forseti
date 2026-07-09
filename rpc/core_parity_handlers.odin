@@ -98,6 +98,40 @@ _handle_waitforblockheight :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_
 	return _wait_current(srv)
 }
 
+// --- getblockfrompeer ---
+
+_handle_getblockfrompeer :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	hash_hex, ok := _get_string_param(params, 0)
+	if !ok {
+		return _make_error(.Invalid_Params, "Missing blockhash parameter", srv._current_id)
+	}
+	hash, hash_ok := _hex_to_hash(hash_hex)
+	if !hash_ok {
+		return _make_error(.Invalid_Params, "Invalid block hash", srv._current_id)
+	}
+	peer_id, pid_ok := _get_int_param(params, 1)
+	if !pid_ok {
+		return _make_error(.Invalid_Params, "Missing peer_id parameter", srv._current_id)
+	}
+
+	// The block header must already be known (Core requires the header first).
+	entry, found := srv.chain.block_index.entries[hash]
+	if !found {
+		return _make_error(.Misc_Error, "Block header missing, try adding it first (getheaders/sendheaders)", srv._current_id)
+	}
+	if .Has_Data in entry.status {
+		return _make_error(.Misc_Error, "Block already downloaded", srv._current_id)
+	}
+
+	cm, has_cm := _require_cm(srv)
+	if !has_cm {
+		return _make_error(.Internal_Error, "P2P disabled", srv._current_id)
+	}
+	p2p.conn_manager_control(cm, p2p.Control_Request{action = .Get_Block_From_Peer, hash = hash, peer_id = p2p.Peer_Id(peer_id)})
+	// Core returns an empty object; the block arrives asynchronously.
+	return _make_result(json.Value(make(json.Object, 0, context.temp_allocator)), srv._current_id)
+}
+
 // --- getprioritisedtransactions ---
 
 _handle_getprioritisedtransactions :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {

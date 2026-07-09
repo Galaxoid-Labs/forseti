@@ -24,6 +24,7 @@ Control_Action :: enum {
 	Prune_Now,
 	Submit_Block,  // submitblock: validate+connect on the P2P thread, then announce
 	Submit_Header, // submitheader: header-only acceptance into the block index
+	Get_Block_From_Peer, // getblockfrompeer: send a getdata(block) to one peer
 }
 
 // Cross-thread node-control request (RPC thread → P2P event loop). Optional
@@ -819,6 +820,14 @@ _drain_control_queue :: proc(cm: ^Conn_Manager) {
 				log.info("Network deactivated via RPC (setnetworkactive false)")
 			} else {
 				log.info("Network reactivated via RPC")
+			}
+		case .Get_Block_From_Peer:
+			if peer, found := cm.peers[req.peer_id]; found {
+				inv := []wire.Inv_Vector{{type = .Witness_Block, hash = req.hash}}
+				peer_send_getdata(peer, inv)
+				log.infof("getblockfrompeer: requested %x from peer %d", req.hash, req.peer_id)
+			} else {
+				log.warnf("getblockfrompeer: peer %d not connected", req.peer_id)
 			}
 		case .Precious_Block:
 			if entry, found := cm.chain.block_index.entries[req.hash]; found {

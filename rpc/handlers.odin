@@ -1882,6 +1882,7 @@ RPC_METHODS := [?]string{
 	"getblockchaininfo",
 	"getblockcount",
 	"getblockfilter",
+	"getblockfrompeer",
 	"getblockhash",
 	"getblockheader",
 	"getblockstats",
@@ -2031,6 +2032,7 @@ _get_method_help :: proc(method: string) -> string {
 	case "getaddrmaninfo":              return "getaddrmaninfo\nReturns per-network address counts from the address manager. forseti has no new/tried split, so all are reported as new."
 	case "gettxspendingprevout":        return "gettxspendingprevout [{\"txid\":\"hex\",\"vout\":n},...]\nScans the mempool to see if any transaction spends the given outputs; returns spendingtxid when found."
 	case "getdeploymentinfo":           return "getdeploymentinfo ( \"blockhash\" )\nReturns soft-fork deployment status at the tip (or given block). forseti uses hardcoded activation heights, so all deployments are reported as buried."
+	case "getblockfrompeer":            return "getblockfrompeer \"blockhash\" peer_id\nRequests a block from a connected peer by nodeid (header must already be known). Returns an empty object; the block arrives asynchronously."
 	case "waitfornewblock":             return "waitfornewblock ( timeout )\nWaits for a new block (any tip change) and returns {hash, height}. timeout in ms (0 = no timeout)."
 	case "waitforblock":                return "waitforblock \"blockhash\" ( timeout )\nWaits until the chain tip is the given block hash, then returns {hash, height}. timeout in ms (0 = no timeout)."
 	case "waitforblockheight":          return "waitforblockheight height ( timeout )\nWaits until the chain tip reaches the given height, then returns {hash, height}. timeout in ms (0 = no timeout)."
@@ -3782,7 +3784,7 @@ _gbt_proposal :: proc(srv: ^RPC_Server, req: json.Object) -> RPC_Response {
 // thread is the only chain mutator).
 _submit_via_control :: proc(srv: ^RPC_Server, block: ^wire.Block, action: p2p.Control_Action) -> i64 {
 	if srv.cm == nil {
-		switch action {
+		#partial switch action {
 		case .Submit_Block:
 			hash := wire.block_header_hash(&block.header)
 			if entry, known := srv.chain.block_index.entries[hash]; known && .Valid_Chain in entry.status {
