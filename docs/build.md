@@ -26,7 +26,7 @@ publishes a release; the workflow can also be dispatched manually as a dry run.
 
 ```bash
 # Clone with submodules
-git clone --recursive https://github.com/youruser/bitcoin-node-odin.git
+git clone --recursive https://github.com/Galaxoid-Labs/bitcoin-node-odin.git
 cd bitcoin-node-odin
 
 # If you already cloned without --recursive:

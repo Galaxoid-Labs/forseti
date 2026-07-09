@@ -43,7 +43,7 @@ Prebuilt binaries (macOS arm64, Linux x64/arm64) are on the
 [releases page](../../releases). Or build from source:
 
 ```bash
-git clone --recursive https://github.com/youruser/bitcoin-node-odin.git
+git clone --recursive https://github.com/Galaxoid-Labs/bitcoin-node-odin.git
 cd bitcoin-node-odin && make
 
 ./btcnode --network=signet --datadir=~/btcnode-signet --gui   # small network, syncs fast
