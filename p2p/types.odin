@@ -108,7 +108,7 @@ LOCAL_SERVICES :: NODE_NETWORK | NODE_NETWORK_LIMITED | NODE_WITNESS
 // _on_periodic_timer; the GUI thread reads a copy at render time. Fixed-size
 // buffers throughout — populating the snapshot never allocates.
 
-STATUS_MAX_PEERS :: 16
+STATUS_MAX_PEERS :: 128 // covers the full --maxconnections=125 budget; GUI list scrolls
 
 Peer_Status :: struct {
 	id:               Peer_Id,
