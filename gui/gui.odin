@@ -132,6 +132,9 @@ g_net_in:  [NET_HISTORY]f32
 g_net_out: [NET_HISTORY]f32
 g_net_idx: int
 g_net_count: int
+
+// Persistent scroll offset for the peers list (raygui GuiScrollPanel state).
+g_peer_scroll: rl.Vector2
 g_prev_sent, g_prev_recv: i64
 g_prev_sample_t: f64
 
@@ -503,10 +506,23 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 		_text(h, col_x[i], 152, 13, COL_DIM)
 	}
 	rl.DrawLine(pad + 8, 168, WIN_W - pad - 8, 168, COL_LINE)
-	y: i32 = 176
+
+	// Scrollable rows inside the SAME fixed-height box: a raygui scroll panel
+	// over the row area, so overflow peers (up to STATUS_MAX_PEERS) are reachable
+	// via scrollbar/mouse-wheel without growing the panel. Headers + separator
+	// above stay fixed. The scrollbar only appears when content overflows.
+	row_h :: i32(18)
+	rows_top: i32 = 172
+	rows_bottom: i32 = 140 + i32(peers_h) - 4
+	rows_bounds := rl.Rectangle{f32(pad + 4), f32(rows_top), f32(WIN_W - 2 * (pad + 4)), f32(rows_bottom - rows_top)}
+	content_h := max(f32(st.peer_count * int(row_h) + 6), rows_bounds.height)
+	content := rl.Rectangle{rows_bounds.x, rows_bounds.y, rows_bounds.width - 14, content_h}
+	view: rl.Rectangle
+	rl.GuiScrollPanel(rows_bounds, nil, content, &g_peer_scroll, &view)
+	rl.BeginScissorMode(i32(view.x), i32(view.y), i32(view.width), i32(view.height))
 	for i in 0 ..< st.peer_count {
 		p := &st.peers[i]
-		if y > 140 + i32(peers_h) - 18 { break }
+		y := i32(rows_bounds.y) + i32(g_peer_scroll.y) + i32(i) * row_h + 2
 		addr := string(p.address[:p.addr_len])
 		agent := string(p.user_agent[:p.agent_len])
 		if len(agent) > 22 { agent = agent[:22] }
@@ -524,8 +540,8 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 		}
 		_text(fmt.ctprintf("%s", _fmt_bytes(p.bytes_sent)), col_x[7], y, 13, COL_TEXT)
 		_text(fmt.ctprintf("%s", _fmt_bytes(p.bytes_recv)), col_x[8], y, 13, COL_TEXT)
-		y += 18
 	}
+	rl.EndScissorMode()
 
 	// --- Network traffic graph (last 2 minutes, in/out bytes per second) ---
 	net_y: f32 = 352
