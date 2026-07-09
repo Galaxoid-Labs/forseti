@@ -665,6 +665,54 @@ check_supply_invariant :: proc(cs: ^Chain_State, height: int) -> Chain_Error {
 	return .None
 }
 
+// Offline UTXO-set integrity check (--checkutxo). Runs right after chain load,
+// while the cache is empty, so the rolling stats and the on-disk set both reflect
+// exactly @tip. Verifies two independent things and returns whether all passed:
+//   1. Supply cap: the DB's total value must not exceed the cumulative subsidy.
+//   2. Reconciliation: the persisted rolling stats must equal a full DB scan.
+// Together these catch inflation (leaked coins) AND drift between the rolling
+// counters and the real set — the two silent-corruption modes behind the
+// 2026-07-09 incident. A full scan (~seconds-to-minutes), so it's opt-in.
+check_utxo_consistency :: proc(cs: ^Chain_State) -> bool {
+	_, height := chain_tip(cs)
+	log.infof("UTXO consistency check at height %d (scanning chainstate)...", height)
+
+	db_count, db_amount := storage.utxo_db_scan_stats(&cs.utxo_db)
+	log.infof("  DB scan: %d coins, %d sat (%.8f BTC)", db_count, db_amount, f64(db_amount) / f64(consensus.COIN))
+
+	ok := true
+
+	// 1. Supply cap.
+	max_supply := consensus.get_cumulative_subsidy(height, cs.params)
+	if db_amount > max_supply {
+		log.errorf("  FAIL supply cap: UTXO total exceeds max possible supply by %.8f BTC (total %d sat > max %d sat) — INFLATION",
+			f64(db_amount - max_supply) / f64(consensus.COIN), db_amount, max_supply)
+		ok = false
+	} else {
+		log.infof("  OK supply cap: total <= max possible supply (%.8f BTC) at this height", f64(max_supply) / f64(consensus.COIN))
+	}
+
+	// 2. Rolling-stats reconciliation.
+	if cs.coins.stats_valid {
+		if i64(db_count) != cs.coins.stat_count || db_amount != cs.coins.stat_amount {
+			log.errorf("  FAIL reconciliation: rolling stats DIVERGE from DB scan — rolling(%d coins, %d sat) vs DB(%d coins, %d sat)",
+				cs.coins.stat_count, cs.coins.stat_amount, db_count, db_amount)
+			ok = false
+		} else {
+			log.infof("  OK reconciliation: rolling stats match the DB scan exactly")
+		}
+	} else {
+		log.info("  SKIP reconciliation: rolling stats not tracked for this datadir (legacy/repaired) — resync to enable")
+	}
+
+	if ok {
+		log.infof("UTXO consistency check PASSED at height %d", height)
+	} else {
+		log.errorf("UTXO consistency check FAILED at height %d — the UTXO set is corrupt (see failures above)", height)
+	}
+	return ok
+}
+
 // Disconnect the tip block from the active chain.
 disconnect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_Entry) -> Chain_Error {
 	// 1. Read undo data

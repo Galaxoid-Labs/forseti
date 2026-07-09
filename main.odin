@@ -148,6 +148,7 @@ CLI_Config :: struct {
 	// Maintenance / UI
 	wizard:      bool `args:"name=wizard" usage:"Interactive first-run setup: write a btcnode.conf, then exit."`,
 	repair_utxo: bool `args:"name=repairutxo" usage:"Sweep stale UTXO entries from local block data, then exit."`,
+	check_utxo:  bool `args:"name=checkutxo" usage:"Verify UTXO-set integrity (supply cap + rolling-stats reconciliation) at the current tip, then exit."`,
 	gui:         bool `args:"name=gui" usage:"Show GUI dashboard window (default: headless)."`,
 	tui:         bool `args:"name=tui" usage:"Terminal dashboard (for SSH sessions; q quits)."`,
 	daemon:      bool `args:"name=daemon" usage:"Run in the background (fork, detach from the terminal, log to <datadir>/debug.log)."`,
@@ -977,6 +978,12 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 	if cfg.repair_utxo {
 		chain.repair_utxo_sweep(cs)
 		return
+	}
+
+	// Verification mode: reconcile the UTXO set against its invariants and exit.
+	if cfg.check_utxo {
+		ok := chain.check_utxo_consistency(cs)
+		os.exit(ok ? 0 : 1)
 	}
 
 	// Initialize mempool with config from CLI/config file.
