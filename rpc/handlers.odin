@@ -421,6 +421,15 @@ _handle_getmempoolinfo :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Resp
 // --- getrawmempool ---
 
 _handle_getrawmempool :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	// getrawmempool ( verbose ) — verbose=true returns {txid: <mempoolentry>}.
+	if _get_bool_param(params, 0, false) {
+		obj := make(json.Object, mempool.mempool_count(srv.mp), context.temp_allocator)
+		for txid, entry in srv.mp.entries {
+			obj[_hash_to_hex(txid)] = json.Value(_format_mempool_entry(srv, entry))
+		}
+		return _make_result(json.Value(obj), srv._current_id)
+	}
+
 	count := mempool.mempool_count(srv.mp)
 	arr := make(json.Array, count, context.temp_allocator)
 
@@ -896,11 +905,13 @@ _format_mempool_entry :: proc(srv: ^RPC_Server, entry: ^mempool.Mempool_Entry) -
 	obj["descendantcount"] = json.Value(json.Integer(len(desc) + 1))
 	obj["descendantsize"] = json.Value(json.Integer(desc_size))
 
+	// Modified fee includes any prioritisetransaction delta for this tx.
+	delta := srv.mp.fee_deltas[entry.txid]
 	fees := make(json.Object, 4, context.temp_allocator)
 	fees["base"] = json.Value(json.Float(_satoshi_to_btc(entry.fee)))
-	fees["modified"] = json.Value(json.Float(_satoshi_to_btc(entry.fee))) // no prioritisetransaction
-	fees["ancestor"] = json.Value(json.Float(_satoshi_to_btc(anc_fees)))
-	fees["descendant"] = json.Value(json.Float(_satoshi_to_btc(desc_fees)))
+	fees["modified"] = json.Value(json.Float(_satoshi_to_btc(entry.fee + delta)))
+	fees["ancestor"] = json.Value(json.Float(_satoshi_to_btc(anc_fees + delta)))
+	fees["descendant"] = json.Value(json.Float(_satoshi_to_btc(desc_fees + delta)))
 	obj["fees"] = json.Value(fees)
 
 	// spentby: in-mempool children spending this tx's outputs.
@@ -1122,6 +1133,7 @@ _handle_getblockheader :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Resp
 	obj["nonce"] = json.Value(json.Integer(i64(entry.nonce)))
 	obj["bits"] = json.Value(json.String(fmt.tprintf("%08x", entry.bits)))
 	obj["difficulty"] = json.Value(json.Float(consensus.get_difficulty(entry.bits)))
+	obj["chainwork"] = json.Value(json.String(_bytes_to_hex(entry.chain_work[:])))
 	obj["nTx"] = json.Value(json.Integer(len(block.txs)))
 
 	if entry.height > 0 {
