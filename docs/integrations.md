@@ -118,6 +118,54 @@ so the RPCs it does *not* need (`getblock` verbosity 3 prevouts,
 > end-to-end against a live Esplora build. Use the regtest playbook below to
 > validate a specific Esplora version before relying on it.
 
+## mempool.space (explorer + mempool visualizer)
+
+[mempool.space](https://github.com/mempool/mempool) is a full explorer *stack*,
+not a single service: a Node.js **backend** that talks to the node over RPC, an
+**indexer** for address lookups (its own `mempool/electrs` fork, or
+romanz/electrs / Fulcrum), an optional MariaDB for historical stats, and the web
+frontend. From the *node* it needs the same things electrs/Esplora do, so it
+runs on the same footing against forseti.
+
+**RPC compatibility (verified by grepping the backend source):** the Core-RPC
+path calls 25 methods — **all implemented by forseti** — plus two it can run
+without: `submitpackage` (only the optional `POST /txs/package` broadcast
+endpoint; *not* on the indexing/mempool path) and `tweakFedPegScript`
+(Liquid-only). It leans on `getrawmempool` (plain **and** `verbose=true`),
+`getrawtransaction` (needs the `hex` field), `getmempoolentry`, `getblock`
+(verbosity 0/1/2 only), and `chainwork` — all present. It does **not** use
+`getrawmempool mempool_sequence` (it diffs the txid list itself), so no extra
+RPC work is required.
+
+**Requirements from the node:**
+- RPC with `txindex=1`, `server=1`, and auth → forseti: `--txindex --server=1`
+  plus a cookie or `--rpcuser`/`--rpcpassword`
+- an Electrum/Esplora indexer alongside (mempool's electrs fork, romanz/electrs,
+  or Fulcrum) — same setup as the sections above
+- unpruned node
+
+**Sketch** — start forseti with matching auth + txindex, run the indexer
+(Esplora section above) against the same datadir, then point the mempool backend
+at both via its `mempool-config.json`:
+```json
+{
+  "CORE_RPC":  { "HOST": "127.0.0.1", "PORT": 8332,
+                 "USERNAME": "mempool", "PASSWORD": "mempool" },
+  "ESPLORA":   { "REST_API_URL": "http://127.0.0.1:3000" },
+  "DATABASE":  { "ENABLED": true }
+}
+```
+```bash
+./forseti --network=mainnet --datadir=~/forseti --txindex \
+  --rpcuser=mempool --rpcpassword=mempool     # unpruned; same host as the stack
+```
+
+> **Status:** every RPC it needs is covered and the electrs/Esplora layer it
+> sits on already works against forseti, but the full stack has not been run
+> end-to-end yet. The only known degradation is the package-broadcast endpoint
+> (`POST /txs/package`, needs `submitpackage` — not implemented). Validate a
+> specific build with the regtest playbook below.
+
 ## Testing integrations on regtest
 
 A fast local smoke test that exercises both paths without waiting on IBD:
