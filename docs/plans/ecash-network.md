@@ -115,10 +115,23 @@ i.e. a **one-time reset to powLimit (min difficulty)** at the fork block;
 block is invalid. Standard retargeting resumes after. Fork height per network:
 mainnet `957600` (**a testing value, not final**), everything else `0`.
 
-**3. Remove OP_RETURN limits** (`b08f4ae`), **optional replay protection**
-(`01cfad9`, scheme not yet pulled — TBD), **drivechain seed** `seed.bip300.xyz`
-(`22fcef8`), **datadir/config rename** (`f013f1a`), **GBT without IBD/peers**
-(`8d4592a`).
+**3. Remove OP_RETURN limits (`b08f4ae`) — POLICY only, NOT consensus.** Touches
+only `policy/policy.cpp`+`.h`: drops the datacarrier check in `IsStandardTx()` and
+sets `MAX_OP_RETURN_RELAY = DEFAULT_BLOCK_MAX_WEIGHT` (effectively unlimited). A
+block with a large OP_RETURN was always consensus-valid; this just makes nodes
+relay/mempool-accept them. Does NOT remove the one-OP_RETURN-per-tx rule. For
+forseti = the existing `--datacarriersize` knob (we keep 83), no consensus change.
+
+**4. Optional replay protection (`01cfad9`) — per-tx serialization trick, NOT
+sighash.** In `primitives/transaction.h`: a tx opts in by setting
+`version == TX_REPLAY_VERSION (12566463)`, which makes the serializer emit an extra
+byte `TX_REPLAY_BYTES (0x3f)` after the version field (read + discarded on
+deserialize). The extra byte diverges the wire format so the tx won't parse
+identically on Bitcoin → not replayable. **Opt-in per transaction, not
+height-gated.** For forseti = a small tx (de)serializer branch on that version.
+
+**5. Plumbing:** **drivechain seed** `seed.bip300.xyz` (`22fcef8`),
+**datadir/config rename** (`f013f1a`), **GBT without IBD/peers** (`8d4592a`).
 
 ### This inverts the earlier comparison (OPEN QUESTION #2 resolved)
 
@@ -141,8 +154,12 @@ NOT the escrow machinery (the fork lacks it):
 2. **OP_DRIVECHAIN executable**: make the 4-byte `0xb4` pattern push a truthy value
    ≥ fork height (forseti already *recognizes* it via `parse_op_drivechain`; today
    it stays a NOP). Small.
-3. **Lift OP_RETURN limit** ≥ fork height (trivial; see bip110.md/datacarrier).
-4. **Replay protection** — pull commit `01cfad9` to learn the scheme (TODO).
+3. **Lift OP_RETURN limit** — POLICY only: raise/disable `--datacarriersize`
+   (no consensus change). Optional, config-driven.
+4. **Replay protection** — small (de)serializer branch: when
+   `tx.version == 12566463`, emit/consume one extra `0x3f` byte after the version.
+   Opt-in per tx, not height-gated. Needed to send/relay ecash-only txs and to
+   parse them.
 5. **Seed** `seed.bip300.xyz` + datadir/config name.
 
 None of this touches forseti's existing drivechain package; that stays as the
