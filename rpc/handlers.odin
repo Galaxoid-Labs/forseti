@@ -153,6 +153,35 @@ _handle_getbestblockhash :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Re
 
 // --- getblock ---
 
+// The genesis block's raw data is never stored on disk (peers don't serve it via
+// getdata; forseti keeps only its header in the index). Reconstruct it on demand
+// from the network's genesis header + Satoshi's coinbase tx so getblock(genesis)
+// works (Core parity — clients like electrs's --jsonrpc-import fetch genesis
+// first). Verified against the network's genesis merkle root, so it's correct for
+// every network using the standard coinbase (mainnet/testnet3/signet/regtest) and
+// safely declines for testnet4 (which has its own genesis coinbase, BIP94).
+_GENESIS_COINBASE_HEX :: "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000"
+
+_genesis_raw_block :: proc(srv: ^RPC_Server) -> ([]byte, bool) {
+	cb, ok := _hex_decode(_GENESIS_COINBASE_HEX)
+	if !ok {
+		return nil, false
+	}
+	// A single-tx block's merkle root IS the coinbase txid. Decline if this
+	// network's genesis doesn't use the standard coinbase (e.g. testnet4).
+	if crypto.sha256d(cb) != srv.chain.params.genesis_header.merkle_root {
+		return nil, false
+	}
+	w := wire.writer_init(context.temp_allocator)
+	hdr := srv.chain.params.genesis_header
+	wire.serialize_block_header(&w, &hdr)
+	buf := make([dynamic]byte, 0, wire.writer_len(&w) + 1 + len(cb), context.temp_allocator)
+	append(&buf, ..wire.writer_bytes(&w))
+	append(&buf, 0x01) // tx count = 1 (CompactSize)
+	append(&buf, ..cb)
+	return buf[:], true
+}
+
 _handle_getblock :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 	hash_hex, ok := _get_string_param(params, 0)
 	if !ok {
@@ -170,16 +199,26 @@ _handle_getblock :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 		return _make_error(.Block_Not_Found, "Block not found", srv._current_id)
 	}
 
-	// Default verbosity = 1
+	// Default verbosity = 1. Core accepts verbosity as an int OR a boolean
+	// (false => 0, true => 1); electrs's block fetcher sends `[hash, false]`.
 	verbosity := 1
-	v_val, v_ok := _get_int_param(params, 1)
-	if v_ok {
+	if v_val, v_ok := _get_int_param(params, 1); v_ok {
 		verbosity = v_val
+	} else if v_raw, raw_ok := _get_param(params, 1); raw_ok {
+		if b, is_bool := v_raw.(json.Boolean); is_bool {
+			verbosity = b ? 1 : 0
+		}
 	}
 
 	if verbosity == 0 {
 		// Raw hex serialized block
 		if .Has_Data not_in entry.status {
+			// Genesis is never stored on disk — reconstruct it (Core parity).
+			if entry.height == 0 {
+				if raw, gok := _genesis_raw_block(srv); gok {
+					return _make_result(json.Value(json.String(_bytes_to_hex(raw))), srv._current_id)
+				}
+			}
 			return _make_error(.Block_Not_Found, "Block data not available", srv._current_id)
 		}
 		loc := storage.Block_Location {
@@ -195,17 +234,32 @@ _handle_getblock :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
 	}
 
 	// Verbose mode: return JSON object
-	if .Has_Data not_in entry.status {
+	block: wire.Block
+	if .Has_Data in entry.status {
+		loc := storage.Block_Location {
+			file_num    = entry.file_num,
+			data_offset = entry.data_offset,
+			data_size   = entry.data_size,
+		}
+		b, berr := storage.block_db_read(&srv.chain.block_db, loc, context.temp_allocator)
+		if berr != .None {
+			return _make_error(.Internal_Error, "Failed to read block", srv._current_id)
+		}
+		block = b
+	} else if entry.height == 0 {
+		// Genesis is never stored on disk — reconstruct it (Core parity).
+		raw, gok := _genesis_raw_block(srv)
+		if !gok {
+			return _make_error(.Block_Not_Found, "Block data not available", srv._current_id)
+		}
+		r := wire.reader_init(raw)
+		b, derr := wire.deserialize_block(&r, context.temp_allocator)
+		if derr != .None {
+			return _make_error(.Internal_Error, "Failed to build genesis block", srv._current_id)
+		}
+		block = b
+	} else {
 		return _make_error(.Block_Not_Found, "Block data not available", srv._current_id)
-	}
-	loc := storage.Block_Location {
-		file_num    = entry.file_num,
-		data_offset = entry.data_offset,
-		data_size   = entry.data_size,
-	}
-	block, berr := storage.block_db_read(&srv.chain.block_db, loc, context.temp_allocator)
-	if berr != .None {
-		return _make_error(.Internal_Error, "Failed to read block", srv._current_id)
 	}
 
 	tip_height := chain.chain_height(srv.chain)
