@@ -1159,3 +1159,113 @@ test_anchors_roundtrip :: proc(t: ^testing.T) {
 	testing.expect_value(t, dialed, 1)
 	testing.expect(t, !os.exists(fmt.tprintf("%s/anchors.dat", dir)), "anchors.dat consumed")
 }
+
+// --- Download window (Bitcoin Core BLOCK_DOWNLOAD_WINDOW) ---
+
+// sync_request_blocks must never request a block whose height is more than
+// BLOCK_DOWNLOAD_WINDOW ahead of the connected tip. Without the bound, a block
+// stalled at tip+1 lets peers keep delivering later blocks, which land in the
+// flat files far out of chain order and break Core-compatible readers (electrs).
+@(test)
+test_download_window_bounds_frontier :: proc(t: ^testing.T) {
+	CONNECTED :: 100                       // connected tip height
+	AHEAD     :: BLOCK_DOWNLOAD_WINDOW + 500 // headers extend well past the window
+
+	cs := new(chain.Chain_State, context.temp_allocator)
+	cs.params = &consensus.REGTEST_PARAMS
+	cs.block_index = chain.block_index_init(allocator = context.temp_allocator)
+	cs.active_chain = make([dynamic]Hash256, 0, CONNECTED + 1, context.temp_allocator)
+
+	// hash_by_height[h] lets us address any block (connected or header-only) by height.
+	hash_by_height := make([]Hash256, CONNECTED + AHEAD + 1, context.temp_allocator)
+
+	genesis := wire.Block_Header{
+		version = 1, prev_hash = HASH_ZERO, merkle_root = HASH_ZERO,
+		timestamp = 1296688602, bits = 0x207fffff, nonce = 0,
+	}
+	gh := wire.block_header_hash(&genesis)
+	chain.block_index_add(&cs.block_index, &genesis, 0, storage.Block_Status{.Valid_Header, .Has_Data, .Valid_Chain})
+	append(&cs.active_chain, gh)
+	hash_by_height[0] = gh
+
+	prev := gh
+	// Connected chain 1..CONNECTED (Has_Data + Valid_Chain → tip = CONNECTED).
+	for i in 1 ..= CONNECTED {
+		hdr := wire.Block_Header{
+			version = 1, prev_hash = prev, merkle_root = HASH_ZERO,
+			timestamp = u32(1296688602 + i * 600), bits = 0x207fffff, nonce = u32(i),
+		}
+		h := wire.block_header_hash(&hdr)
+		chain.block_index_add(&cs.block_index, &hdr, i, storage.Block_Status{.Valid_Header, .Has_Data, .Valid_Chain})
+		append(&cs.active_chain, h)
+		hash_by_height[i] = h
+		prev = h
+	}
+	// Header-only blocks CONNECTED+1 .. CONNECTED+AHEAD (downloadable, not connected).
+	for i in CONNECTED + 1 ..= CONNECTED + AHEAD {
+		hdr := wire.Block_Header{
+			version = 1, prev_hash = prev, merkle_root = HASH_ZERO,
+			timestamp = u32(1296688602 + i * 600), bits = 0x207fffff, nonce = u32(i),
+		}
+		h := wire.block_header_hash(&hdr)
+		chain.block_index_add(&cs.block_index, &hdr, i, storage.Block_Status{.Valid_Header})
+		hash_by_height[i] = h
+		prev = h
+	}
+
+	sm: Sync_Manager
+	sync_manager_init(&sm, cs, &consensus.REGTEST_PARAMS)
+	defer sync_manager_destroy(&sm)
+	sm.best_header_height = CONNECTED + AHEAD
+	_build_download_queue(&sm)
+
+	// Pretend tip+1 .. tip+(WINDOW-4) are already in flight (owner is a peer NOT in
+	// the round-robin list, so it doesn't consume the active peers' capacity). This
+	// forces the cursor to the window edge to request anything new.
+	for hgt in CONNECTED + 1 ..= CONNECTED + BLOCK_DOWNLOAD_WINDOW - 4 {
+		sm.blocks_in_flight[hash_by_height[hgt]] = Peer_Id(999)
+	}
+
+	// Three active peers, zero delivery → limit 8 each → capacity 24. Only 4 blocks
+	// remain within the window, so WITHOUT the window the cursor would reach
+	// CONNECTED+WINDOW+20; WITH it, it must stop exactly at CONNECTED+WINDOW.
+	peers := make(map[Peer_Id]^Peer, context.temp_allocator)
+	for pi in 0 ..< 3 {
+		p := new(Peer, context.temp_allocator)
+		p.state = .Active
+		p.sending = true // queue outbound sends; never flush to a socket
+		pid := Peer_Id(pi + 1)
+		peers[pid] = p
+		sm.peer_sync[pid] = Peer_Sync_State{tracking_since = 0, blocks_delivered = 0, blocks_in_flight = 0}
+		append(&sm.peer_rr_list, pid)
+	}
+
+	sync_request_blocks(&sm, &peers)
+
+	// Free the getdata bytes queued on each peer (sending=true means the send
+	// path enqueued them without ever flushing/freeing).
+	for _, p in peers {
+		for msg in p.send_queue {
+			delete(msg)
+		}
+		delete(p.send_queue)
+	}
+
+	// Inspect what got requested.
+	max_h := 0
+	over_window := 0
+	for h in sm.blocks_in_flight {
+		e, ok := cs.block_index.entries[h]
+		if !ok { continue }
+		if e.height > max_h { max_h = e.height }
+		if e.height > CONNECTED + BLOCK_DOWNLOAD_WINDOW { over_window += 1 }
+	}
+
+	testing.expect_value(t, over_window, 0) // nothing beyond the window
+	// Requested right up to the window edge (proves the cap, not just a low peer limit).
+	testing.expect_value(t, max_h, CONNECTED + BLOCK_DOWNLOAD_WINDOW)
+
+	edge_plus1 := hash_by_height[CONNECTED + BLOCK_DOWNLOAD_WINDOW + 1]
+	_, present := sm.blocks_in_flight[edge_plus1]
+	testing.expect(t, !present, "block one past the window must not be requested")
+}

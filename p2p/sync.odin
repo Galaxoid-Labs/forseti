@@ -447,6 +447,14 @@ sync_request_blocks :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
 
 	now := time.to_unix_seconds(time.now())
 
+	// Download window: never request blocks more than BLOCK_DOWNLOAD_WINDOW ahead
+	// of the connected tip (Bitcoin Core parity). blocks_to_download is strictly
+	// ascending by height and download_cursor is monotonic, so when connect stalls
+	// on a straggler the cursor pauses at the window edge and resumes as the tip
+	// advances — bounding how far out of order blocks land in the flat files.
+	_, tip_height := chain.chain_tip(sm.chain)
+	window_max_height := tip_height + BLOCK_DOWNLOAD_WINDOW
+
 	// First pass: compute total throughput across scored peers.
 	total_rate: f64 = 0
 	num_scored := 0
@@ -533,14 +541,20 @@ sync_request_blocks :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
 				count += 1
 			}
 
-			// Then continue with main download queue.
+			// Then continue with main download queue, respecting the window.
 			for count < batch_size && sm.download_cursor < len(sm.blocks_to_download) {
 				hash := sm.blocks_to_download[sm.download_cursor]
+				entry, known := sm.chain.block_index.entries[hash]
+				// Window gate: the queue is ascending by height, so once the block
+				// at the cursor is beyond the window every later one is too — stop
+				// WITHOUT advancing the cursor so we resume here as the tip advances.
+				if known && entry.height > window_max_height {
+					break
+				}
 				sm.download_cursor += 1
 				if hash in sm.blocks_in_flight {
 					continue
 				}
-				entry, known := sm.chain.block_index.entries[hash]
 				if known && .Has_Data in entry.status {
 					continue
 				}

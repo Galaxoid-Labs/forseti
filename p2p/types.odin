@@ -68,6 +68,11 @@ DEFAULT_MAX_CONNECTIONS     :: 125
 INBOUND_HANDSHAKE_TIMEOUT   :: 60  // seconds before disconnecting inbound peers stuck in handshake
 MAX_HEADERS_PER_MSG         :: 2000
 MAX_BLOCKS_PER_PEER         :: 16   // Bitcoin Core: 16 per peer max
+// Never request a block whose height is more than this far ahead of the
+// connected tip (Bitcoin Core's BLOCK_DOWNLOAD_WINDOW). Bounds how far out of
+// order blocks land in the flat files when connect stalls on a straggler, so
+// blk*.dat stays reorderable by Core-compatible readers (electrs, etc.).
+BLOCK_DOWNLOAD_WINDOW       :: 1024
 MIN_BLOCKS_PER_PEER         :: 4
 PEER_TRIAL_BLOCKS           :: 8
 PEER_TRIAL_SECS             :: 30
