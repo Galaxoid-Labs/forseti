@@ -1078,8 +1078,8 @@ _store_branch :: proc(t: ^testing.T, cs: ^Chain_State, params: ^consensus.Chain_
 			cb_value = consensus.get_block_subsidy(h, params) + 1_000_000 // invalid: overpays
 		}
 		block := make_chain_block(h, prev_hash, params, t_off = t_off, cb_value = cb_value)
-		serr := store_block(cs, &block)
-		testing.expect(t, serr == .None, fmt.tprintf("store branch block %d: %v", h, serr))
+		serr := buffer_block(cs, &block)
+		testing.expect(t, serr == .None, fmt.tprintf("buffer branch block %d: %v", h, serr))
 		prev_hash = wire.block_header_hash(&block.header)
 	}
 	return prev_hash

@@ -21,6 +21,16 @@ Chain_State :: struct {
 	utxo_db:        storage.UTXO_DB,
 	coins:          Coins_Cache,
 	active_chain:   [dynamic]Hash256,
+	// Block staging buffer: downloaded-but-not-yet-connected blocks held in RAM
+	// (serialized bytes, keyed by hash). connect_pending_blocks writes each to the
+	// flat files at CONNECT time, in strict chain order, so blk*.dat is ordered for
+	// Core-compatible readers (electrs blk-file mode). Bounded by the P2P download
+	// window (~BLOCK_DOWNLOAD_WINDOW blocks ahead of the connected tip). NEVER
+	// persisted: on crash, un-connected buffered blocks are simply re-downloaded
+	// (Has_Data is only set once a block is actually on disk), so the recovery
+	// invariant — every connected/persisted block has on-disk data — is unchanged.
+	block_buffer:       map[Hash256][]byte,
+	block_buffer_bytes: int,
 	undo_files:     storage.Flat_File_Manager,
 	params:         ^consensus.Chain_Params,
 	// Per-input verification arena (growing, serial path). BIP342 tapscripts have
@@ -131,6 +141,9 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	}
 	cs.undo_files = undo_files
 
+	// Staging buffer for downloaded-but-not-yet-connected blocks (see field docs).
+	cs.block_buffer = make(map[Hash256][]byte)
+
 	// Build in-memory block index — pre-allocate maps to avoid rehashing.
 	cs.block_index = block_index_init(capacity = len(cs.index_db.records) * 2)
 	Boot_Stage = "Building block index"
@@ -237,10 +250,24 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 		}
 	}
 
-	// Connect any stored-but-not-connected blocks from a previous session.
+	// Connect any stored-but-not-connected blocks from a previous session. Drain
+	// the WHOLE on-disk backlog here, looping past connect_pending_blocks' 256/call
+	// batch cap. After crash recovery there can be thousands of blocks that were
+	// connected before the crash but rolled back to the flush point — they still
+	// have data on disk. If we only connected one batch, the tip would sit far below
+	// the on-disk frontier: the sync won't re-download those blocks (they have data)
+	// and the download window won't request anything past tip+WINDOW, so nothing
+	// would re-trigger connect and the node would wedge below its own on-disk tip.
 	Boot_Stage = "Connecting pending blocks"
 	log.infof("Connecting pending blocks (if any)...")
-	pending_connected, _ := connect_pending_blocks(cs)
+	pending_connected := 0
+	for {
+		n, cerr := connect_pending_blocks(cs)
+		pending_connected += n
+		if n == 0 || cerr != .None {
+			break
+		}
+	}
 	if pending_connected > 0 {
 		_, tip_height := chain_tip(cs)
 		log.infof("Connected %d pending blocks on startup (tip now at height %d)", pending_connected, tip_height)
@@ -270,6 +297,13 @@ chain_state_destroy :: proc(cs: ^Chain_State) {
 		delete(cs.arena_pool_arenas)
 		delete(cs.arena_pool_stack)
 	}
+
+	// Drop staged (un-connected) blocks — they were never persisted and are
+	// re-downloaded on next start.
+	for _, raw in cs.block_buffer {
+		delete(raw)
+	}
+	delete(cs.block_buffer)
 
 	tip_hash, tip_height := chain_tip(cs)
 	dc_blob := dc_flush_blob(cs, context.temp_allocator)
@@ -1055,6 +1089,17 @@ accept_block :: proc(cs: ^Chain_State, block: ^wire.Block) -> Chain_Error {
 		return herr
 	}
 
+	// If this block was staged in RAM for a later connect, the atomic store+connect
+	// path supersedes it — drop the stale staged copy so it isn't leaked.
+	if entry.buffered {
+		if raw, ok := cs.block_buffer[entry.hash]; ok {
+			delete_key(&cs.block_buffer, entry.hash)
+			cs.block_buffer_bytes -= len(raw)
+			delete(raw)
+		}
+		entry.buffered = false
+	}
+
 	// Store block data
 	blk := block^
 	loc, serr := storage.block_db_store(&cs.block_db, &blk)
@@ -1071,35 +1116,64 @@ accept_block :: proc(cs: ^Chain_State, block: ^wire.Block) -> Chain_Error {
 	return connect_block(cs, block, entry)
 }
 
-// Store a block to disk without connecting it to the active chain.
-// Used during sync to buffer out-of-order blocks.
-store_block :: proc(cs: ^Chain_State, block: ^wire.Block) -> Chain_Error {
+// Stage a downloaded block in RAM without connecting it or touching disk.
+// connect_pending_blocks writes it to the flat files at CONNECT time, so blk*.dat
+// ends up in strict chain order (readable by Core-compatible tools). The block is
+// NOT marked Has_Data until it is actually on disk, so a crash before it connects
+// just re-downloads it — the recovery invariant (every persisted/connected block
+// has on-disk data) is preserved. Used during sync for out-of-order arrivals.
+buffer_block :: proc(cs: ^Chain_State, block: ^wire.Block) -> Chain_Error {
 	header := block.header
 	entry, herr := accept_block_header(cs, &header)
 	if herr != .None {
 		return herr
 	}
 
-	// Already stored — skip.
-	if .Has_Data in entry.status {
+	// Already on disk (connected/written) or already staged — dedup.
+	if .Has_Data in entry.status || entry.buffered {
 		return .None
 	}
 
-	blk := block^
-	loc, serr := storage.block_db_store(&cs.block_db, &blk)
+	// Serialize once into a buffer we own until the block connects.
+	w := wire.writer_init()
+	defer wire.writer_destroy(&w)
+	wire.serialize_block(&w, block)
+	src := wire.writer_bytes(&w)
+	buf := make([]byte, len(src))
+	copy(buf, src)
+
+	cs.block_buffer[entry.hash] = buf
+	cs.block_buffer_bytes += len(buf)
+	entry.buffered = true
+
+	return .None
+}
+
+// Write a staged (buffered) block to the flat files and mark it Has_Data, in call
+// order — so blocks land on disk in the order they're connected (linear tip advance
+// via connect_pending_blocks, or a reorg branch oldest-first). No-op if already on
+// disk. Callers write a block just before connect_block, preserving the recovery
+// invariant that every connected/persisted block already has on-disk data.
+materialize_block :: proc(cs: ^Chain_State, entry: ^Block_Index_Entry) -> Chain_Error {
+	if .Has_Data in entry.status {
+		return .None
+	}
+	raw, staged := cs.block_buffer[entry.hash]
+	if !staged {
+		return .Storage_Error // not available (not on disk, not staged)
+	}
+	loc, serr := storage.block_db_store_raw(&cs.block_db, raw)
 	if serr != .None {
 		return .Storage_Error
 	}
-
 	entry.file_num = loc.file_num
 	entry.data_offset = loc.data_offset
 	entry.data_size = loc.data_size
 	entry.status += {.Has_Data}
-
-	// In-memory index is updated; LevelDB persist deferred to connect_block
-	// which writes the final status (Has_Data + Valid_Chain). On crash,
-	// un-persisted blocks are re-downloaded — connect_pending_blocks handles this.
-
+	entry.buffered = false
+	delete_key(&cs.block_buffer, entry.hash)
+	cs.block_buffer_bytes -= len(raw)
+	delete(raw)
 	return .None
 }
 
@@ -1124,9 +1198,10 @@ connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 =
 	// has data waiting, promote genesis directly so the chain can advance.
 	if len(cs.active_chain) == 0 && cs.block_index.genesis != nil && .Valid_Chain not_in cs.block_index.genesis.status {
 		genesis_hash := cs.block_index.genesis.hash
-		// Check if block 1 (child of genesis) exists and has data.
+		// Check if block 1 (child of genesis) exists and has data available —
+		// either already on disk (Has_Data) or staged in RAM (buffered).
 		child := cs.block_index.by_prev[genesis_hash]
-		if child != nil && .Has_Data in child.status {
+		if child != nil && (.Has_Data in child.status || child.buffered) {
 			cs.block_index.genesis.status += {.Valid_Chain}
 			append(&cs.active_chain, genesis_hash)
 			rec := block_index_to_record(cs.block_index.genesis)
@@ -1141,7 +1216,23 @@ connect_pending_blocks :: proc(cs: ^Chain_State, redownload: ^[dynamic]Hash256 =
 
 		// O(1) child lookup via by_prev index.
 		next_entry := cs.block_index.by_prev[tip_hash]
-		if next_entry == nil || .Has_Data not_in next_entry.status || .Valid_Chain in next_entry.status {
+		if next_entry == nil || .Valid_Chain in next_entry.status {
+			return connected, .None
+		}
+
+		// Make the block available on disk in CONNECT order. Downloaded blocks are
+		// staged in RAM (block_buffer); materialize_block writes each to the flat
+		// files HERE, just before connecting, so blk*.dat lands in strict chain
+		// order (readable by Core-compatible tools). Blocks already on disk — the
+		// recovery/replay path and accept_block's atomic tip writes — are a no-op.
+		if next_entry.buffered {
+			if merr := materialize_block(cs, next_entry); merr != .None {
+				// Flat-file write failed (e.g. disk full) — leave it staged and
+				// retry on the next connect tick rather than losing it.
+				log.warnf("Pending block at height %d: flat-file write failed (%v) — will retry", next_entry.height, merr)
+				return connected, .None
+			}
+		} else if .Has_Data not_in next_entry.status {
 			return connected, .None
 		}
 

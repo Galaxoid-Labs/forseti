@@ -25,6 +25,7 @@ Block_Index_Entry :: struct {
 	num_tx:     u32,      // Number of transactions in this block (0 if not yet populated)
 	chain_work: [32]byte, // Cumulative PoW from genesis (big-endian u256); derived from headers, not persisted
 	chain_tx:   i64,      // Cumulative tx count from genesis to this block (computed at runtime)
+	buffered:   bool,     // block bytes staged in Chain_State.block_buffer (RAM), not yet on disk; NOT persisted
 	prev:       ^Block_Index_Entry,
 	skip:       [SKIP_LIST_MAX]^Block_Index_Entry,
 }

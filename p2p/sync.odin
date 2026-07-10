@@ -300,11 +300,12 @@ sync_handle_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, block: ^wire.Bloc
 		sm.peer_sync[peer_id] = ps
 	}
 
-	// Store block to disk (doesn't connect yet).
+	// Stage block in RAM (doesn't connect or touch disk yet); connect_pending_blocks
+	// writes it to the flat files at connect time so blk*.dat stays in chain order.
 	blk := block^
-	serr := chain.store_block(sm.chain, &blk)
+	serr := chain.buffer_block(sm.chain, &blk)
 	if serr != .None {
-		log.errorf("Failed to store block: %v", serr)
+		log.errorf("Failed to buffer block: %v", serr)
 		return
 	}
 
@@ -532,7 +533,7 @@ sync_request_blocks :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
 					continue
 				}
 				entry, known := sm.chain.block_index.entries[hash]
-				if known && .Has_Data in entry.status {
+				if known && (.Has_Data in entry.status || entry.buffered) {
 					continue
 				}
 				sm.blocks_in_flight[hash] = pid
@@ -555,7 +556,7 @@ sync_request_blocks :: proc(sm: ^Sync_Manager, peers: ^map[Peer_Id]^Peer) {
 				if hash in sm.blocks_in_flight {
 					continue
 				}
-				if known && .Has_Data in entry.status {
+				if known && (.Has_Data in entry.status || entry.buffered) {
 					continue
 				}
 				sm.blocks_in_flight[hash] = pid
@@ -976,7 +977,7 @@ _request_announced_blocks :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, headers: 
 		hdr := headers[i]
 		hash := wire.block_header_hash(&hdr)
 		entry, known := sm.chain.block_index.entries[hash]
-		if known && .Valid_Header in entry.status && .Has_Data not_in entry.status {
+		if known && .Valid_Header in entry.status && .Has_Data not_in entry.status && !entry.buffered {
 			append(&inv, wire.Inv_Vector{type = .Witness_Block, hash = hash})
 		}
 	}
@@ -1014,9 +1015,9 @@ sync_handle_compact_block :: proc(sm: ^Sync_Manager, peer_id: Peer_Id, cmpct: ^w
 		return
 	}
 
-	// Already have block data — ignore.
+	// Already have block data (on disk or staged) — ignore.
 	entry, known := sm.chain.block_index.entries[block_hash]
-	if known && .Has_Data in entry.status {
+	if known && (.Has_Data in entry.status || entry.buffered) {
 		return
 	}
 
@@ -1393,7 +1394,7 @@ _build_download_queue :: proc(sm: ^Sync_Manager) {
 		// Skip blocks already connected (Valid_Chain): pruned blocks lose
 		// Has_Data but must never be re-downloaded — without this check a
 		// mass prune queued 616k already-validated blocks for redownload.
-		if .Valid_Header in entry.status && .Has_Data not_in entry.status && .Valid_Chain not_in entry.status && entry.height > 0 {
+		if .Valid_Header in entry.status && .Has_Data not_in entry.status && .Valid_Chain not_in entry.status && !entry.buffered && entry.height > 0 {
 			if entry.height <= max_h {
 				by_height[entry.height] = hash
 			}

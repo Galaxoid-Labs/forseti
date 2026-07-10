@@ -67,7 +67,7 @@ activate_best_chain :: proc(cs: ^Chain_State, allow_tie := false) -> Chain_Error
 	// then reversed. Pre-flight: every block must be on disk.
 	branch := make([dynamic]^Block_Index_Entry, 0, candidate.height - fork.height, context.temp_allocator)
 	for e := candidate; e != nil && e != fork; e = e.prev {
-		if .Has_Data not_in e.status {
+		if .Has_Data not_in e.status && !e.buffered {
 			// Branch not fully downloaded yet — sync will fetch it; retry later.
 			return .None
 		}
@@ -76,6 +76,17 @@ activate_best_chain :: proc(cs: ^Chain_State, allow_tie := false) -> Chain_Error
 	// Reverse to ascending height.
 	for i in 0 ..< len(branch) / 2 {
 		branch[i], branch[len(branch) - 1 - i] = branch[len(branch) - 1 - i], branch[i]
+	}
+
+	// Write any staged (RAM-buffered) branch blocks to disk in ascending order
+	// before we touch the active chain, so the connect loop below can read them
+	// and blk*.dat stays ordered. If a write fails, bail with the active chain
+	// still fully intact (no partial reorg).
+	for e in branch {
+		if merr := materialize_block(cs, e); merr != .None {
+			log.warnf("Reorg: cannot write staged branch block at height %d to disk (%v) — deferring reorg", e.height, merr)
+			return .None
+		}
 	}
 
 	to_disconnect := tip.height - fork.height
