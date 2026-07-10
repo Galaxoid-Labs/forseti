@@ -51,6 +51,14 @@ subscriptions needed for a basic sync), and it directly satisfies `bdk_esplora`.
 That's the fastest path to "a BDK wallet syncs against forseti." Electrum (Phase 2)
 adds `bdk_electrum` + Electrum/Sparrow and the push/subscribe niceties.
 
+**Broadcast is nearly free** — `POST /tx` (esplora) and
+`blockchain.transaction.broadcast` (electrum) are thin adapters over forseti's
+existing `sendrawtransaction` path (`rpc/server.odin` `_handle_sendrawtransaction`):
+parse hex → submit to the mempool acceptance pipeline (validation/policy/RBF/fees)
+→ relay to peers over P2P (+ ZMQ) → return txid (or the mempool reject reason). No
+new relay/consensus logic. So a BDK wallet signs locally and pushes through forseti
+to the network exactly like `sendrawtransaction`.
+
 **Acceptance test for both:** a BDK descriptor wallet does a full scan + sync +
 broadcast against forseti and produces the *same* UTXOs/balance/tx history as the
 same wallet pointed at a reference electrs. If that passes, we're BDK-compatible.
