@@ -86,6 +86,68 @@ mainnet**, not a separate network. This is closer to a UASF/hardfork toggle than
 new chain. (Everything in the sections below that assumes a distinct magic/seed
 network identity should be read through this correction.)
 
+## What the ecash fork ACTUALLY implements (from the commit diffs) — the big surprise
+
+The branch is Core **v31.1 + 8 commits** (all CryptAxe, 2026-07-09). Pulling the
+diffs shows the fork is currently a **minimal hardfork**, and — importantly —
+**forseti is AHEAD of it on the actual drivechain escrow consensus.**
+
+**1. OP_DRIVECHAIN — opcode reservation ONLY (commit `3ab9c0b`).** In
+`script/interpreter.cpp`:
+```c++
+case OP_DRIVECHAIN:                       // 0xb4 (== OP_NOP5) in script.h
+    if (script.size() == 4 && script[0] == OP_DRIVECHAIN) {
+        stack.push_back({0xDC});          // push truthy → the 4-byte script succeeds
+        pc = pend;
+    }
+```
+Plus `TxoutType::DRIVECHAIN` made standard across addresstype/solver/RPC/wallet.
+That is the **whole** drivechain change. **NO m6id, NO M1–M6, NO CTIP, NO D1/D2,
+NO withdrawal/escrow/bundle rules exist in the fork.** It just makes the 4-byte
+`0xb4` output a standard, spendable opcode.
+
+**2. Difficulty reset (commit `c0b1adf`)** — `pow.cpp` `CalculateNextWorkRequired`:
+```c++
+if (pindexLast->nHeight + 1 == params.DrivechainHeight) bnNew = bnPowLimit;
+```
+i.e. a **one-time reset to powLimit (min difficulty)** at the fork block;
+`validation.cpp` enforces the fork block's `nBits == powLimit.GetCompact()` or the
+block is invalid. Standard retargeting resumes after. Fork height per network:
+mainnet `957600` (**a testing value, not final**), everything else `0`.
+
+**3. Remove OP_RETURN limits** (`b08f4ae`), **optional replay protection**
+(`01cfad9`, scheme not yet pulled — TBD), **drivechain seed** `seed.bip300.xyz`
+(`22fcef8`), **datadir/config rename** (`f013f1a`), **GBT without IBD/peers**
+(`8d4592a`).
+
+### This inverts the earlier comparison (OPEN QUESTION #2 resolved)
+
+The "forseti's m6id must match CryptAxe's or we fork off" worry is **moot for now**
+— the fork has no m6id, no withdrawal machinery at all:
+
+- **forseti already implements the full BIP300/301** (M1–M6 codecs, D1/D2, CTIP,
+  blinded m6id, BMM, enforce validation). **The ecash fork does not** — only the
+  opcode reservation + difficulty reset + policy/network plumbing.
+- So forseti is **ahead** on drivechain consensus; nothing to "match" yet. When
+  CryptAxe adds the escrow/withdrawal rules, THAT is when the m6id/M5/M6 diff
+  becomes real. Until then forseti's `drivechain/` package is a superset.
+
+### What forseti would need to follow *today's* ecash fork (small, concrete)
+
+NOT the escrow machinery (the fork lacks it):
+1. **Difficulty reset**: in `consensus` `get_next_work_required`, force target =
+   pow_limit at the (configurable) fork height + validate the fork block's nBits
+   equals it. One-time, well-defined.
+2. **OP_DRIVECHAIN executable**: make the 4-byte `0xb4` pattern push a truthy value
+   ≥ fork height (forseti already *recognizes* it via `parse_op_drivechain`; today
+   it stays a NOP). Small.
+3. **Lift OP_RETURN limit** ≥ fork height (trivial; see bip110.md/datacarrier).
+4. **Replay protection** — pull commit `01cfad9` to learn the scheme (TODO).
+5. **Seed** `seed.bip300.xyz` + datadir/config name.
+
+None of this touches forseti's existing drivechain package; that stays as the
+(more complete) enforcement path for mainnet and a future ecash escrow layer.
+
 ## Why a network, not a mainnet overlay — SUPERSEDED (see the CONFIRMED-parameters correction above)
 
 > The reasoning below was written before reading chainparams. It assumed ecash was
