@@ -2,6 +2,7 @@
 .DS_Store
 forseti
 forseti-gui
+btcnode-gui
 deps/lib/
 deps/libsecp256k1/.libs/
 deps/libsecp256k1/*.o
