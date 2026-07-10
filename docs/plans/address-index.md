@@ -131,17 +131,31 @@ So `--index-addresses` is a **complete, one-flag wallet backend**. The txid→lo
 data costs ~the same whether it's `--txindex` or bundled here (~tens of GB) — pay
 once, and the user needn't juggle two index flags.
 
-## Connect / disconnect hooks (reorg-safe)
+## Connect / disconnect hooks (reorg-safe — rides forseti's existing reorg machinery)
 
-- **connect_block**: after validation, for each tx: emit funding rows for its
-  outputs, spending rows for its inputs (prevout scriptPubKeys are already fetched
-  for validation), and update the U-index. One extra write pass over data already
-  in cache — no re-read.
-- **disconnect_block**: forseti's **undo records already contain the spent coins'
-  scriptPubKeys**, and the block gives the created outputs — so we can delete
-  exactly the H/U rows this block added and restore spent U rows. (Alternative: a
-  small per-block "index journal" of added keys for precise deletes; decide during
-  impl.) Either way reorgs are handled with existing undo infra.
+Reorg correctness is the fund-safety-critical part (a stale row = wrong wallet
+balance, or a tx shown confirmed after it was reorged out). forseti **already
+handles reorgs** — `chain/reorg.odin` `activate_best_chain` disconnects the active
+chain to the fork point via `disconnect_block` (which restores the UTXO set from
+the undo/rev data), then connects the new branch. The address index just hooks that
+same flow, exactly like `--txindex` and the BIP158 filter index already do (both
+stay correct across reorgs via their disconnect hooks):
+
+- **connect_block**: after validation, for each tx emit funding rows for its
+  outputs, spending rows for its inputs (prevout scriptPubKeys already fetched for
+  validation), and update the U-index. One extra write pass over data already in
+  cache — no re-read.
+- **disconnect_block**: reverse exactly that — remove the H/T rows the block added,
+  un-create its U rows, and **restore the U rows it spent using the same undo/rev
+  data forseti already reads to roll back the UTXO set** (that undo data carries the
+  spent coins' scriptPubKeys). So a reorg fires disconnect hooks down to the fork
+  then connect hooks up the new branch, and the index converges to the new chain
+  automatically — including re-confirming a tx at a new height, or un-confirming it
+  back to the mempool index. (Alternative for exact deletes: a small per-block
+  "index journal" of added keys; decide during impl — the undo-derive path is
+  preferred, no extra storage.)
+- **subscriptions**: a reorg changes affected scripthash status hashes → push to
+  subscribed wallets so they re-sync (Phase 3).
 
 ## Mempool (unconfirmed)
 
