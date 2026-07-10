@@ -40,7 +40,58 @@ conflate them.) Reference implementation: **`ecash-com/bitcoin`, branch
 - **Remove IBD and peer requirement from GBT RPC** — lets `getblocktemplate` mine
   the young chain without full IBD/peers (bootstrapping/solo-mining aid).
 
-## Why a network, not a mainnet overlay (this is the key idea)
+## CONFIRMED parameters (from `src/kernel/chainparams.cpp`, drivechain-ecash) — and a correction
+
+Reading CryptAxe's chainparams **corrects a wrong assumption in the first draft of
+this plan.** It is **NOT a separate network** — it is a **hardfork on Bitcoin
+mainnet itself**, keeping Bitcoin's entire P2P/address identity:
+
+- **Genesis: shared** — `assert(hashGenesisBlock == 000000000019d6689c...)`. Height
+  fork off Bitcoin (OPEN QUESTION #1 resolved: shared history).
+- **Network magic: `0xf9 0xbe 0xb4 0xd9` — Bitcoin's own magic, unchanged.**
+- **Default port: 8333** (Bitcoin's). Addresses unchanged: `bech32_hrp = "bc"`,
+  base58 pubkey/script/secret = 0/5/128.
+- **Fork height: `consensus.DrivechainHeight = 957600`** (mainnet). `enforce_BIP94
+  = false`. **This 957600 is a TESTING height** (close to the current tip so they
+  can exercise the fork soon) — **NOT the final mainnet activation height**, which
+  will be set later/higher. So forseti must treat the fork height as a
+  **configurable param**, not a hardcoded constant; don't bake 957600 in as the
+  real activation.
+- **DNS seed: `seed.bip300.xyz`** — the drivechain seed, added alongside/replacing
+  Bitcoin's.
+
+**Why this matters (correction):** since the fork keeps Bitcoin's magic, port,
+genesis, and addresses, drivechain nodes and vanilla Core nodes **can still peer**
+— the P2P layer does not separate them. The chains split **purely at the consensus
+level at height 957600** (the difficulty reset + replay protection make post-fork
+blocks mutually invalid between the two rule sets). So:
+
+- The earlier "separate network → the magic guard dissolves self-fork risk" framing
+  below is **WRONG for this fork**. Following the fork *is* a deliberate consensus
+  split on the same P2P network — a hardfork, not a magic-isolated sidenet.
+- `seed.bip300.xyz` exists because, with shared magic, a node needs it to **find
+  fork-following peers** — otherwise it may only reach Core nodes that serve the
+  non-fork chain past 957600.
+
+### Revised forseti shape (given the above)
+
+Not a brand-new `--network=ecash` with its own magic/genesis/ports. Instead it's
+**Bitcoin mainnet with a fork toggle**: a flag (e.g. `--drivechainfork` or a
+`mainnet-ecash` params variant) that, when on, (a) sets `DrivechainHeight = 957600`
+and activates the fork rules from that height, (b) prefers `seed.bip300.xyz` to
+find fork peers, and (c) validates the ecash chain past 957600. When off, forseti
+follows Core rules (rejecting the difficulty-reset block at 957600) — the same-node
+opt-in you want, but implemented as a **consensus-rule choice at the fork height on
+mainnet**, not a separate network. This is closer to a UASF/hardfork toggle than a
+new chain. (Everything in the sections below that assumes a distinct magic/seed
+network identity should be read through this correction.)
+
+## Why a network, not a mainnet overlay — SUPERSEDED (see the CONFIRMED-parameters correction above)
+
+> The reasoning below was written before reading chainparams. It assumed ecash was
+> a magic-isolated separate network that dissolves the self-fork risk. The code
+> shows it is a **hardfork on mainnet with shared magic**, so following it *is* a
+> deliberate consensus split, not a magic-isolated sidenet. Kept for history:
 
 Forseti already has `--drivechain=off|track|enforce` as a **soft-fork overlay on
 Bitcoin mainnet**, where `enforce` carries self-fork risk (you reject blocks the
@@ -80,7 +131,12 @@ by height). So it's mostly new **params**, not new architecture.
 > height-fork off Bitcoin (shared history) or a fresh genesis? This decides the
 > sync model. Everything below assumes height-fork; revisit if it's a fresh chain.
 
-## Network identity — seeds AND (more importantly) magic
+## Network identity — SUPERSEDED (magic is SHARED, not different — see correction above)
+
+> Written before reading chainparams. The fork keeps Bitcoin's magic
+> (`0xf9beb4d9`), port (8333), genesis, and addresses (`bc`), so magic is NOT a
+> cross-chain guard here — only `seed.bip300.xyz` (peer discovery) differs. Kept
+> for history:
 
 The user's instinct is right — ecash needs its own seeds. But the **network magic
 is the critical piece**: post-fork, an ecash node must **never peer with Bitcoin
