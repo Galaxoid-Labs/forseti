@@ -31,7 +31,9 @@ testnet3. 378 tests across 13 packages.
 - **Tor-ready** — `--proxy` routes all outbound P2P through SOCKS5 with
   proxy-side name resolution (no DNS leaks); `.onion` peers via `--connect`
 - **Drivechain (BIP300/301)** — opt-in `--drivechain=track|enforce`: sidechain
-  proposal/withdrawal tracking, escrow (CTIP) validation, blind merged mining
+  proposal/withdrawal tracking, escrow (CTIP) validation, blind merged mining.
+  Full **ecash/drivechain** node support (running forseti on the drivechain
+  hardfork chain) is in the works
 - **Dashboards** — instant-start GUI window (raylib), SSH-friendly TUI
   (ncurses), and a standalone remote client (`forseti-gui`)
 - **First-run setup wizard** (`--wizard`) — a `menuconfig`-style ncurses flow
