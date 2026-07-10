@@ -305,6 +305,50 @@ multi-network params, per-height script flags, and the full drivechain package.
 4. **m6id / M5 / M6 / OP_DRIVECHAIN** semantics — diff against forseti's
    `drivechain/validate.odin` (OPEN QUESTION #2). Highest-value item.
 
+## Usage — how a new user would run an ecash node (once implemented)
+
+**Mental model:** an ecash node is a Bitcoin node that **diverges at the fork
+height H**. Below H the ecash chain *is* the Bitcoin chain (shared genesis/blocks);
+at H it applies the difficulty reset + ecash rules; from H+1 it follows the ecash
+chain and rejects Bitcoin's post-H blocks.
+
+**Start it (cleanest UX — ecash as a first-class network):**
+```bash
+./forseti --network=ecash --datadir=~/ecash-data
+```
+- `--network=ecash` pulls in `ECASH_PARAMS` = mainnet params + `DrivechainHeight`
+  (H) + ecash rule activations + `seed.bip300.xyz`.
+- A **separate datadir is required** — the chainstate diverges from Bitcoin at H,
+  so it can't share a mainnet datadir. (Also lets one machine run a Bitcoin node
+  and an ecash node side by side, matching CryptAxe's separate-datadir change.)
+- First-timers: the wizard would just gain an "ecash" entry —
+  `./forseti --wizard` → pick network → ecash.
+
+**What the first sync does:**
+1. **Blocks `0..H`** — identical to a normal Bitcoin sync; assumevalid skips
+   script checks below its height, so this is the bulk of the time but fast.
+   Nothing ecash-specific happens yet.
+2. **At H** — enforce the difficulty reset (fork block must carry
+   `nBits = powLimit`); OP_DRIVECHAIN becomes an executable standard opcode;
+   OP_RETURN relay policy relaxes.
+3. **From H+1** — validate and follow the ecash chain.
+
+**The one non-obvious wrinkle — peer discovery.** Because ecash keeps Bitcoin's
+magic (`0xf9beb4d9`) and port 8333, the node will also connect to plain Bitcoin
+nodes. Below H that's fine (same chain). At H it matters: a Bitcoin peer serves
+Bitcoin's post-H blocks, which an ecash node *rejects* (no difficulty reset) — so
+with only Bitcoin peers it would stall at H. `seed.bip300.xyz` is what lets it find
+**fork-following peers**; consensus does the rest (it simply can't accept the
+Bitcoin chain past H, so it converges on the ecash chain the ecash peers serve).
+
+**Optional first-run speedups (later):**
+- **Bootstrap `0..H` from an existing Bitcoin datadir.** Since `0..H` is
+  byte-identical, a user already running forseti-mainnet can point the ecash node
+  at their existing `blk*.dat` (copy/hardlink up to H) and skip re-downloading
+  ~H blocks; only post-H ecash blocks are new.
+- **A GUI/CLI banner** ("ecash mode — forks at height H") so users know which chain
+  they're on.
+
 ## References
 
 - Fork: `ecash-com/bitcoin`, branch `drivechain-ecash` (Bitcoin Core v31.x fork;
