@@ -348,24 +348,44 @@ _draw_boot :: proc(boot: ^Boot, frame: int) {
 _window_open :: proc(title: cstring) -> bool {
 	rl.SetConfigFlags({.WINDOW_HIGHDPI})
 	rl.SetTraceLogLevel(.WARNING)
-	rl.InitWindow(WIN_W, WIN_H, title)
+	// Create with a STABLE title so GLFW derives a clean X11 WM_CLASS from it
+	// ("forseti-gui") instead of the full dynamic title (which includes the connect
+	// address). WM_CLASS is fixed at window-creation time; SetWindowTitle below only
+	// updates the visible title. A stable WM_CLASS gives GNOME/Mutter a fixed
+	// identity to key its icon off — it ignores the runtime _NET_WM_ICON that other
+	// WMs (KDE/XFCE/i3/…) honor, so this is the one runtime lever that may help there.
+	rl.InitWindow(WIN_W, WIN_H, "forseti-gui")
 	if !rl.IsWindowReady() {
 		// No display session (SSH, daemon context). Log and return — main
 		// falls through to the normal headless thread.join path.
 		fmt.eprintln("GUI: window creation failed (no display session?) — continuing headless")
 		return false
 	}
+	rl.SetWindowTitle(title) // actual display title (WM_CLASS stays "forseti-gui")
 	apply_transparent_titlebar({COL_BG.r, COL_BG.g, COL_BG.b, COL_BG.a}) // macOS unified titlebar; no-op elsewhere
 
-	// Window/taskbar icon (Linux/Windows). macOS windows have no per-window
-	// icon — GLFW logs "Regular windows do not have icons on macOS" — so skip
-	// it there and use the Dock icon (set_dock_icon) instead. SetWindowIcon
-	// copies the pixels, so unload right after.
+	// Window/taskbar icon (Linux/Windows). macOS windows have no per-window icon
+	// — GLFW logs "Regular windows do not have icons on macOS" — so skip there and
+	// use the Dock icon (set_dock_icon) instead. On Linux, a lone 1024x1024 icon is
+	// commonly ignored by panels/taskbars/alt-tab, which expect the standard
+	// 16..256 sizes; feed a SET via SetWindowIcons and let the WM pick. GLFW copies
+	// the pixels, so unload right after. SetWindowIcon(s) requires R8G8B8A8.
 	when ODIN_OS != .Darwin {
-		icon := rl.LoadImageFromMemory(".png", raw_data(ICON_DATA), i32(len(ICON_DATA)))
-		if icon.data != nil {
-			rl.SetWindowIcon(icon)
-			rl.UnloadImage(icon)
+		base := rl.LoadImageFromMemory(".png", raw_data(ICON_DATA), i32(len(ICON_DATA)))
+		if base.data != nil {
+			rl.ImageFormat(&base, .UNCOMPRESSED_R8G8B8A8)
+			sizes := [?]i32{256, 128, 64, 48, 32, 24, 16}
+			icons: [len(sizes)]rl.Image
+			for s, i in sizes {
+				img := rl.ImageCopy(base)
+				rl.ImageResize(&img, s, s)
+				icons[i] = img
+			}
+			rl.SetWindowIcons(raw_data(icons[:]), c.int(len(icons)))
+			for img in icons {
+				rl.UnloadImage(img)
+			}
+			rl.UnloadImage(base)
 		}
 	}
 	set_dock_icon(ICON_DATA) // macOS Dock icon (no-op elsewhere)
