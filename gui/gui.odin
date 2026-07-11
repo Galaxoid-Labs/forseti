@@ -134,6 +134,11 @@ g_diskw:   [NET_HISTORY]f32 // disk write bytes/sec (the index/compaction work)
 g_net_idx: int
 g_net_count: int
 g_prev_diskw: i64
+// Tip-stall detection (for the "index compacting" banner): wall-clock time of
+// the last chain_height change. If the tip is flat for a few seconds while
+// downloading, the node is stalled — on the disk (compaction) or the network.
+g_last_height: int
+g_last_height_t: f64
 
 // Persistent scroll offset for the peers list (raygui GuiScrollPanel state).
 g_peer_scroll: rl.Vector2
@@ -441,6 +446,10 @@ _dashboard_loop :: proc(info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: 
 				have_status = true
 				connected = true
 				_net_sample(&st)
+				if st.chain_height != g_last_height {
+					g_last_height = st.chain_height
+					g_last_height_t = rl.GetTime()
+				}
 			} else {
 				connected = false
 				if local { break } // local node shut down → close the window
@@ -468,6 +477,21 @@ _dashboard_loop :: proc(info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: 
 				} else {
 					_text(fmt.ctprintf("FLUSHING UTXO CACHE - committing %s entries to LevelDB (can take minutes)",
 						_commas(st.flush_total)), 16, 6, 14, rl.WHITE)
+				}
+			} else if st.sync_state == .Downloading_Blocks && g_last_height_t > 0 && rl.GetTime() - g_last_height_t > 3 {
+				// Tip flat for >3 s while downloading — the node is stalled. Tell
+				// the user WHY (disk vs network) so a long compaction doesn't look
+				// like a hang, same idea as the UTXO-flush banner.
+				secs := int(rl.GetTime() - g_last_height_t)
+				cur := (g_net_idx - 1 + NET_HISTORY) % NET_HISTORY
+				disk_rate := g_net_count > 0 ? g_diskw[cur] : 0
+				if disk_rate > 15 * 1024 * 1024 {
+					rl.DrawRectangle(0, 0, WIN_W, 26, rl.Color{0x8a, 0x6d, 0x1a, 0xff})
+					_text(fmt.ctprintf("INDEX COMPACTING - tip catching up (%ds, disk %s/s) - normal, will resume",
+						secs, _fmt_bytes(i64(disk_rate))), 16, 6, 14, rl.WHITE)
+				} else {
+					rl.DrawRectangle(0, 0, WIN_W, 26, rl.Color{0x4a, 0x4a, 0x52, 0xff})
+					_text(fmt.ctprintf("SYNC PAUSED - tip flat %ds (catching up)", secs), 16, 6, 14, rl.WHITE)
 				}
 			}
 			if !connected {

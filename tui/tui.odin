@@ -38,6 +38,9 @@ g_net_idx: int
 g_net_count: int
 g_prev_sent, g_prev_recv, g_prev_diskw: i64
 g_prev_t: f64
+// Tip-stall detection (for the "index compacting" header banner).
+g_last_h: int
+g_last_h_t: f64
 
 _net_sample :: proc(st: ^p2p.Node_Status) {
 	now := time.duration_seconds(time.since(time.Time{}))
@@ -109,6 +112,10 @@ run_with_source :: proc(info: Static_Info, fetch: Status_Fetch, ud: rawptr, loca
 				have = true
 				connected = true
 				_net_sample(&st)
+				if st.chain_height != g_last_h {
+					g_last_h = st.chain_height
+					g_last_h_t = time.duration_seconds(time.since(time.Time{}))
+				}
 			} else {
 				connected = false
 				if local { return true } // in-process: node shut down
@@ -191,6 +198,17 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 			st.halt_height, string(st.halt_reason[:st.halt_reason_len])), P_RED, nc.A_BOLD)
 	} else if st.flushing {
 		_put(nc.stdscr, 0, 26, flush_label(st), P_YELLOW, nc.A_BOLD)
+	} else if st.sync_state == .Downloading_Blocks && g_last_h_t > 0 {
+		stall := time.duration_seconds(time.since(time.Time{})) - g_last_h_t
+		if stall > 3 {
+			cur := (g_net_idx - 1 + NET_HISTORY) % NET_HISTORY
+			disk_rate := g_net_count > 0 ? g_diskw[cur] : 0
+			if f64(disk_rate) > 15 * 1024 * 1024 {
+				_put(nc.stdscr, 0, 26, fmt.tprintf("[ INDEX COMPACTING - catching up %ds, disk %s/s ]", int(stall), fmt_bytes(i64(disk_rate))), P_YELLOW, nc.A_BOLD)
+			} else {
+				_put(nc.stdscr, 0, 26, fmt.tprintf("[ SYNC PAUSED - tip flat %ds (catching up) ]", int(stall)), P_DIM, nc.A_BOLD)
+			}
+		}
 	}
 	nc.wnoutrefresh(nc.stdscr)
 
