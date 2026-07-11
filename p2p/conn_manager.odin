@@ -1,5 +1,6 @@
 package p2p
 
+import "base:intrinsics"
 import "core:fmt"
 import "core:log"
 import "core:nbio"
@@ -131,11 +132,12 @@ Conn_Manager :: struct {
 	// momentarily empty (it resets to 0 every 1000 blocks for the log line, else
 	// the dashboard panel blanks for a tick mid-sync).
 	last_prof:      struct{
-		blocks:                                                        int,
-		ms_per_block, read, prefetch, valid, utxo, scripts, undo:      f64,
+		blocks:                                                          int,
+		ms_per_block, read, prefetch, valid, utxo, scripts, undo, index: f64,
 	},
 	disk_usage:     i64, // cached datadir usage (walking files is too heavy per tick)
 	disk_check_at:  i64,
+	addr_index_bytes: i64, // cached addrindex/ size (refreshed with disk_usage)
 	// Lifetime traffic counters (P2P thread only) — the GUI derives per-second
 	// rates client-side so the graph works identically for remote dashboards.
 	total_bytes_sent: i64,
@@ -2235,11 +2237,35 @@ _update_node_status :: proc(cm: ^Conn_Manager, now: i64) {
 	// Disk usage: a few thousand stat calls — refresh once a minute.
 	if now - cm.disk_check_at >= 60 {
 		cm.disk_usage = chain.disk_usage(cm.chain)
+		if cm.chain.addr_index != nil {
+			cm.addr_index_bytes = storage.addr_index_disk_size(cm.chain.addr_index)
+		}
 		cm.disk_check_at = now
 	}
 	st.disk_usage = cm.disk_usage
 	st.total_bytes_sent = cm.total_bytes_sent
 	st.total_bytes_recv = cm.total_bytes_recv
+
+	// Wallet backend (address index + Esplora). Left zero/off when disabled — the
+	// GUI/TUI hide the panel accordingly.
+	st.addr_index_on = cm.chain.addr_index != nil
+	if st.addr_index_on {
+		st.addr_index_bytes = cm.addr_index_bytes
+		if _, h, ok := storage.addr_index_best(cm.chain.addr_index); ok {
+			st.addr_index_height = h
+		} else {
+			st.addr_index_height = -1
+		}
+	} else {
+		st.addr_index_height = -1
+	}
+	st.esplora_on = cm.chain.esplora_enabled
+	if cm.chain.esplora_addr != "" {
+		n := min(len(cm.chain.esplora_addr), len(st.esplora_addr))
+		copy(st.esplora_addr[:n], cm.chain.esplora_addr[:n])
+		st.esplora_addr_len = n
+	}
+	st.esplora_requests = i64(intrinsics.atomic_load(&cm.chain.esplora_requests))
 
 	// UTXO cache
 	st.utxo_cache_count = len(cm.chain.coins.cache)
@@ -2261,10 +2287,11 @@ _update_node_status :: proc(cm: ^Conn_Manager, now: i64) {
 			st.prof_utxo_pct = 100 * f64(time.duration_milliseconds(prof.t_utxo)) / total_ms
 			st.prof_scripts_pct = 100 * f64(time.duration_milliseconds(prof.t_scripts)) / total_ms
 			st.prof_undo_pct = 100 * f64(time.duration_milliseconds(prof.t_undo)) / total_ms
+			st.prof_index_pct = 100 * f64(time.duration_milliseconds(prof.t_index)) / total_ms
 		}
 		cm.last_prof = {
 			st.prof_blocks, st.prof_ms_per_block, st.prof_read_pct, st.prof_prefetch_pct,
-			st.prof_valid_pct, st.prof_utxo_pct, st.prof_scripts_pct, st.prof_undo_pct,
+			st.prof_valid_pct, st.prof_utxo_pct, st.prof_scripts_pct, st.prof_undo_pct, st.prof_index_pct,
 		}
 	} else if cm.last_prof.blocks > 0 {
 		st.prof_blocks = cm.last_prof.blocks
@@ -2275,6 +2302,7 @@ _update_node_status :: proc(cm: ^Conn_Manager, now: i64) {
 		st.prof_utxo_pct = cm.last_prof.utxo
 		st.prof_scripts_pct = cm.last_prof.scripts
 		st.prof_undo_pct = cm.last_prof.undo
+		st.prof_index_pct = cm.last_prof.index
 	}
 
 	sync.mutex_lock(&cm.status_mutex)

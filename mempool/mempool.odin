@@ -457,6 +457,14 @@ mempool_remove_for_block :: proc(mp: ^Mempool, block: ^wire.Block) {
 
 	// Expire old transactions
 	mempool_expire(mp)
+
+	// The block is now connected — advance tip_height/tip_mtp so finality
+	// (BIP113) and fee-estimate heights track the new tip. Without this, tx
+	// finality was evaluated at a stale height and txs using anti-fee-sniping
+	// nLockTime (= tip height, e.g. every BDK-built tx) were wrongly rejected
+	// as Non_Final.
+	mempool_update_tip(mp)
+	mp.estimator.best_height = max(mp.tip_height, 0)
 }
 
 // Look up a mempool entry by txid.

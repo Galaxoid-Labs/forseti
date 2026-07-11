@@ -282,7 +282,7 @@ _draw_shutdown :: proc(boot: ^Boot, frame: int) {
 	} else {
 		_text_centered(fmt.ctprintf("%ds elapsed", frame / FPS), cy + 94, 14, COL_DIM)
 	}
-	_text_centered("Do NOT force-quit — the window closes itself when done.", cy + 148, 15, COL_ORANGE)
+	_text_centered("Do NOT force-quit - the window closes itself when done.", cy + 148, 15, COL_ORANGE)
 
 	// Real bar while scanning; the sweep animation otherwise.
 	bar_w := i32(340)
@@ -322,7 +322,7 @@ _draw_boot :: proc(boot: ^Boot, frame: int) {
 
 	elapsed := frame / FPS
 	if chain.Boot_Rollback_Total > 0 {
-		_text_centered(fmt.ctprintf("%d / %d blocks — %ds elapsed",
+		_text_centered(fmt.ctprintf("%d / %d blocks - %ds elapsed",
 			chain.Boot_Rollback_Done, chain.Boot_Rollback_Total, elapsed), cy + 92, 14, COL_DIM)
 	} else {
 		_text_centered(fmt.ctprintf("%ds elapsed", elapsed), cy + 92, 14, COL_DIM)
@@ -453,16 +453,16 @@ _dashboard_loop :: proc(info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: 
 			_draw_dashboard(&st, info)
 			if st.halt_height > 0 {
 				rl.DrawRectangle(0, 0, WIN_W, 26, rl.Color{0x8a, 0x2a, 0x2a, 0xff})
-				_text(fmt.ctprintf("VALIDATION HALTED at height %d (%s) — chain cannot progress; see log",
+				_text(fmt.ctprintf("VALIDATION HALTED at height %d (%s) - chain cannot progress; see log",
 					st.halt_height, string(st.halt_reason[:st.halt_reason_len])), 16, 6, 14, rl.WHITE)
 			} else if st.flushing {
 				rl.DrawRectangle(0, 0, WIN_W, 26, rl.Color{0x8a, 0x6d, 0x1a, 0xff})
 				if st.flush_progress < st.flush_total {
 					pct := st.flush_total > 0 ? 100 * st.flush_progress / st.flush_total : 0
-					_text(fmt.ctprintf("FLUSHING UTXO CACHE — scanning %d%% (%s / %s entries)",
+					_text(fmt.ctprintf("FLUSHING UTXO CACHE - scanning %d%% (%s / %s entries)",
 						pct, _commas(st.flush_progress), _commas(st.flush_total)), 16, 6, 14, rl.WHITE)
 				} else {
-					_text(fmt.ctprintf("FLUSHING UTXO CACHE — committing %s entries to LevelDB (can take minutes)",
+					_text(fmt.ctprintf("FLUSHING UTXO CACHE - committing %s entries to LevelDB (can take minutes)",
 						_commas(st.flush_total)), 16, 6, 14, rl.WHITE)
 				}
 			}
@@ -489,30 +489,60 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	_text(fmt.ctprintf("Headers: %s", _commas(st.best_header)), 500, 14, 18, COL_DIM)
 	_text(fmt.ctprintf("%s", state_label), 730, 14, 18, state_col)
 	_text(fmt.ctprintf("Uptime: %s", _fmt_uptime(st.uptime_secs)), pad, 38, 14, COL_DIM)
+	// Wallet-backend strip — only when the address index is on (dynamic).
+	if st.addr_index_on {
+		synced := st.addr_index_height >= st.chain_height && st.chain_height > 0
+		idx_state := synced ? "synced" : fmt.ctprintf("@ %s", _commas(st.addr_index_height))
+		esp := ""
+		if st.esplora_on && st.esplora_addr_len > 0 {
+			esp = fmt.tprintf("   |   Esplora %s (%s reqs)", string(st.esplora_addr[:st.esplora_addr_len]), _commas(int(st.esplora_requests)))
+		}
+		_text(
+			fmt.ctprintf("Wallet backend:  Address index %s, %s%s", _fmt_bytes(st.addr_index_bytes), idx_state, esp),
+			260, 38, 14, COL_ACCENT)
+	}
 
 	// --- Sync progress ---
-	_group_box(rl.Rectangle{pad, 64, WIN_W - 2 * pad, 58}, "Sync Progress")
-	// Bar shows verification progress in transactions — the honest measure of
-	// work — not block count (blocks get ~40x heavier across eras).
-	// Tx-based progress asymptotes at ~99.99% (denominator extrapolates to
-	// "now", like Core's verificationprogress) — display 100% once in sync.
+	// Two bars, because block-count and validation-work diverge hugely during
+	// IBD: old blocks are near-empty, so you can be ~44% through the BLOCKS while
+	// only ~10% of the transaction work is done. One bar for each so the fill
+	// levels tell that story at a glance rather than a confusing single number.
+	_group_box(rl.Rectangle{pad, 64, WIN_W - 2 * pad, 74}, "Sync Progress")
+
+	// Bar geometry: fixed-width bars with the value drawn by our own _text at a
+	// controlled x — raygui's textRight runs off the window edge and gets clipped.
+	bar_x: f32 = f32(pad) + 74
+	bar_w: f32 = 360
+	val_x := i32(bar_x + bar_w) + 16
+
+	// Bar 1: blocks downloaded/connected (chain_height / best_header).
+	block_frac := f32(0)
+	if st.best_header > 0 {
+		block_frac = clamp(f32(st.chain_height) / f32(st.best_header), 0, 1)
+	}
+	if st.sync_state == .In_Sync { block_frac = 1 }
+	_text("Blocks", pad + 12, 80, 13, COL_DIM)
+	rl.GuiProgressBar(rl.Rectangle{bar_x, 78, bar_w, 14}, nil, nil, &block_frac, 0, 1)
+	inflight := st.sync_state == .Downloading_Blocks ? fmt.tprintf("    |    %d in-flight", st.blocks_in_flight) : ""
+	_text(fmt.ctprintf("%.0f%%    %s / %s blocks%s", block_frac * 100, _commas(st.chain_height), _commas(st.best_header), inflight),
+		val_x, 78, 14, COL_TEXT)
+
+	// Bar 2: verification work in transactions (Core's verificationprogress) —
+	// the honest "how much is left". Asymptotes at ~99.99%; show 100% in sync.
 	progress := st.sync_state == .In_Sync ? f32(1) : f32(st.verification_pct)
-	rl.GuiProgressBar(rl.Rectangle{pad + 12, 76, WIN_W - 2 * pad - 90, 18}, nil, fmt.ctprintf("%.2f%%", progress * 100), &progress, 0, 1)
 	eta: string = ""
 	if st.sync_state == .Downloading_Blocks {
 		// The tx-throughput estimator is meaningless in the empty-block era
-		// (network-bound on ~1-tx blocks): don't show an ETA until enough
-		// real transaction volume has flowed to measure against.
+		// (network-bound on ~1-tx blocks): withhold the ETA until real volume flows.
 		if st.verification_pct >= 0.01 && st.eta_secs > 0 {
-			eta = fmt.tprintf("    |    ETA ~%s", _fmt_uptime(st.eta_secs))
+			eta = fmt.tprintf("    ETA ~%s", _fmt_uptime(st.eta_secs))
 		} else {
-			eta = "    |    ETA estimating..."
+			eta = "    ETA estimating..."
 		}
 	}
-	_text(
-		fmt.ctprintf("%s / %s blocks    |    %d in-flight    |    %s remaining%s",
-			_commas(st.chain_height), _commas(st.best_header), st.blocks_in_flight, _commas(st.blocks_remaining), eta),
-		pad + 12, 100, 14, COL_DIM)
+	_text("Verified", pad + 12, 104, 13, COL_DIM)
+	rl.GuiProgressBar(rl.Rectangle{bar_x, 102, bar_w, 14}, nil, nil, &progress, 0, 1)
+	_text(fmt.ctprintf("%.2f%% by tx weight%s", progress * 100, eta), val_x, 102, 14, COL_ACCENT)
 
 	// --- Peers table ---
 	peers_h: f32 = 200
@@ -627,10 +657,13 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 		rate_part := st.blocks_per_sec > 0 ? fmt.ctprintf("   |   %.1f blocks/sec", st.blocks_per_sec) : ""
 		_text(fmt.ctprintf("Total: %.2f ms/block%s", st.prof_ms_per_block, rate_part), pad + 12, i32(prof_y) + 18, 15, COL_ACCENT)
 		if st.prof_ms_per_block >= 0.5 {
+			// Show Index only when an index is actually being written (addr/tx/
+			// filter) — otherwise it's 0 and just clutters the line.
+			index_part := st.prof_index_pct >= 0.5 ? fmt.ctprintf("   Index: %.0f%%", st.prof_index_pct) : fmt.ctprintf("")
 			_text(
-				fmt.ctprintf("Read: %.0f%%   Prefetch: %.0f%%   Validate: %.0f%%   UTXO: %.0f%%   Scripts: %.0f%%   Undo: %.0f%%",
+				fmt.ctprintf("Read: %.0f%%   Prefetch: %.0f%%   Validate: %.0f%%   UTXO: %.0f%%   Scripts: %.0f%%   Undo: %.0f%%%s",
 					st.prof_read_pct, st.prof_prefetch_pct, st.prof_valid_pct,
-					st.prof_utxo_pct, st.prof_scripts_pct, st.prof_undo_pct),
+					st.prof_utxo_pct, st.prof_scripts_pct, st.prof_undo_pct, index_part),
 				pad + 12, i32(prof_y) + 46, 14, COL_TEXT)
 		} else {
 			// Sub-millisecond blocks (empty early chain) are too fast for a

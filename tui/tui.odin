@@ -273,6 +273,17 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 		_flip(xp)
 	}
 
+	// Wallet-backend panel — only when the address index is on (dynamic) and
+	// there's vertical room above the footer.
+	wb_y := net_y + net_h + 8
+	if st.addr_index_on && wb_y + 3 <= h - 1 {
+		wp := _panel(wb_y, 0, 3, w, "Wallet Backend")
+		if wp != nil {
+			_put(wp, 1, 2, wallet_backend_line(st), P_TEXT)
+			_flip(wp)
+		}
+	}
+
 	// Footer.
 	footer := fmt.tprintf(" :%d | dbcache %d MB%s | disk %s | %s | q=quit ",
 		info.rpc_port, info.dbcache_mb,

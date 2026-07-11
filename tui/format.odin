@@ -140,8 +140,11 @@ blocks_line :: proc(st: ^p2p.Node_Status, allocator := context.temp_allocator) -
 			? fmt.tprintf(" | ETA ~%s", fmt_uptime(st.eta_secs)) \
 			: " | ETA estimating..."
 	}
-	return fmt.aprintf("%s / %s blocks | %d in-flight | up %s%s",
-		commas(st.chain_height), commas(st.best_header), st.blocks_in_flight,
+	// Block-height % alongside the counts — the bar above is tx-weighted (much
+	// lower early on), so the raw counts anchor "how many blocks" vs "how much work".
+	block_pct := st.best_header > 0 ? 100 * f64(st.chain_height) / f64(st.best_header) : 0
+	return fmt.aprintf("%s / %s blocks (%.0f%%) | %d in-flight | up %s%s",
+		commas(st.chain_height), commas(st.best_header), block_pct, st.blocks_in_flight,
 		fmt_uptime(st.uptime_secs), eta, allocator = allocator)
 }
 
@@ -216,9 +219,23 @@ profile_line :: proc(st: ^p2p.Node_Status, allocator := context.temp_allocator) 
 		return fmt.aprintf("Profile %.2f ms/blk |%s (too fast to break down by phase)",
 			st.prof_ms_per_block, rate, allocator = allocator)
 	}
-	return fmt.aprintf("Profile %.2f ms/blk |%s read %.0f%% prefetch %.0f%% validate %.0f%% utxo %.0f%% scripts %.0f%% undo %.0f%%",
+	index_part := st.prof_index_pct >= 0.5 ? fmt.tprintf(" index %.0f%%", st.prof_index_pct) : ""
+	return fmt.aprintf("Profile %.2f ms/blk |%s read %.0f%% prefetch %.0f%% validate %.0f%% utxo %.0f%% scripts %.0f%% undo %.0f%%%s",
 		st.prof_ms_per_block, rate, st.prof_read_pct, st.prof_prefetch_pct,
-		st.prof_valid_pct, st.prof_utxo_pct, st.prof_scripts_pct, st.prof_undo_pct, allocator = allocator)
+		st.prof_valid_pct, st.prof_utxo_pct, st.prof_scripts_pct, st.prof_undo_pct, index_part, allocator = allocator)
+}
+
+// One-line wallet-backend summary (address index + Esplora), shown only when the
+// address index is enabled.
+wallet_backend_line :: proc(st: ^p2p.Node_Status, allocator := context.temp_allocator) -> string {
+	synced := st.addr_index_height >= st.chain_height && st.chain_height > 0
+	idx_state := synced ? "synced" : fmt.tprintf("@ %s", commas(st.addr_index_height))
+	esp := "off"
+	if st.esplora_on && st.esplora_addr_len > 0 {
+		esp = fmt.tprintf("%s (%s reqs)", string(st.esplora_addr[:st.esplora_addr_len]), commas(int(st.esplora_requests)))
+	}
+	return fmt.aprintf("Address index %s, %s | Esplora %s",
+		fmt_bytes(st.addr_index_bytes), idx_state, esp, allocator = allocator)
 }
 
 flush_label :: proc(st: ^p2p.Node_Status, allocator := context.temp_allocator) -> string {

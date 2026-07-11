@@ -47,10 +47,13 @@ Wiz_State :: struct {
 	adv_v2:          bool, // BIP324 v2 transport
 	adv_txindex:     bool, // full transaction index
 	adv_blockfilter: bool, // BIP157/158 compact block filters
+	adv_indexaddr:   bool, // scripthash (address) index — wallet backend
+	adv_esplora:     bool, // Esplora REST server (needs the address index)
 	adv_fullrbf:     bool, // full replace-by-fee
 	adv_persistmp:   bool, // persist mempool across restarts
 	adv_bloom:       bool, // BIP37 peer bloom filters
 	adv_blocksonly:  bool, // blocks-only (no tx relay)
+	adv_datacarrier_v30: bool, // OP_RETURN relay: Core v30 permissive (vs pre-v30 conservative default)
 }
 
 // Entry point. Returns true if a config was written, false if cancelled.
@@ -138,6 +141,16 @@ _print_next_steps :: proc(st: ^Wiz_State, conf_path: string) {
 	fmt.printfln("      ./forseti --datadir=%s --tui        # terminal dashboard (SSH-friendly)", dd)
 	fmt.printfln("      ./forseti --datadir=%s --daemon     # background, logs to %s/debug.log", dd, dd)
 	fmt.println()
+	if st.adv_esplora {
+		fmt.println("  WALLET BACKEND (Esplora REST — point BDK / a wallet at it):")
+		fmt.println("      http://127.0.0.1:3000    (loopback; the address index builds on first run)")
+		fmt.println("      e.g. a BDK esplora wallet: EsploraClient::new(\"http://127.0.0.1:3000\")")
+		fmt.println()
+	} else if st.adv_indexaddr {
+		fmt.println("  Address index is on. Add `esplora=1` to the conf to serve the Esplora")
+		fmt.println("  REST wallet backend (http://127.0.0.1:3000) for BDK / wallet clients.")
+		fmt.println()
+	}
 	fmt.println("  WATCH IT ON THIS MACHINE (build the client once with `make gui`):")
 	fmt.printfln("      ./forseti-gui --connect=127.0.0.1:%d %s", port, auth)
 	fmt.println("      (add --tui for a terminal dashboard instead of a window)")
@@ -372,10 +385,13 @@ _advanced_summary :: proc(st: ^Wiz_State) -> string {
 	if !st.adv_v2        { append(&changes, "v1 only") }
 	if st.adv_txindex    { append(&changes, "txindex") }
 	if st.adv_blockfilter { append(&changes, "cfilters") }
+	if st.adv_indexaddr  { append(&changes, "addrindex") }
+	if st.adv_esplora    { append(&changes, "esplora") }
 	if !st.adv_fullrbf   { append(&changes, "no fullrbf") }
 	if !st.adv_persistmp { append(&changes, "no mempool save") }
 	if st.adv_bloom      { append(&changes, "bloom") }
 	if st.adv_blocksonly { append(&changes, "blocks-only") }
+	if st.adv_datacarrier_v30 { append(&changes, "v30 OP_RETURN") }
 	if len(changes) == 0 { return "defaults (press A to change)" }
 	return strings.join(changes[:], ", ", context.temp_allocator)
 }
@@ -390,10 +406,13 @@ _advanced_screen :: proc(st: ^Wiz_State) {
 		{"v2 encrypted transport (BIP324)",          &st.adv_v2},
 		{"Transaction index (getrawtransaction)",    &st.adv_txindex},
 		{"Compact block filters (BIP157/158)",       &st.adv_blockfilter},
+		{"Address index — wallet backend",           &st.adv_indexaddr},
+		{"Esplora REST server (BDK) — needs index",  &st.adv_esplora},
 		{"Full replace-by-fee",                      &st.adv_fullrbf},
 		{"Persist mempool across restarts",          &st.adv_persistmp},
 		{"Peer bloom filters (BIP37)",               &st.adv_bloom},
 		{"Blocks-only (no transaction relay)",       &st.adv_blocksonly},
+		{"OP_RETURN relay: Core v30 permissive",     &st.adv_datacarrier_v30},
 	}
 	cur := 0
 	for {
@@ -416,10 +435,28 @@ _advanced_screen :: proc(st: ^Wiz_State) {
 		case nc.KEY_DOWN: cur = (cur + 1) % len(toggles)
 		case ' ':
 			t := toggles[cur]
-			// txindex is incompatible with pruning.
-			if t.on == &st.adv_txindex && !st.adv_txindex && st.prune_mb > 0 {
-				_err_flash("txindex is incompatible with pruning")
-				continue
+			turning_on := !t.on^
+			// Index/backend constraints (mirror the node's startup checks).
+			switch t.on {
+			case &st.adv_txindex:
+				if turning_on && st.prune_mb > 0 {
+					_err_flash("txindex is incompatible with pruning")
+					continue
+				}
+			case &st.adv_indexaddr:
+				if turning_on && st.prune_mb > 0 {
+					_err_flash("the address index is incompatible with pruning")
+					continue
+				}
+				if !turning_on { st.adv_esplora = false } // Esplora depends on the index
+			case &st.adv_esplora:
+				if turning_on {
+					if st.prune_mb > 0 {
+						_err_flash("Esplora needs the address index, which pruning disallows")
+						continue
+					}
+					st.adv_indexaddr = true // auto-enable the index it serves
+				}
 			}
 			t.on^ = !t.on^
 		case nc.KEY_ENTER, 10, 13, 'b', 'B', 'q', 'Q', nc.KEY_LEFT:
@@ -648,10 +685,19 @@ _write_config :: proc(st: ^Wiz_State) -> (string, bool) {
 	if !st.adv_v2        { strings.write_string(&b, "v2transport=0\n") }
 	if st.adv_txindex    { strings.write_string(&b, "txindex=1\n") }
 	if st.adv_blockfilter { strings.write_string(&b, "blockfilterindex=1\n") }
+	if st.adv_indexaddr  { strings.write_string(&b, "index-addresses=1\n") }
+	if st.adv_esplora    { strings.write_string(&b, "esplora=1\n") }
 	if !st.adv_fullrbf   { strings.write_string(&b, "mempoolfullrbf=0\n") }
 	if !st.adv_persistmp { strings.write_string(&b, "persistmempool=0\n") }
 	if st.adv_bloom      { strings.write_string(&b, "peerbloomfilters=1\n") }
 	if st.adv_blocksonly { strings.write_string(&b, "blocksonly=1\n") }
+	// OP_RETURN (datacarrier) relay profile. Default (nothing emitted) is the
+	// conservative pre-v30 policy (datacarriersize=83, datacarriercount=1). The
+	// v30 profile relaxes relay to match Bitcoin Core v30 (large + many).
+	if st.adv_datacarrier_v30 {
+		strings.write_string(&b, "datacarriersize=100000\n")
+		strings.write_string(&b, "datacarriercount=100\n")
+	}
 
 	path := fmt.tprintf("%s/forseti.conf", st.datadir)
 	if os.write_entire_file(path, transmute([]byte)strings.to_string(b)) != nil {

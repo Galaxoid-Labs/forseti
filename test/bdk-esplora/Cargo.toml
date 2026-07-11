@@ -1,0 +1,12 @@
+[package]
+name = "bdk-harness"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bdk_wallet = "1"
+bdk_esplora = { version = "0.20", features = ["blocking"] }
+
+[[bin]]
+name = "harness"
+path = "src/main.rs"

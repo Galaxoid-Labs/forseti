@@ -168,6 +168,17 @@ Node_Status :: struct {
 	prof_utxo_pct:     f64,
 	prof_scripts_pct:  f64,
 	prof_undo_pct:     f64,
+	prof_index_pct:    f64, // index-write share (addr/tx/filter indexes)
+
+	// Wallet backend (address index + Esplora). All zero/off when
+	// --index-addresses is disabled; the GUI/TUI hide the panel in that case.
+	addr_index_on:     bool,
+	addr_index_height: int,      // best-indexed height (== tip when synced; -1 if off)
+	addr_index_bytes:  i64,      // addrindex/ LevelDB size on disk (refreshed ~1/min)
+	esplora_on:        bool,
+	esplora_addr:      [24]byte, // "ip:port" (fixed buf; the snapshot is copied)
+	esplora_addr_len:  int,
+	esplora_requests:  i64,      // Esplora REST requests served since start
 
 	// System
 	uptime_secs:       i64,

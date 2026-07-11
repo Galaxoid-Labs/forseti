@@ -1729,3 +1729,239 @@ test_tx_index :: proc(t: ^testing.T) {
 	_, best_h, _ := storage.tx_index_best(cs.tx_index)
 	testing.expect_value(t, best_h, 4)
 }
+
+// Helper: build a distinctive spendable scriptPubKey (P2WPKH-shaped) whose
+// 20-byte program is filled with `fill`, so its scripthash is unique per test.
+_addr_test_spk :: proc(fill: byte) -> []byte {
+	spk := make([]byte, 22, context.temp_allocator)
+	spk[0] = 0x00 // witness v0
+	spk[1] = 0x14 // push 20
+	for i in 2 ..< 22 {
+		spk[i] = fill
+	}
+	return spk
+}
+
+// Live address index: fund via coinbases, spend a mature coinbase, and verify
+// the H (history) / U (utxo) / T (txid-location) rows — then disconnect the
+// spending block and confirm the index reverses exactly (fund-safety-critical).
+@(test)
+test_addr_index_spend_disconnect :: proc(t: ^testing.T) {
+	dir := make_test_dir("addrindex_spend")
+	defer remove_test_dir(dir)
+
+	// Skip script verification (dummy sigs) — the index rides Phase-1 UTXO data,
+	// which is independent of script checks.
+	params := consensus.REGTEST_PARAMS
+	params.assumevalid_height = 200
+
+	cs: Chain_State
+	err := chain_state_init(&cs, dir, &params)
+	testing.expect_value(t, err, Chain_Error.None)
+	defer chain_state_destroy(&cs)
+
+	adb := new(storage.Addr_Index_DB)
+	adb_result, adb_err := storage.addr_index_db_open(dir)
+	testing.expect_value(t, adb_err, storage.Storage_Error.None)
+	adb^ = adb_result
+	cs.addr_index = adb
+
+	// Mine heights 0..99 (100 coinbase-only blocks) so block-0's coinbase matures
+	// (COINBASE_MATURITY = 100 → spendable at height 100).
+	prev := HASH_ZERO
+	block0 := make_chain_block(0, prev, &params)
+	testing.expect_value(t, accept_block(&cs, &block0), Chain_Error.None)
+	cb0_txid := wire.tx_id(&block0.txs[0])
+	coinbase_spk := block0.txs[0].outputs[0].script_pubkey
+	coinbase_sh := crypto.sha256_hash(coinbase_spk)
+	prev = wire.block_header_hash(&block0.header)
+
+	for i in 1 ..< 100 {
+		b := make_chain_block(i, prev, &params)
+		testing.expect_value(t, accept_block(&cs, &b), Chain_Error.None)
+		prev = wire.block_header_hash(&b.header)
+	}
+
+	// After 100 coinbases (all share the dummy P2PKH output script), the coinbase
+	// scripthash owns 100 UTXOs and has 100 funding history rows.
+	{
+		utxos := storage.addr_index_get_utxos(adb, coinbase_sh, context.temp_allocator)
+		testing.expect_value(t, len(utxos), 100)
+		hist := storage.addr_index_get_history(adb, coinbase_sh, context.temp_allocator)
+		testing.expect_value(t, len(hist), 100)
+		// History is height-ordered.
+		for i in 1 ..< len(hist) {
+			testing.expect(t, hist[i].height >= hist[i - 1].height, "history must be height-ordered")
+		}
+	}
+
+	// Block 100: spend block-0's coinbase to a distinctive destination.
+	dest_spk := _addr_test_spk(0xAB)
+	dest_sh := crypto.sha256_hash(dest_spk)
+	dest_value := consensus.get_block_subsidy(0, &params)
+
+	cb100 := consensus.make_coinbase(100, value = consensus.get_block_subsidy(100, &params))
+	spend_inputs := make([]wire.Tx_In, 1, context.temp_allocator)
+	spend_inputs[0] = wire.Tx_In{
+		previous_output = wire.Outpoint{hash = cb0_txid, index = 0},
+		script_sig      = make([]byte, 0, context.temp_allocator),
+		sequence        = 0xffffffff,
+	}
+	spend_outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
+	spend_outputs[0] = wire.Tx_Out{value = dest_value, script_pubkey = dest_spk}
+	spend_tx := wire.Tx{version = 1, inputs = spend_inputs, outputs = spend_outputs, locktime = 0}
+	spend_txid := wire.tx_id(&spend_tx)
+
+	txs := make([]wire.Tx, 2, context.temp_allocator)
+	txs[0] = cb100
+	txs[1] = spend_tx
+	tx_ids := make([]crypto.Hash256, 2, context.temp_allocator)
+	tx_ids[0] = wire.tx_id(&cb100)
+	tx_ids[1] = spend_txid
+	block100 := wire.Block{
+		header = wire.Block_Header{
+			version     = 0x20000000,
+			prev_hash   = prev,
+			merkle_root = crypto.merkle_root(tx_ids),
+			timestamp   = u32(1231006505 + 100),
+			bits        = params.pow_limit_bits,
+		},
+		txs = txs,
+	}
+	consensus.mine_block(&block100, &params)
+	testing.expect_value(t, accept_block(&cs, &block100), Chain_Error.None)
+	block100_hash := wire.block_header_hash(&block100.header)
+
+	// --- Funding side: destination scripthash now owns exactly one UTXO. ---
+	{
+		utxos := storage.addr_index_get_utxos(adb, dest_sh, context.temp_allocator)
+		testing.expect_value(t, len(utxos), 1)
+		if len(utxos) == 1 {
+			testing.expect_value(t, utxos[0].txid, spend_txid)
+			testing.expect_value(t, utxos[0].vout, u32(0))
+			testing.expect_value(t, utxos[0].height, u32(100))
+			testing.expect_value(t, utxos[0].value, dest_value)
+		}
+		hist := storage.addr_index_get_history(adb, dest_sh, context.temp_allocator)
+		testing.expect_value(t, len(hist), 1)
+		if len(hist) == 1 {
+			testing.expect_value(t, hist[0].io, u8(0)) // funding
+			testing.expect_value(t, hist[0].height, u32(100))
+		}
+	}
+
+	// --- Spend side: block-0 coinbase UTXO is gone; a spending history row exists. ---
+	{
+		utxos := storage.addr_index_get_utxos(adb, coinbase_sh, context.temp_allocator)
+		// Removed cb0, added cb100 → still 100.
+		testing.expect_value(t, len(utxos), 100)
+		for u in utxos {
+			testing.expect(t, u.txid != cb0_txid, "spent coinbase UTXO must be gone")
+		}
+		hist := storage.addr_index_get_history(adb, coinbase_sh, context.temp_allocator)
+		// 100 funding (heights 0..99, then cb100 at 100 → still 100 funding rows
+		// since cb0 funding row stays) + 1 spending row at height 100.
+		spend_rows := 0
+		for h in hist {
+			if h.io == 1 {
+				spend_rows += 1
+				testing.expect_value(t, h.height, u32(100))
+				testing.expect_value(t, h.txid, spend_txid)
+			}
+		}
+		testing.expect_value(t, spend_rows, 1)
+	}
+
+	// --- T index resolves the spend txid → (height 100, position 1). ---
+	{
+		loc, found := storage.addr_index_get_tx(adb, spend_txid)
+		testing.expect(t, found, "spend tx must be locatable")
+		testing.expect_value(t, loc.height, u32(100))
+		testing.expect_value(t, loc.position, u32(1))
+	}
+
+	// Best marker at 100.
+	{
+		_, best_h, ok := storage.addr_index_best(adb)
+		testing.expect(t, ok, "best marker present")
+		testing.expect_value(t, best_h, 100)
+	}
+
+	// --- Disconnect block 100: the index must reverse exactly. ---
+	entry, _ := cs.block_index.entries[block100_hash]
+	testing.expect_value(t, disconnect_block(&cs, &block100, entry), Chain_Error.None)
+
+	// Destination UTXO + history gone.
+	testing.expect_value(t, len(storage.addr_index_get_utxos(adb, dest_sh, context.temp_allocator)), 0)
+	testing.expect_value(t, len(storage.addr_index_get_history(adb, dest_sh, context.temp_allocator)), 0)
+
+	// Block-0 coinbase UTXO restored.
+	{
+		utxos := storage.addr_index_get_utxos(adb, coinbase_sh, context.temp_allocator)
+		restored := false
+		for u in utxos {
+			if u.txid == cb0_txid && u.vout == 0 {
+				restored = true
+				testing.expect_value(t, u.value, consensus.get_block_subsidy(0, &params))
+			}
+		}
+		testing.expect(t, restored, "spent coinbase UTXO must be restored on disconnect")
+		// Reverts to the pre-block-100 set: cb0 restored, cb100 removed → cb0..cb99.
+		testing.expect_value(t, len(utxos), 100)
+		// Spending history row for coinbase_sh gone.
+		hist := storage.addr_index_get_history(adb, coinbase_sh, context.temp_allocator)
+		for h in hist {
+			testing.expect(t, h.io != 1, "spending history row must be removed on disconnect")
+		}
+	}
+
+	// T for the spend txid gone; best back to 99.
+	{
+		_, found := storage.addr_index_get_tx(adb, spend_txid)
+		testing.expect(t, !found, "spend tx location removed on disconnect")
+		_, best_h, _ := storage.addr_index_best(adb)
+		testing.expect_value(t, best_h, 99)
+	}
+}
+
+// Address index catch-up: mine blocks WITHOUT the index, then enable it and
+// confirm a full-chain backfill reproduces the funding rows (mirrors the
+// tx-index catch-up path).
+@(test)
+test_addr_index_catchup :: proc(t: ^testing.T) {
+	dir := make_test_dir("addrindex_catchup")
+	defer remove_test_dir(dir)
+
+	params := consensus.REGTEST_PARAMS
+	cs: Chain_State
+	err := chain_state_init(&cs, dir, &params)
+	testing.expect_value(t, err, Chain_Error.None)
+	defer chain_state_destroy(&cs)
+
+	prev := HASH_ZERO
+	var_coinbase_sh: Hash256
+	for i in 0 ..< 6 {
+		b := make_chain_block(i, prev, &params)
+		if i == 0 {
+			var_coinbase_sh = crypto.sha256_hash(b.txs[0].outputs[0].script_pubkey)
+		}
+		testing.expect_value(t, accept_block(&cs, &b), Chain_Error.None)
+		prev = wire.block_header_hash(&b.header)
+	}
+
+	// Enable the index after the fact and back-fill.
+	adb := new(storage.Addr_Index_DB)
+	adb_result, adb_err := storage.addr_index_db_open(dir)
+	testing.expect_value(t, adb_err, storage.Storage_Error.None)
+	adb^ = adb_result
+	cs.addr_index = adb
+	testing.expect(t, addr_index_catchup(&cs), "catch-up succeeds")
+
+	// All 6 coinbases share the dummy output script → 6 UTXOs / 6 history rows.
+	testing.expect_value(t, len(storage.addr_index_get_utxos(adb, var_coinbase_sh, context.temp_allocator)), 6)
+	testing.expect_value(t, len(storage.addr_index_get_history(adb, var_coinbase_sh, context.temp_allocator)), 6)
+
+	_, best_h, ok := storage.addr_index_best(adb)
+	testing.expect(t, ok, "best marker present after catch-up")
+	testing.expect_value(t, best_h, 5)
+}

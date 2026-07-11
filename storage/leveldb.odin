@@ -38,6 +38,7 @@ foreign leveldb_lib {
 	leveldb_iter_destroy      :: proc(iter: LDB_Iterator) ---
 	leveldb_iter_valid        :: proc(iter: LDB_Iterator) -> c.uchar ---
 	leveldb_iter_seek_to_first :: proc(iter: LDB_Iterator) ---
+	leveldb_iter_seek         :: proc(iter: LDB_Iterator, k: [^]byte, klen: c.size_t) ---
 	leveldb_iter_next         :: proc(iter: LDB_Iterator) ---
 	leveldb_iter_key          :: proc(iter: LDB_Iterator, klen: ^c.size_t) -> [^]byte ---
 	leveldb_iter_value        :: proc(iter: LDB_Iterator, vlen: ^c.size_t) -> [^]byte ---

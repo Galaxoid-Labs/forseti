@@ -101,6 +101,12 @@ main :: proc() {
 		fmt.printfln("probe: network=%s height=%d headers=%d state=%v peers=%d mempool=%d disk=%dMB uptime=%ds",
 			client.info.network, st.chain_height, st.best_header, st.sync_state,
 			st.peer_count, st.mempool_count, st.disk_usage / 1_048_576, st.uptime_secs)
+		if st.addr_index_on {
+			fmt.printfln("       wallet-backend: addr-index=%dMB height=%d esplora=%s requests=%d",
+				st.addr_index_bytes / 1_048_576, st.addr_index_height,
+				st.esplora_on ? string(st.esplora_addr[:st.esplora_addr_len]) : "off",
+				st.esplora_requests)
+		}
 		return
 	}
 
@@ -218,6 +224,15 @@ _fetch_status :: proc(c: ^Client) -> (st: p2p.Node_Status, ok: bool) {
 	st.prof_utxo_pct = _jfloat(result, "prof_utxo_pct")
 	st.prof_scripts_pct = _jfloat(result, "prof_scripts_pct")
 	st.prof_undo_pct = _jfloat(result, "prof_undo_pct")
+	st.prof_index_pct = _jfloat(result, "prof_index_pct")
+	st.addr_index_on = _jbool(result, "addr_index_on")
+	st.addr_index_height = int(_jint(result, "addr_index_height"))
+	st.addr_index_bytes = _jint(result, "addr_index_bytes")
+	st.esplora_on = _jbool(result, "esplora_on")
+	esp_addr := _jstr(result, "esplora_addr")
+	st.esplora_addr_len = min(len(esp_addr), len(st.esplora_addr))
+	copy(st.esplora_addr[:st.esplora_addr_len], esp_addr[:st.esplora_addr_len])
+	st.esplora_requests = _jint(result, "esplora_requests")
 	st.uptime_secs = _jint(result, "uptime_secs")
 	st.disk_usage = _jint(result, "disk_usage")
 	st.total_bytes_sent = _jint(result, "total_bytes_sent")

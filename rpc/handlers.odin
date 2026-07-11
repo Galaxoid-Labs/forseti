@@ -3099,6 +3099,13 @@ _handle_getnodestatus :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respo
 	obj["prof_utxo_pct"] = json.Value(json.Float(st.prof_utxo_pct))
 	obj["prof_scripts_pct"] = json.Value(json.Float(st.prof_scripts_pct))
 	obj["prof_undo_pct"] = json.Value(json.Float(st.prof_undo_pct))
+	obj["prof_index_pct"] = json.Value(json.Float(st.prof_index_pct))
+	obj["addr_index_on"] = json.Value(json.Boolean(st.addr_index_on))
+	obj["addr_index_height"] = json.Value(json.Integer(i64(st.addr_index_height)))
+	obj["addr_index_bytes"] = json.Value(json.Integer(st.addr_index_bytes))
+	obj["esplora_on"] = json.Value(json.Boolean(st.esplora_on))
+	obj["esplora_addr"] = json.Value(json.String(string(st.esplora_addr[:st.esplora_addr_len])))
+	obj["esplora_requests"] = json.Value(json.Integer(st.esplora_requests))
 	obj["uptime_secs"] = json.Value(json.Integer(st.uptime_secs))
 	obj["disk_usage"] = json.Value(json.Integer(st.disk_usage))
 	obj["total_bytes_sent"] = json.Value(json.Integer(st.total_bytes_sent))
@@ -3512,6 +3519,11 @@ _generate_blocks :: proc(srv: ^RPC_Server, nblocks: int, spk: []byte, max_tries:
 			for sel in selected {
 				mempool.mempool_remove(srv.mp, sel.txid)
 			}
+			// The block is connected — advance the mempool tip so finality
+			// (BIP113) tracks it. Without this, tip_height stayed at its init
+			// value and txs using anti-fee-sniping nLockTime (= tip height, e.g.
+			// every BDK-built tx) were wrongly rejected as Non_Final.
+			mempool.mempool_update_tip(srv.mp)
 		}
 		append(&hashes, json.Value(json.String(_hash_to_hex(hash))))
 	}

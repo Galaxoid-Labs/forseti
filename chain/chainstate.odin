@@ -51,6 +51,14 @@ Chain_State :: struct {
 	filter_db: ^storage.Filter_DB,
 	// Transaction index (--txindex; nil when disabled, prune-incompatible)
 	tx_index: ^storage.Tx_Index_DB,
+	// Address (scripthash) index (--index-addresses; nil when disabled, prune-incompatible)
+	addr_index: ^storage.Addr_Index_DB,
+	// Esplora REST server status (set once at startup by main; read by the status
+	// tick for the GUI/TUI wallet-backend panel). esplora_requests is an atomic
+	// counter the Esplora server bumps per request.
+	esplora_enabled:  bool,
+	esplora_addr:     string, // "ip:port" (heap-owned, read-only after startup)
+	esplora_requests: int,    // atomic
 	// Performance profiling counters (cumulative, logged every 1000 blocks)
 	prof: Block_Profile,
 	// Pruning: target bytes for blk+rev files (0 = keep everything);
@@ -323,6 +331,11 @@ chain_state_destroy :: proc(cs: ^Chain_State) {
 		storage.tx_index_db_close(cs.tx_index)
 		free(cs.tx_index)
 		cs.tx_index = nil
+	}
+	if cs.addr_index != nil {
+		storage.addr_index_db_close(cs.addr_index)
+		free(cs.addr_index)
+		cs.addr_index = nil
 	}
 	storage.utxo_db_close(&cs.utxo_db)
 	storage.block_db_close(&cs.block_db)
@@ -666,6 +679,12 @@ connect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Index_
 		_tx_index_connect(cs, entry, txids)
 	}
 
+	// 9c. Address (scripthash) index (if enabled). undo_coins is the block's
+	// spent-coin list in the same order the undo file persists.
+	if cs.addr_index != nil {
+		_addr_index_connect(cs, block, entry, txids, undo_coins[:])
+	}
+
 	t_end := time.tick_now()
 
 	// Accumulate profiling data.
@@ -796,6 +815,11 @@ disconnect_block :: proc(cs: ^Chain_State, block: ^wire.Block, entry: ^Block_Ind
 	// 4c. Unwind the transaction index (if enabled).
 	if cs.tx_index != nil {
 		_tx_index_disconnect(cs, block, entry)
+	}
+
+	// 4d. Unwind the address index (if enabled).
+	if cs.addr_index != nil {
+		_addr_index_disconnect(cs, block, entry)
 	}
 
 	// 5. Update entry status and pop active chain

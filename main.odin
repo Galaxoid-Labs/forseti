@@ -28,6 +28,7 @@ DEFAULT_DATA_DIR :: "/tmp/forseti-data"
 
 // Global pointers for signal handler (C-calling-convention, no closures).
 _g_rpc_server: ^rpc.RPC_Server
+_g_esplora_server: ^rpc.Esplora_Server
 _g_conn_manager: ^p2p.Conn_Manager
 
 // True when logging goes to a file (--tui/--daemon): the console loggers still
@@ -70,6 +71,9 @@ _signal_handler :: proc "c" (sig: posix.Signal) {
 	context = runtime.default_context()
 	if _g_rpc_server != nil {
 		rpc.rpc_server_stop(_g_rpc_server)
+	}
+	if _g_esplora_server != nil {
+		rpc.esplora_server_stop(_g_esplora_server)
 	}
 	if _g_conn_manager != nil {
 		p2p.conn_manager_shutdown(_g_conn_manager)
@@ -117,6 +121,8 @@ CLI_Config :: struct {
 	assumevalid:        int  `args:"name=assumevalid" usage:"Skip script verification below height (0=disable; default: network-specific)."`,
 	prune_mb:           int  `args:"name=prune" usage:"Delete old block files, keep usage under target MB (min 550, 0=off)."`,
 	txindex:            bool `args:"name=txindex" usage:"Full transaction index for getrawtransaction (default: 0; incompatible with --prune)."`,
+	index_addresses:    bool `args:"name=index-addresses" usage:"Scripthash (address) index for the wallet backend / Esplora server (default: 0; incompatible with --prune)."`,
+	esplora:            string `args:"name=esplora" usage:"Serve the Esplora REST API for BDK/wallet clients: 1 (127.0.0.1:3000) or addr:port (requires --index-addresses; default: off)."`,
 	block_filter_index: Filter_Index_Flag `args:"name=blockfilterindex" usage:"BIP 158 compact block filter index: 0, 1, or basic (default: 0)."`,
 
 	// Mempool (matching Bitcoin Core)
@@ -587,6 +593,16 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, cli_seen: map[string]b
 			cfg.txindex = val == "1" || val == "true"
 		}
 	}
+	if "index-addresses" not_in cli_seen {
+		if val, found := _ini_get(&m, cfg.network, "index-addresses"); found {
+			cfg.index_addresses = val == "1" || val == "true"
+		}
+	}
+	if "esplora" not_in cli_seen {
+		if val, found := _ini_get(&m, cfg.network, "esplora"); found {
+			cfg.esplora = val
+		}
+	}
 
 	if "listen" not_in cli_seen {
 		if val, found := _ini_get(&m, cfg.network, "listen"); found {
@@ -1006,6 +1022,30 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 		chain.Boot_Stage = ""
 	}
 
+	// Open the address (scripthash) index if enabled (prune-incompatible: history
+	// reads txs from the flat files).
+	if cfg.index_addresses {
+		if cfg.prune_mb > 0 {
+			log.error("--index-addresses is incompatible with --prune (the index reads txs from full block files)")
+			return
+		}
+		adb := new(storage.Addr_Index_DB)
+		adb_result, adb_err := storage.addr_index_db_open(cfg.data_dir)
+		if adb_err != .None {
+			log.errorf("Failed to open address index: %v", adb_err)
+			free(adb)
+			return
+		}
+		adb^ = adb_result
+		cs.addr_index = adb
+		chain.Boot_Stage = "Building address index"
+		if !chain.addr_index_catchup(cs) {
+			log.error("Address index could not be built (missing block/undo data)")
+			return
+		}
+		chain.Boot_Stage = ""
+	}
+
 	tip_hash, tip_height := chain.chain_tip(cs)
 	log.infof("Chain loaded: height=%d tip=%s", tip_height, rpc._hash_to_hex(tip_hash))
 
@@ -1223,6 +1263,61 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 		}
 	}
 
+	// Start the Esplora REST server (in-node wallet backend) if requested.
+	// Requires --index-addresses. Runs on its own thread/port (default
+	// 127.0.0.1:3000), relays broadcasts through cm like sendrawtransaction.
+	esrv: ^rpc.Esplora_Server
+	esplora_thread: ^thread.Thread
+	if cfg.esplora != "" && cfg.esplora != "0" && cfg.esplora != "false" {
+		if !cfg.index_addresses {
+			log.error("--esplora requires --index-addresses (the scripthash index it serves)")
+			return
+		}
+		ebind := ""
+		eport := 3000
+		if cfg.esplora != "1" && cfg.esplora != "true" {
+			s := cfg.esplora
+			if colon := strings.last_index_byte(s, ':'); colon >= 0 {
+				if s[:colon] != "" { ebind = s[:colon] }
+				if p, ok := strconv.parse_int(s[colon + 1:]); ok { eport = p }
+			} else if p, ok := strconv.parse_int(s); ok {
+				eport = p
+			} else {
+				ebind = s
+			}
+		}
+		esrv = new(rpc.Esplora_Server)
+		rpc.esplora_server_init(esrv, cs, mp, params, cm, ebind, eport)
+		if rpc.esplora_server_start(esrv) {
+			_g_esplora_server = esrv
+			// Publish backend status for the GUI/TUI wallet-backend panel.
+			cs.esplora_enabled = true
+			ehost := ebind
+			if ehost == "" { ehost = "127.0.0.1" }
+			cs.esplora_addr = fmt.aprintf("%s:%d", ehost, eport)
+			es_data := new(_Rpc_Thread_Data)
+			es_data.log_level = log_level
+			esplora_thread = thread.create_and_start_with_data(
+				rawptr(es_data),
+				proc(data: rawptr) {
+					td := cast(^_Rpc_Thread_Data)data
+					context.logger = _make_logger(td.log_level)
+					rpc.esplora_server_run(_g_esplora_server)
+					free(td)
+				},
+			)
+		} else {
+			log.errorf("Failed to start Esplora server")
+			free(esrv)
+			esrv = nil
+		}
+	}
+	defer {
+		if esrv != nil {
+			rpc.esplora_server_stop(esrv)
+		}
+	}
+
 	// Register signal handlers for graceful shutdown.
 	posix.signal(.SIGINT, _signal_handler)
 	posix.signal(.SIGTERM, _signal_handler)
@@ -1257,6 +1352,9 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 			if srv != nil {
 				rpc.rpc_server_stop(srv)
 			}
+			if esrv != nil {
+				rpc.esplora_server_stop(esrv)
+			}
 			p2p.conn_manager_shutdown(cm)
 		}
 	}
@@ -1274,14 +1372,27 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 	// If P2P is running, wait for it first (signal handler will stop both).
 	if p2p_thread != nil {
 		thread.join(p2p_thread)
-		// P2P done — also stop RPC.
+		// P2P done — also stop RPC + Esplora.
 		if srv != nil {
 			rpc.rpc_server_stop(srv)
+		}
+		if esrv != nil {
+			rpc.esplora_server_stop(esrv)
 		}
 	}
 
 	if rpc_thread != nil {
 		thread.join(rpc_thread)
+	}
+
+	// The `stop` RPC only stops the RPC server (its handler has no Esplora
+	// reference), and RPC-only mode never enters the P2P-join branch above — so
+	// stop Esplora explicitly here or the join below deadlocks.
+	if esrv != nil {
+		rpc.esplora_server_stop(esrv)
+	}
+	if esplora_thread != nil {
+		thread.join(esplora_thread)
 	}
 
 	if cm != nil && cm.zmq != nil {
