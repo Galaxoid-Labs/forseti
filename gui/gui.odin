@@ -139,6 +139,12 @@ g_prev_diskw: i64
 // downloading, the node is stalled — on the disk (compaction) or the network.
 g_last_height: int
 g_last_height_t: f64
+// Uptime-freshness: during a long compaction the node's status thread is blocked
+// in connect_block, so the served snapshot (uptime included) stops changing. A
+// frozen uptime is the reliable "node busy compacting" signal — unlike the
+// served disk rate, which freezes too.
+g_last_uptime: i64
+g_last_uptime_t: f64
 
 // Persistent scroll offset for the peers list (raygui GuiScrollPanel state).
 g_peer_scroll: rl.Vector2
@@ -450,6 +456,10 @@ _dashboard_loop :: proc(info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: 
 					g_last_height = st.chain_height
 					g_last_height_t = rl.GetTime()
 				}
+				if st.uptime_secs != g_last_uptime {
+					g_last_uptime = st.uptime_secs
+					g_last_uptime_t = rl.GetTime()
+				}
 			} else {
 				connected = false
 				if local { break } // local node shut down → close the window
@@ -479,19 +489,19 @@ _dashboard_loop :: proc(info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: 
 						_commas(st.flush_total)), 16, 6, 14, rl.WHITE)
 				}
 			} else if st.sync_state == .Downloading_Blocks && g_last_height_t > 0 && rl.GetTime() - g_last_height_t > 3 {
-				// Tip flat for >3 s while downloading — the node is stalled. Tell
-				// the user WHY (disk vs network) so a long compaction doesn't look
-				// like a hang, same idea as the UTXO-flush banner.
+				// Tip flat for >3 s while downloading. If the node's uptime also
+				// froze, its status thread is blocked in connect_block on a big
+				// compaction (node busy, will resume). If uptime keeps ticking but
+				// the tip is flat, it's the download side (waiting for blocks).
 				secs := int(rl.GetTime() - g_last_height_t)
-				cur := (g_net_idx - 1 + NET_HISTORY) % NET_HISTORY
-				disk_rate := g_net_count > 0 ? g_diskw[cur] : 0
-				if disk_rate > 15 * 1024 * 1024 {
+				uptime_frozen := g_last_uptime_t > 0 && rl.GetTime() - g_last_uptime_t > 3
+				if uptime_frozen {
 					rl.DrawRectangle(0, 0, WIN_W, 26, rl.Color{0x8a, 0x6d, 0x1a, 0xff})
-					_text(fmt.ctprintf("INDEX COMPACTING - tip catching up (%ds, disk %s/s) - normal, will resume",
-						secs, _fmt_bytes(i64(disk_rate))), 16, 6, 14, rl.WHITE)
+					_text(fmt.ctprintf("INDEX COMPACTING - node busy, tip catching up (%ds) - normal, resumes when done", secs),
+						16, 6, 14, rl.WHITE)
 				} else {
 					rl.DrawRectangle(0, 0, WIN_W, 26, rl.Color{0x4a, 0x4a, 0x52, 0xff})
-					_text(fmt.ctprintf("SYNC PAUSED - tip flat %ds (catching up)", secs), 16, 6, 14, rl.WHITE)
+					_text(fmt.ctprintf("WAITING FOR BLOCKS - tip flat %ds (downloading)", secs), 16, 6, 14, rl.WHITE)
 				}
 			}
 			if !connected {
