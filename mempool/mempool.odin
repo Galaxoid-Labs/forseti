@@ -22,6 +22,7 @@ Mempool_Config :: struct {
 	dust_relay_fee:          i64,    // --dustrelayfee in sat/kvB (default: 3000)
 	datacarrier:             bool,   // --datacarrier (default: true)
 	datacarrier_size:        int,    // --datacarriersize (default: 83)
+	datacarrier_count:       int,    // --datacarriercount (default: 1 = pre-v30 single OP_RETURN; raise to allow multiple)
 	permit_bare_multisig:    bool,   // --permitbaremultisig (default: true)
 	fullrbf:                 bool,   // --mempoolfullrbf (default: true)
 	max_rbf_evictions:       int,    // (internal, default: 100)
@@ -42,6 +43,7 @@ mempool_config_default :: proc() -> Mempool_Config {
 		dust_relay_fee          = 3000,
 		datacarrier             = true,
 		datacarrier_size        = 83,
+		datacarrier_count       = 1,
 		permit_bare_multisig    = true,
 		fullrbf                 = true,
 		max_rbf_evictions       = 100,

@@ -804,6 +804,33 @@ test_mempool_policy_datacarrier :: proc(t: ^testing.T) {
 	testing.expect_value(t, check_tx_policy(&tx_big), Mempool_Error.Non_Standard)
 }
 
+// --- Policy: datacarrier COUNT limit (multiple OP_RETURN outputs) ---
+
+@(test)
+test_mempool_policy_datacarrier_count :: proc(t: ^testing.T) {
+	// Two valid (<=83-byte) OP_RETURN outputs.
+	s0 := make([]byte, 83, context.temp_allocator); s0[0] = 0x6a; s0[1] = 0x4c; s0[2] = 80
+	s1 := make([]byte, 83, context.temp_allocator); s1[0] = 0x6a; s1[1] = 0x4c; s1[2] = 80
+
+	inputs := make([]wire.Tx_In, 1, context.temp_allocator)
+	inputs[0] = wire.Tx_In{
+		previous_output = wire.Outpoint{hash = wire.HASH_ZERO, index = 0},
+		sequence = 0xffffffff,
+	}
+	outputs := make([]wire.Tx_Out, 2, context.temp_allocator)
+	outputs[0] = wire.Tx_Out{value = 0, script_pubkey = s0}
+	outputs[1] = wire.Tx_Out{value = 0, script_pubkey = s1}
+	tx := wire.Tx{version = 1, inputs = inputs, outputs = outputs}
+
+	// Default policy (datacarrier_count = 1) rejects a 2nd OP_RETURN output.
+	testing.expect_value(t, check_tx_policy(&tx), Mempool_Error.Non_Standard)
+
+	// Raising the count (v30 / ecash-style permissive relay) allows multiple.
+	cfg := mempool_config_default()
+	cfg.datacarrier_count = 2
+	testing.expect_value(t, check_tx_policy(&tx, &cfg), Mempool_Error.None)
+}
+
 // --- Policy: tx version ---
 
 @(test)

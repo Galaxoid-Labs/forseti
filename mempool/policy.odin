@@ -11,6 +11,7 @@ MAX_STANDARD_TX_VERSION :: i32(2)
 MAX_STANDARD_SIGOPS :: 4000
 MAX_STANDARD_SCRIPTPUBKEY_SIZE :: 10_000
 MAX_OP_RETURN_SIZE :: 83                   // Bitcoin Core -datacarriersize default (OP_RETURN + push + 80 bytes data)
+MAX_OP_RETURN_COUNT :: 1                    // -datacarriercount default: max OP_RETURN outputs/tx (1 = pre-Core-v30; v30 relaxed to many)
 
 // Check transaction against standard relay policy.
 check_tx_policy :: proc(tx: ^wire.Tx, config: ^Mempool_Config = nil) -> Mempool_Error {
@@ -28,10 +29,12 @@ check_tx_policy :: proc(tx: ^wire.Tx, config: ^Mempool_Config = nil) -> Mempool_
 	// Resolve config values (use defaults if no config provided)
 	datacarrier := config != nil ? config.datacarrier : true
 	datacarrier_size := config != nil ? config.datacarrier_size : MAX_OP_RETURN_SIZE
+	datacarrier_count := config != nil ? config.datacarrier_count : MAX_OP_RETURN_COUNT
 	permit_bare_multisig := config != nil ? config.permit_bare_multisig : true
 	dust_relay_fee := config != nil ? config.dust_relay_fee : DUST_RELAY_FEE_PER_KVB
 
 	// 3. All outputs must have standard script types and not be dust
+	null_data_count := 0 // number of OP_RETURN (data-carrier) outputs seen
 	for i in 0 ..< len(tx.outputs) {
 		spk := tx.outputs[i].script_pubkey
 
@@ -46,12 +49,20 @@ check_tx_policy :: proc(tx: ^wire.Tx, config: ^Mempool_Config = nil) -> Mempool_
 			return .Non_Standard
 		}
 
-		// OP_RETURN: reject if datacarrier disabled, or enforce size limit
+		// OP_RETURN: reject if datacarrier disabled, over the size limit, or if the
+		// tx has more data-carrier outputs than allowed. datacarrier_count defaults
+		// to 1 (pre-Core-v30 single-OP_RETURN policy); Core v30 relaxed relay to
+		// permit multiple. Raise --datacarriercount to allow more (e.g. to match the
+		// permissive ecash/v30 relay policy).
 		if stype == .Null_Data {
 			if !datacarrier {
 				return .Non_Standard
 			}
 			if len(spk) > datacarrier_size {
+				return .Non_Standard
+			}
+			null_data_count += 1
+			if null_data_count > datacarrier_count {
 				return .Non_Standard
 			}
 		}

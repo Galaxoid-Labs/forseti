@@ -132,6 +132,7 @@ CLI_Config :: struct {
 	dust_relay_fee:           Fee_Rate_Btc `args:"name=dustrelayfee" usage:"Dust threshold fee rate in BTC/kvB (default: 0.00003000)."`,
 	datacarrier:              bool         `args:"name=datacarrier" usage:"Allow OP_RETURN outputs (default: 1)."`,
 	datacarrier_size:         int          `args:"name=datacarriersize" usage:"Max OP_RETURN script size (default: 83)."`,
+	datacarrier_count:        int          `args:"name=datacarriercount" usage:"Max OP_RETURN outputs per tx (default: 1 = pre-v30 single; raise to allow multiple)."`,
 	permit_bare_multisig:     bool         `args:"name=permitbaremultisig" usage:"Allow bare multisig outputs (default: 1)."`,
 	blocks_only:              bool         `args:"name=blocksonly" usage:"Disable tx relay, only sync blocks (default: 0)."`,
 	persist_mempool:          bool         `args:"name=persistmempool" usage:"Save/load mempool on shutdown/startup (default: 1)."`,
@@ -208,6 +209,7 @@ _parse_cli :: proc() -> (cfg: CLI_Config, cli_seen: map[string]bool) {
 		dust_relay_fee           = 3000,
 		datacarrier              = true,
 		datacarrier_size         = 83,
+		datacarrier_count        = 1,
 		permit_bare_multisig     = true,
 		persist_mempool          = true,
 		server                   = true,
@@ -484,6 +486,14 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, cli_seen: map[string]b
 		if val, found := _ini_get(&m, cfg.network, "datacarriersize"); found {
 			if n, parse_ok := strconv.parse_int(val); parse_ok {
 				cfg.datacarrier_size = max(n, 0)
+			}
+		}
+	}
+
+	if "datacarriercount" not_in cli_seen {
+		if val, found := _ini_get(&m, cfg.network, "datacarriercount"); found {
+			if n, parse_ok := strconv.parse_int(val); parse_ok {
+				cfg.datacarrier_count = max(n, 0)
 			}
 		}
 	}
@@ -1025,6 +1035,7 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 		dust_relay_fee          = i64(cfg.dust_relay_fee),
 		datacarrier             = cfg.datacarrier,
 		datacarrier_size        = cfg.datacarrier_size,
+		datacarrier_count       = cfg.datacarrier_count,
 		permit_bare_multisig    = cfg.permit_bare_multisig,
 		fullrbf                 = cfg.mempool_fullrbf,
 		max_rbf_evictions       = 100,
