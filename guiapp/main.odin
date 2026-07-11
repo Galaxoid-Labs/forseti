@@ -235,6 +235,7 @@ _fetch_status :: proc(c: ^Client) -> (st: p2p.Node_Status, ok: bool) {
 	st.esplora_requests = _jint(result, "esplora_requests")
 	st.uptime_secs = _jint(result, "uptime_secs")
 	st.disk_usage = _jint(result, "disk_usage")
+	st.disk_write_bytes = _jint(result, "disk_write_bytes")
 	st.total_bytes_sent = _jint(result, "total_bytes_sent")
 	st.total_bytes_recv = _jint(result, "total_bytes_recv")
 	st.flushing = _jbool(result, "flushing")

@@ -93,16 +93,19 @@ addr_index_db_open :: proc(data_dir: string) -> (adb: Addr_Index_DB, err: Storag
 	opts := leveldb_options_create()
 	leveldb_options_set_create_if_missing(opts, 1)
 	leveldb_options_set_compression(opts, 0)
-	// Bulk-load tuning: the address index grows to hundreds of GB during IBD, so
-	// a tiny 4 MB memtable forced constant flushes → thousands of small SSTables →
-	// heavy compaction write-amplification (the per-block index cost that climbs
-	// with DB size). A large memtable produces far fewer, larger level-0 files and
-	// slashes compaction frequency; big cache + many open files keep reads/compaction
-	// off the syscall path. Pure perf knobs — no on-disk format change.
-	leveldb_options_set_write_buffer_size(opts, 128 * 1024 * 1024) // 128 MB memtable
-	leveldb_options_set_max_open_files(opts, 4096)
+	// Bulk-load tuning: the scripthash index is randomly keyed (sha256), so every
+	// memtable flush scatters across the whole multi-GB keyspace — worst case for
+	// LevelDB's SINGLE compaction thread, which then write-stalls and blocks the
+	// chain thread (measured: connect bursts ~1.5 GB, then stalls ~10 s at 0 blk/s
+	// while compaction drains at ~130 MB/s on a disk with bandwidth to spare — it's
+	// compaction-thread-bound, not disk-bound). A large memtable absorbs most of a
+	// burst in RAM → far fewer L0 flushes → far less work for that one thread.
+	// Pure perf knobs — no on-disk format change, no crash-consistency change (the
+	// per-block `best` marker + catch-up recovery are unaffected).
+	leveldb_options_set_write_buffer_size(opts, 1024 * 1024 * 1024) // 1 GB memtable
+	leveldb_options_set_max_open_files(opts, 8192)
 	leveldb_options_set_block_size(opts, 16 * 1024) // 16 KB blocks (fewer index entries)
-	adb.cache = leveldb_cache_create_lru(256 * 1024 * 1024) // 256 MB block cache
+	adb.cache = leveldb_cache_create_lru(512 * 1024 * 1024) // 512 MB block cache
 	leveldb_options_set_cache(opts, adb.cache)
 	leveldb_options_set_filter_policy(opts, adb.bloom)
 

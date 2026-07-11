@@ -5,6 +5,8 @@ import "core:fmt"
 import "core:log"
 import "core:nbio"
 import tcp "core:net"
+import "core:os"
+import "core:strconv"
 import "core:strings"
 import "core:sync"
 import "core:time"
@@ -2154,6 +2156,23 @@ _copy_status_str :: proc(dst: []byte, s: string) -> int {
 }
 
 // Populate cm.status from live node state. P2P thread only (owns all state read here).
+// Process-cumulative bytes written, from Linux /proc/self/io (the "write_bytes"
+// line). The GUI derives MB/s to visualize LevelDB compaction / index work that
+// block-connect rate can't show. Returns 0 on non-Linux or read failure.
+_read_proc_write_bytes :: proc() -> i64 {
+	data, _ := os.read_entire_file("/proc/self/io", context.temp_allocator)
+	if len(data) == 0 { return 0 }
+	s := string(data)
+	key := "write_bytes:"
+	idx := strings.index(s, key)
+	if idx < 0 { return 0 }
+	rest := s[idx + len(key):]
+	if nl := strings.index_byte(rest, '\n'); nl >= 0 { rest = rest[:nl] }
+	v, pok := strconv.parse_i64(strings.trim_space(rest))
+	if !pok { return 0 }
+	return v
+}
+
 _update_node_status :: proc(cm: ^Conn_Manager, now: i64) {
 	st: Node_Status
 
@@ -2243,6 +2262,7 @@ _update_node_status :: proc(cm: ^Conn_Manager, now: i64) {
 		cm.disk_check_at = now
 	}
 	st.disk_usage = cm.disk_usage
+	st.disk_write_bytes = _read_proc_write_bytes() // Linux /proc/self/io; 0 elsewhere
 	st.total_bytes_sent = cm.total_bytes_sent
 	st.total_bytes_recv = cm.total_bytes_recv
 

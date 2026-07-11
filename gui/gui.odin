@@ -130,8 +130,10 @@ _fmt_bytes :: proc(n: i64) -> string {
 NET_HISTORY :: 120
 g_net_in:  [NET_HISTORY]f32
 g_net_out: [NET_HISTORY]f32
+g_diskw:   [NET_HISTORY]f32 // disk write bytes/sec (the index/compaction work)
 g_net_idx: int
 g_net_count: int
+g_prev_diskw: i64
 
 // Persistent scroll offset for the peers list (raygui GuiScrollPanel state).
 g_peer_scroll: rl.Vector2
@@ -145,12 +147,14 @@ _net_sample :: proc(st: ^p2p.Node_Status) {
 		if dt > 0.2 {
 			g_net_in[g_net_idx] = f32(f64(st.total_bytes_recv - g_prev_recv) / dt)
 			g_net_out[g_net_idx] = f32(f64(st.total_bytes_sent - g_prev_sent) / dt)
+			g_diskw[g_net_idx] = f32(f64(st.disk_write_bytes - g_prev_diskw) / dt)
 			g_net_idx = (g_net_idx + 1) % NET_HISTORY
 			if g_net_count < NET_HISTORY { g_net_count += 1 }
 		}
 	}
 	g_prev_sent = st.total_bytes_sent
 	g_prev_recv = st.total_bytes_recv
+	g_prev_diskw = st.disk_write_bytes
 	g_prev_sample_t = now
 }
 
@@ -488,6 +492,14 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 	_text(fmt.ctprintf("Height: %s", _commas(st.chain_height)), 260, 14, 18, COL_TEXT)
 	_text(fmt.ctprintf("Headers: %s", _commas(st.best_header)), 500, 14, 18, COL_DIM)
 	_text(fmt.ctprintf("%s", state_label), 730, 14, 18, state_col)
+	// Pulsing activity dot: animates every FRAME (driven by wall-clock, not the
+	// 1 Hz data poll) so the dashboard never looks frozen while the node grinds.
+	if st.sync_state == .Downloading_Blocks || st.sync_state == .Syncing_Headers {
+		saw := f32(i64(rl.GetTime() * 1400) % 1000) / 1000.0 // ~1.4 Hz sawtooth
+		tri := saw < 0.5 ? saw * 2 : (1 - saw) * 2           // 0 -> 1 -> 0 triangle
+		dot := rl.Color{state_col.r, state_col.g, state_col.b, u8(70 + tri * 185)}
+		rl.DrawCircle(718, 23, 5, dot)
+	}
 	_text(fmt.ctprintf("Uptime: %s", _fmt_uptime(st.uptime_secs)), pad, 38, 14, COL_DIM)
 	// Wallet-backend strip — only when the address index is on (dynamic).
 	if st.addr_index_on {
@@ -652,7 +664,7 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 
 	// --- Block profile ---
 	prof_y: f32 = 554
-	_group_box(rl.Rectangle{pad, prof_y, WIN_W - 2 * pad, 84}, fmt.ctprintf("Block Profile (last %d blocks)", st.prof_blocks))
+	_group_box(rl.Rectangle{pad, prof_y, WIN_W - 2 * pad, 110}, fmt.ctprintf("Block Profile (last %d blocks)", st.prof_blocks))
 	if st.prof_blocks > 0 {
 		rate_part := st.blocks_per_sec > 0 ? fmt.ctprintf("   |   %.1f blocks/sec", st.blocks_per_sec) : ""
 		_text(fmt.ctprintf("Total: %.2f ms/block%s", st.prof_ms_per_block, rate_part), pad + 12, i32(prof_y) + 18, 15, COL_ACCENT)
@@ -672,6 +684,35 @@ _draw_dashboard :: proc(st: ^p2p.Node_Status, info: Static_Info) {
 		}
 	} else {
 		_text("Waiting for the first block to profile...", pad + 12, i32(prof_y) + 32, 14, COL_DIM)
+	}
+
+	// Live DISK-WRITE sparkline — the real index/compaction work. Block connection
+	// is bursty (stall on LevelDB compaction between bursts), so blocks/sec goes
+	// flat while the disk keeps writing ~130 MB/s. This graph stays lit through
+	// those flatlines — showing the work that's actually happening.
+	{
+		sx := i32(pad) + 12
+		sy := i32(prof_y) + 74
+		sw := i32(WIN_W) - 2 * i32(pad) - 24 - 110 // leave room for the value label
+		sh: i32 = 28
+		rl.DrawRectangleLines(sx, sy, sw, sh, COL_LINE)
+		peak: f32 = 1024 * 1024 // 1 MB/s floor so an idle line stays flat
+		for i in 0 ..< g_net_count { peak = max(peak, g_diskw[i]) }
+		if g_net_count >= 2 {
+			step := f32(sw) / f32(NET_HISTORY - 1)
+			for i in 1 ..< g_net_count {
+				a := (g_net_idx - g_net_count + i - 1 + 2 * NET_HISTORY) % NET_HISTORY
+				b := (a + 1) % NET_HISTORY
+				x0 := f32(sx) + f32(i - 1) * step
+				x1 := f32(sx) + f32(i) * step
+				y0 := f32(sy + sh) - (g_diskw[a] / peak) * f32(sh - 2)
+				y1 := f32(sy + sh) - (g_diskw[b] / peak) * f32(sh - 2)
+				rl.DrawLineEx(rl.Vector2{x0, y0}, rl.Vector2{x1, y1}, 1.5, COL_ORANGE)
+			}
+		}
+		cur := (g_net_idx - 1 + NET_HISTORY) % NET_HISTORY
+		_text("disk write", sx + sw + 10, sy - 2, 12, COL_DIM)
+		_text(fmt.ctprintf("%s/s", _fmt_bytes(i64(g_diskw[cur]))), sx + sw + 10, sy + 12, 14, COL_ORANGE)
 	}
 
 	// --- Status bar ---

@@ -183,6 +183,7 @@ Node_Status :: struct {
 	// System
 	uptime_secs:       i64,
 	disk_usage:        i64, // blk+rev+chainstate bytes on disk (refreshed ~1/min)
+	disk_write_bytes:  i64, // process-cumulative bytes written (from /proc/self/io); GUI derives MB/s
 	total_bytes_sent:  i64, // lifetime P2P traffic (GUI derives rates)
 	total_bytes_recv:  i64,
 	// UTXO flush in progress (snapshot freezes while it runs — see get_status)

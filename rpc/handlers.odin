@@ -3108,6 +3108,7 @@ _handle_getnodestatus :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respo
 	obj["esplora_requests"] = json.Value(json.Integer(st.esplora_requests))
 	obj["uptime_secs"] = json.Value(json.Integer(st.uptime_secs))
 	obj["disk_usage"] = json.Value(json.Integer(st.disk_usage))
+	obj["disk_write_bytes"] = json.Value(json.Integer(st.disk_write_bytes))
 	obj["total_bytes_sent"] = json.Value(json.Integer(st.total_bytes_sent))
 	obj["total_bytes_recv"] = json.Value(json.Integer(st.total_bytes_recv))
 	obj["flushing"] = json.Value(json.Boolean(st.flushing))
