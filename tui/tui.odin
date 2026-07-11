@@ -33,9 +33,10 @@ P_RED :: 6
 NET_HISTORY :: 120
 g_net_in: [NET_HISTORY]f32
 g_net_out: [NET_HISTORY]f32
+g_diskw: [NET_HISTORY]f32 // disk write bytes/sec (index/compaction work)
 g_net_idx: int
 g_net_count: int
-g_prev_sent, g_prev_recv: i64
+g_prev_sent, g_prev_recv, g_prev_diskw: i64
 g_prev_t: f64
 
 _net_sample :: proc(st: ^p2p.Node_Status) {
@@ -45,12 +46,15 @@ _net_sample :: proc(st: ^p2p.Node_Status) {
 		if dt > 0.2 {
 			g_net_in[g_net_idx] = f32(f64(st.total_bytes_recv - g_prev_recv) / dt)
 			g_net_out[g_net_idx] = f32(f64(st.total_bytes_sent - g_prev_sent) / dt)
+			dw := st.disk_write_bytes - g_prev_diskw
+			g_diskw[g_net_idx] = dw > 0 ? f32(f64(dw) / dt) : 0
 			g_net_idx = (g_net_idx + 1) % NET_HISTORY
 			if g_net_count < NET_HISTORY { g_net_count += 1 }
 		}
 	}
 	g_prev_recv = st.total_bytes_recv
 	g_prev_sent = st.total_bytes_sent
+	g_prev_diskw = st.disk_write_bytes
 	g_prev_t = now
 }
 
@@ -190,14 +194,26 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 	}
 	nc.wnoutrefresh(nc.stdscr)
 
-	// Sync panel.
-	sync_h := 4
+	// Sync panel: two bars — Blocks (height %) and Verified (tx-weighted work).
+	// They diverge hugely during IBD (empty early blocks), so showing both makes
+	// the honest "10% of work at 44% of blocks" obvious rather than confusing.
+	sync_h := 5
 	sp := _panel(1, 0, sync_h, w, "Sync")
 	if sp != nil {
-		display_pct := st.sync_state == .In_Sync ? 1.0 : st.verification_pct
-		_bar(sp, 1, 2, w - 14, display_pct, P_GREEN)
-		_put(sp, 1, w - 10, pct_label(display_pct), P_GREEN, nc.A_BOLD)
-		_put(sp, 2, 2, blocks_line(st), P_DIM)
+		bx := 11
+		bw := max(w - bx - 9, 4)
+		block_frac := st.best_header > 0 ? clamp(f64(st.chain_height) / f64(st.best_header), 0, 1) : 0
+		if st.sync_state == .In_Sync { block_frac = 1 }
+		_put(sp, 1, 2, "Blocks", P_DIM)
+		_bar(sp, 1, bx, bw, block_frac, P_BLUE)
+		_put(sp, 1, w - 7, fmt.tprintf("%3.0f%%", block_frac * 100), P_BLUE, nc.A_BOLD)
+
+		vpct := st.sync_state == .In_Sync ? 1.0 : st.verification_pct
+		_put(sp, 2, 2, "Verified", P_DIM)
+		_bar(sp, 2, bx, bw, vpct, P_GREEN)
+		_put(sp, 2, w - 8, pct_label(vpct), P_GREEN, nc.A_BOLD)
+
+		_put(sp, 3, 2, blocks_line(st), P_DIM)
 		_flip(sp)
 	}
 
@@ -224,17 +240,21 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 	half_rows := clamp((h - 30) / 2, 2, 5)
 	net_h := half_rows * 2 + 5
 	net_y := 1 + sync_h + peers_h
-	np := _panel(net_y, 0, net_h, w, "Network")
+	// Net-in (up) vs disk-write (down): the two forces that pace IBD. When blocks
+	// stall you can see whether it's the network quiet (peer-bound) or the disk
+	// hammering (index/compaction-bound). Independent scales — different units.
+	np := _panel(net_y, 0, net_h, w, "Net In / Disk Write")
 	if np != nil {
 		chart_w := max(w - 4, 20)
 		in_rate, out_rate := current_rates()
-		shared_peak := max(ring_peak(g_net_in[:]), ring_peak(g_net_out[:]))
+		cur := (g_net_idx - 1 + NET_HISTORY) % NET_HISTORY
+		disk_rate := g_net_count > 0 ? g_diskw[cur] : 0
 
-		// Top label, IN chart rising to the baseline.
-		_put(np, 1, 2, "IN", P_BLUE, nc.A_BOLD)
-		_put(np, 1, 5, fmt.tprintf("%9s/s", fmt_bytes(i64(in_rate))), P_TEXT, nc.A_BOLD)
-		_put(np, 1, 17, fmt.tprintf("(peak %s/s)", fmt_bytes(i64(ring_peak(g_net_in[:])))), P_DIM)
-		in_rows := bar_rows(g_net_in[:], g_net_idx, g_net_count, chart_w, half_rows, shared_peak)
+		// Top: network IN rising to the baseline (OUT shown as a number).
+		_put(np, 1, 2, "NET IN", P_BLUE, nc.A_BOLD)
+		_put(np, 1, 9, fmt.tprintf("%9s/s", fmt_bytes(i64(in_rate))), P_TEXT, nc.A_BOLD)
+		_put(np, 1, 23, fmt.tprintf("(out %s/s)", fmt_bytes(i64(out_rate))), P_DIM)
+		in_rows := bar_rows(g_net_in[:], g_net_idx, g_net_count, chart_w, half_rows, ring_peak(g_net_in[:]))
 		for row, r in in_rows {
 			_draw_bar_row(np, 2 + r, 2, row, P_BLUE)
 		}
@@ -243,15 +263,15 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 		baseline_y := 2 + half_rows
 		_put(np, baseline_y, 2, strings.repeat("-", chart_w, context.temp_allocator), P_DIM)
 
-		// OUT chart hanging below the baseline (rows mirrored), bottom label.
-		out_rows := bar_rows(g_net_out[:], g_net_idx, g_net_count, chart_w, half_rows, shared_peak)
+		// Bottom: disk-write hanging below the baseline (rows mirrored).
+		disk_rows := bar_rows(g_diskw[:], g_net_idx, g_net_count, chart_w, half_rows, ring_peak(g_diskw[:]))
 		for r in 0 ..< half_rows {
-			_draw_bar_row(np, baseline_y + 1 + r, 2, out_rows[half_rows - 1 - r], P_GREEN)
+			_draw_bar_row(np, baseline_y + 1 + r, 2, disk_rows[half_rows - 1 - r], P_YELLOW)
 		}
 		oy := baseline_y + half_rows + 1
-		_put(np, oy, 2, "OUT", P_GREEN, nc.A_BOLD)
-		_put(np, oy, 6, fmt.tprintf("%9s/s", fmt_bytes(i64(out_rate))), P_TEXT, nc.A_BOLD)
-		_put(np, oy, 18, fmt.tprintf("(peak %s/s)", fmt_bytes(i64(ring_peak(g_net_out[:])))), P_DIM)
+		_put(np, oy, 2, "DISK WR", P_YELLOW, nc.A_BOLD)
+		_put(np, oy, 10, fmt.tprintf("%9s/s", fmt_bytes(i64(disk_rate))), P_TEXT, nc.A_BOLD)
+		_put(np, oy, 24, fmt.tprintf("(peak %s/s)", fmt_bytes(i64(ring_peak(g_diskw[:])))), P_DIM)
 		_flip(np)
 	}
 

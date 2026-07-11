@@ -140,11 +140,8 @@ blocks_line :: proc(st: ^p2p.Node_Status, allocator := context.temp_allocator) -
 			? fmt.tprintf(" | ETA ~%s", fmt_uptime(st.eta_secs)) \
 			: " | ETA estimating..."
 	}
-	// Block-height % alongside the counts — the bar above is tx-weighted (much
-	// lower early on), so the raw counts anchor "how many blocks" vs "how much work".
-	block_pct := st.best_header > 0 ? 100 * f64(st.chain_height) / f64(st.best_header) : 0
-	return fmt.aprintf("%s / %s blocks (%.0f%%) | %d in-flight | up %s%s",
-		commas(st.chain_height), commas(st.best_header), block_pct, st.blocks_in_flight,
+	return fmt.aprintf("%s / %s blocks | %d in-flight | up %s%s",
+		commas(st.chain_height), commas(st.best_header), st.blocks_in_flight,
 		fmt_uptime(st.uptime_secs), eta, allocator = allocator)
 }
 
