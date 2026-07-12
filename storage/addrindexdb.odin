@@ -5,10 +5,18 @@ import "core:log"
 import "core:os"
 import "core:strings"
 
-// Standalone LevelDB for the address (scripthash) index (--index-addresses).
+// Standalone RocksDB for the address (scripthash) index (--index-addresses).
 // Located at <datadir>/addrindex/. Incompatible with pruning — history reads
-// txs from the flat block files. This is the third index of the family that
-// already includes --txindex (txindexdb.odin) and the BIP158 filter index.
+// txs from the flat block files.
+//
+// RocksDB (not LevelDB, unlike the other indexes) because this index is large
+// (hundreds of GB) and RANDOMLY keyed (scripthash = sha256): LevelDB's single
+// compaction thread can't keep up and write-stalls the chain thread, tripling
+// IBD (measured: 5.17 TB written for a 316 GB index, index = 86% of per-block
+// time). RocksDB's multi-threaded compaction + Zstd + big SST files fix that.
+// See docs/plans/addrindex-rocksdb.md. The write pattern is UNCHANGED (one
+// atomic WriteBatch per block, `best` marker inside it), so the reorg/crash
+// model is identical to the LevelDB version.
 //
 // A scripthash is sha256(scriptPubKey) — stored raw (NOT byte-reversed); the
 // Electrum/Esplora byte-reversal is applied at the API edge.
@@ -32,11 +40,11 @@ ADDR_U_PREFIX :: byte('U')
 ADDR_T_PREFIX :: byte('T')
 
 Addr_Index_DB :: struct {
-	db:         LDB,
-	cache:      LDB_Cache,
-	bloom:      LDB_FilterPolicy,
-	read_opts:  LDB_ReadOptions,
-	write_opts: LDB_WriteOptions,
+	db:         RDB,
+	cache:      RDB_Cache,
+	bloom:      RDB_FilterPolicy,
+	read_opts:  RDB_ReadOptions,
+	write_opts: RDB_WriteOptions,
 	path:       string, // on-disk dir, for size reporting (heap-owned)
 }
 
@@ -86,28 +94,46 @@ Addr_Utxo_Entry :: struct {
 }
 
 addr_index_db_open :: proc(data_dir: string) -> (adb: Addr_Index_DB, err: Storage_Error) {
-	adb.bloom = leveldb_filterpolicy_create_bloom(10)
-	adb.read_opts = leveldb_readoptions_create()
-	adb.write_opts = leveldb_writeoptions_create()
+	adb.bloom = rocksdb_filterpolicy_create_bloom_full(10)
+	adb.read_opts = rocksdb_readoptions_create()
+	adb.write_opts = rocksdb_writeoptions_create()
+	// Disable the WAL for the address index. The index is fully rebuildable and our
+	// own catch-up recovers it by forward-replay from the `best` marker off the flat
+	// block+undo files (addr_index_catchup) — RocksDB's WAL crash-recovery is
+	// redundant with that and just costs an fsync per commit (the dense-region iowait
+	// bottleneck). On a crash the index rolls back to the last memtable flush and
+	// catch-up re-indexes the tail (idempotent). No correctness change.
+	rocksdb_writeoptions_disable_WAL(adb.write_opts, 1)
 
-	opts := leveldb_options_create()
-	leveldb_options_set_create_if_missing(opts, 1)
-	leveldb_options_set_compression(opts, 0)
-	// Bulk-load tuning: the scripthash index is randomly keyed (sha256), so every
-	// memtable flush scatters across the whole multi-GB keyspace — worst case for
-	// LevelDB's SINGLE compaction thread, which then write-stalls and blocks the
-	// chain thread (measured: connect bursts ~1.5 GB, then stalls ~10 s at 0 blk/s
-	// while compaction drains at ~130 MB/s on a disk with bandwidth to spare — it's
-	// compaction-thread-bound, not disk-bound). A large memtable absorbs most of a
-	// burst in RAM → far fewer L0 flushes → far less work for that one thread.
-	// Pure perf knobs — no on-disk format change, no crash-consistency change (the
-	// per-block `best` marker + catch-up recovery are unaffected).
-	leveldb_options_set_write_buffer_size(opts, 1024 * 1024 * 1024) // 1 GB memtable
-	leveldb_options_set_max_open_files(opts, 8192)
-	leveldb_options_set_block_size(opts, 16 * 1024) // 16 KB blocks (fewer index entries)
-	adb.cache = leveldb_cache_create_lru(512 * 1024 * 1024) // 512 MB block cache
-	leveldb_options_set_cache(opts, adb.cache)
-	leveldb_options_set_filter_policy(opts, adb.bloom)
+	opts := rocksdb_options_create()
+	rocksdb_options_set_create_if_missing(opts, 1)
+	// The three fixes for LevelDB's single-thread compaction stall on this large,
+	// randomly-keyed index:
+	//   1. multi-threaded flush+compaction (the #1 win — LevelDB has one thread),
+	//   2. Zstd compression (LevelDB used none → ~halve the data → ~halve the I/O),
+	//   3. big SST files (LevelDB's 2 MB → ~158k tiny files at 316 GB; 256 MB → ~60x fewer).
+	rocksdb_options_increase_parallelism(opts, 8)
+	rocksdb_options_set_max_subcompactions(opts, 4) // split one compaction across cores
+	// Compression: NONE on the hot upper levels (L0-L2 are recompacted constantly —
+	// Zstd there pins the single compaction thread on CPU), Zstd only on the
+	// bottommost level (most of the data, compacted rarely) so on-disk size stays
+	// down. We measured the reindex is NOT write-bandwidth-bound (WAL-off cut writes
+	// 4× with zero speedup), so trading upper-level bytes for compaction CPU is free.
+	rocksdb_options_set_compression(opts, RDB_NO_COMPRESSION)
+	rocksdb_options_set_bottommost_compression(opts, RDB_ZSTD)
+	rocksdb_options_set_write_buffer_size(opts, 512 * 1024 * 1024)       // 512 MB memtable
+	rocksdb_options_set_max_write_buffer_number(opts, 4)
+	rocksdb_options_set_target_file_size_base(opts, 256 * 1024 * 1024)   // 256 MB SSTs
+	rocksdb_options_set_max_bytes_for_level_base(opts, 2 * 1024 * 1024 * 1024) // 2 GB L1
+	rocksdb_options_set_bytes_per_sync(opts, 8 * 1024 * 1024)
+
+	// Block-based table: cache + bloom + block size live here in RocksDB.
+	bbt := rocksdb_block_based_options_create()
+	adb.cache = rocksdb_cache_create_lru(512 * 1024 * 1024)
+	rocksdb_block_based_options_set_block_cache(bbt, adb.cache)
+	rocksdb_block_based_options_set_filter_policy(bbt, adb.bloom)
+	rocksdb_block_based_options_set_block_size(bbt, 16 * 1024)
+	rocksdb_options_set_block_based_table_factory(opts, bbt)
 
 	path_buf: [512]byte
 	path_len := _bprint_path(path_buf[:], data_dir, "/addrindex")
@@ -115,26 +141,27 @@ addr_index_db_open :: proc(data_dir: string) -> (adb: Addr_Index_DB, err: Storag
 	os.make_directory(string(path_buf[:path_len]))
 
 	errptr: cstring = nil
-	adb.db = leveldb_open(opts, cstring(&path_buf[0]), &errptr)
+	adb.db = rocksdb_open(opts, cstring(&path_buf[0]), &errptr)
+	rocksdb_options_destroy(opts)
+	rocksdb_block_based_options_destroy(bbt) // factory kept its own refs to cache/bloom
 	if adb.db == nil {
-		log.errorf("Failed to open addrindex LevelDB: %s", errptr)
-		if errptr != nil { leveldb_free(rawptr(errptr)) }
-		leveldb_options_destroy(opts)
+		log.errorf("Failed to open addrindex RocksDB: %s", errptr)
+		if errptr != nil { rocksdb_free(rawptr(errptr)) }
 		_addr_index_db_cleanup(&adb)
 		return adb, .IO_Error
 	}
-	leveldb_options_destroy(opts)
 
 	adb.path = strings.clone(string(path_buf[:path_len]))
-	log.infof("Address index DB opened at %s", adb.path)
+	log.infof("Address index DB (RocksDB) opened at %s", adb.path)
 	return adb, .None
 }
 
 _addr_index_db_cleanup :: proc(adb: ^Addr_Index_DB) {
-	if adb.read_opts != nil { leveldb_readoptions_destroy(adb.read_opts) }
-	if adb.write_opts != nil { leveldb_writeoptions_destroy(adb.write_opts) }
-	if adb.cache != nil { leveldb_cache_destroy(adb.cache) }
-	if adb.bloom != nil { leveldb_filterpolicy_destroy(adb.bloom) }
+	if adb.read_opts != nil { rocksdb_readoptions_destroy(adb.read_opts) }
+	if adb.write_opts != nil { rocksdb_writeoptions_destroy(adb.write_opts) }
+	if adb.cache != nil { rocksdb_cache_destroy(adb.cache) }
+	// bloom (filter policy) is owned by the table factory inside the open DB;
+	// RocksDB frees it on close, so we don't destroy it here.
 }
 
 // Total bytes of the addrindex/ directory on disk (for the status panel).
@@ -151,10 +178,10 @@ addr_index_disk_size :: proc(adb: ^Addr_Index_DB) -> i64 {
 
 addr_index_db_close :: proc(adb: ^Addr_Index_DB) {
 	if adb.db != nil {
-		leveldb_close(adb.db)
+		rocksdb_close(adb.db) // frees the table factory (decref cache+bloom)
 		adb.db = nil
 	}
-	_addr_index_db_cleanup(adb)
+	_addr_index_db_cleanup(adb) // then decref our cache ref
 }
 
 // ---- key encoding ----
@@ -225,12 +252,12 @@ _t_key :: proc(buf: []byte, txid: Hash256) {
 // ---- block write / unwrite (atomic per block) ----
 
 @(private = "file")
-_put_best :: proc(batch: LDB_WriteBatch, block_hash: Hash256, height: int) {
+_put_best :: proc(batch: RDB_WriteBatch, block_hash: Hash256, height: int) {
 	best: [36]byte
 	bh := block_hash
 	copy(best[:32], bh[:])
 	_put_u32_le(best[32:36], u32(height))
-	ldb_batch_put(batch, transmute([]byte)string("best"), best[:])
+	rdb_batch_put(batch, transmute([]byte)string("best"), best[:])
 }
 
 // Index one connected block: add H/U funding rows, H rows + U deletes for
@@ -243,8 +270,8 @@ addr_index_write_block :: proc(
 	spending: []Addr_Spending,
 	tx_locs: []Addr_Tx_Loc,
 ) -> Storage_Error {
-	batch := ldb_batch_create()
-	defer ldb_batch_destroy(batch)
+	batch := rocksdb_writebatch_create()
+	defer rocksdb_writebatch_destroy(batch)
 
 	hk: [74]byte
 	uk: [69]byte
@@ -254,29 +281,86 @@ addr_index_write_block :: proc(
 
 	for f in funding {
 		_h_key(hk[:], f.scripthash, f.height, f.txid, 0, f.vout)
-		ldb_batch_put(batch, hk[:], nil)
+		rdb_batch_put(batch, hk[:], nil)
 		_u_key(uk[:], f.scripthash, f.txid, f.vout)
 		_put_u32_le(uv[0:4], f.height)
 		_put_i64_le(uv[4:12], f.value)
-		ldb_batch_put(batch, uk[:], uv[:])
+		rdb_batch_put(batch, uk[:], uv[:])
 	}
 
 	for s in spending {
 		_h_key(hk[:], s.scripthash, s.height, s.spend_txid, 1, s.vin)
-		ldb_batch_put(batch, hk[:], nil)
+		rdb_batch_put(batch, hk[:], nil)
 		_u_key(uk[:], s.scripthash, s.prev_txid, s.prev_vout)
-		ldb_batch_delete(batch, uk[:])
+		rdb_batch_delete(batch, uk[:])
 	}
 
 	for t in tx_locs {
 		_t_key(tk[:], t.txid)
 		_put_u32_le(tv[0:4], t.height)
 		_put_u32_le(tv[4:8], t.position)
-		ldb_batch_put(batch, tk[:], tv[:])
+		rdb_batch_put(batch, tk[:], tv[:])
 	}
 
 	_put_best(batch, block_hash, height)
-	return ldb_batch_write(adb.db, adb.write_opts, batch)
+	return rdb_batch_write(adb.db, adb.write_opts, batch)
+}
+
+// A connected block's rows, for coalesced multi-block writes.
+Addr_Block_Batch_Entry :: struct {
+	hash:     Hash256,
+	height:   int,
+	funding:  []Addr_Funding,
+	spending: []Addr_Spending,
+	tx_locs:  []Addr_Tx_Loc,
+}
+
+// Write MANY connected blocks (in ascending height order) in ONE atomic
+// WriteBatch — the `best` marker is the LAST entry's. Used by the parallel
+// catch-up to collapse per-block commit overhead (the serial-apply bottleneck).
+// Ordering within the batch is (block order, funding-before-spending per block),
+// identical to per-block writes, so the U-index add/delete order is preserved.
+// Per-batch atomicity (vs per-block): a crash re-indexes forward from `best`
+// (idempotent), so this is safe — same recovery model, coarser marker.
+addr_index_write_blocks :: proc(adb: ^Addr_Index_DB, entries: []Addr_Block_Batch_Entry) -> Storage_Error {
+	if len(entries) == 0 {
+		return .None
+	}
+	batch := rocksdb_writebatch_create()
+	defer rocksdb_writebatch_destroy(batch)
+
+	hk: [74]byte
+	uk: [69]byte
+	uv: [12]byte
+	tk: [33]byte
+	tv: [8]byte
+
+	for e in entries {
+		for f in e.funding {
+			_h_key(hk[:], f.scripthash, f.height, f.txid, 0, f.vout)
+			rdb_batch_put(batch, hk[:], nil)
+			_u_key(uk[:], f.scripthash, f.txid, f.vout)
+			_put_u32_le(uv[0:4], f.height)
+			_put_i64_le(uv[4:12], f.value)
+			rdb_batch_put(batch, uk[:], uv[:])
+		}
+		for s in e.spending {
+			_h_key(hk[:], s.scripthash, s.height, s.spend_txid, 1, s.vin)
+			rdb_batch_put(batch, hk[:], nil)
+			_u_key(uk[:], s.scripthash, s.prev_txid, s.prev_vout)
+			rdb_batch_delete(batch, uk[:])
+		}
+		for t in e.tx_locs {
+			_t_key(tk[:], t.txid)
+			_put_u32_le(tv[0:4], t.height)
+			_put_u32_le(tv[4:8], t.position)
+			rdb_batch_put(batch, tk[:], tv[:])
+		}
+	}
+
+	last := entries[len(entries) - 1]
+	_put_best(batch, last.hash, last.height)
+	return rdb_batch_write(adb.db, adb.write_opts, batch)
 }
 
 // Reverse a disconnected block: delete the H/U/T rows it added, restore the U
@@ -289,8 +373,8 @@ addr_index_unwrite_block :: proc(
 	spending: []Addr_Spending,
 	tx_locs: []Addr_Tx_Loc,
 ) -> Storage_Error {
-	batch := ldb_batch_create()
-	defer ldb_batch_destroy(batch)
+	batch := rocksdb_writebatch_create()
+	defer rocksdb_writebatch_destroy(batch)
 
 	hk: [74]byte
 	uk: [69]byte
@@ -299,28 +383,28 @@ addr_index_unwrite_block :: proc(
 
 	for f in funding {
 		_h_key(hk[:], f.scripthash, f.height, f.txid, 0, f.vout)
-		ldb_batch_delete(batch, hk[:])
+		rdb_batch_delete(batch, hk[:])
 		_u_key(uk[:], f.scripthash, f.txid, f.vout)
-		ldb_batch_delete(batch, uk[:])
+		rdb_batch_delete(batch, uk[:])
 	}
 
 	for s in spending {
 		_h_key(hk[:], s.scripthash, s.height, s.spend_txid, 1, s.vin)
-		ldb_batch_delete(batch, hk[:])
+		rdb_batch_delete(batch, hk[:])
 		// Restore the spent output as unspent again.
 		_u_key(uk[:], s.scripthash, s.prev_txid, s.prev_vout)
 		_put_u32_le(uv[0:4], s.prev_height)
 		_put_i64_le(uv[4:12], s.prev_value)
-		ldb_batch_put(batch, uk[:], uv[:])
+		rdb_batch_put(batch, uk[:], uv[:])
 	}
 
 	for t in tx_locs {
 		_t_key(tk[:], t.txid)
-		ldb_batch_delete(batch, tk[:])
+		rdb_batch_delete(batch, tk[:])
 	}
 
 	_put_best(batch, parent_hash, parent_height)
-	return ldb_batch_write(adb.db, adb.write_opts, batch)
+	return rdb_batch_write(adb.db, adb.write_opts, batch)
 }
 
 // ---- queries ----
@@ -334,13 +418,13 @@ addr_index_get_history :: proc(adb: ^Addr_Index_DB, scripthash: Hash256, allocat
 	copy(prefix[1:33], sh[:])
 
 	out := make([dynamic]Addr_History_Entry, 0, 16, allocator)
-	iter := leveldb_create_iterator(adb.db, adb.read_opts)
-	defer leveldb_iter_destroy(iter)
+	iter := rocksdb_create_iterator(adb.db, adb.read_opts)
+	defer rocksdb_iter_destroy(iter)
 
-	leveldb_iter_seek(iter, &prefix[0], 33)
-	for leveldb_iter_valid(iter) != 0 {
+	rocksdb_iter_seek(iter, &prefix[0], 33)
+	for rocksdb_iter_valid(iter) != 0 {
 		klen: c.size_t
-		kptr := leveldb_iter_key(iter, &klen)
+		kptr := rocksdb_iter_key(iter, &klen)
 		if klen != 74 { break }
 		key := kptr[:74]
 		if key[0] != ADDR_H_PREFIX || !_hash_eq(key[1:33], prefix[1:33]) { break }
@@ -350,7 +434,7 @@ addr_index_get_history :: proc(adb: ^Addr_Index_DB, scripthash: Hash256, allocat
 		e.io = key[69]
 		e.idx = _get_u32_be(key[70:74])
 		append(&out, e)
-		leveldb_iter_next(iter)
+		rocksdb_iter_next(iter)
 	}
 	return out[:]
 }
@@ -363,19 +447,19 @@ addr_index_get_utxos :: proc(adb: ^Addr_Index_DB, scripthash: Hash256, allocator
 	copy(prefix[1:33], sh[:])
 
 	out := make([dynamic]Addr_Utxo_Entry, 0, 16, allocator)
-	iter := leveldb_create_iterator(adb.db, adb.read_opts)
-	defer leveldb_iter_destroy(iter)
+	iter := rocksdb_create_iterator(adb.db, adb.read_opts)
+	defer rocksdb_iter_destroy(iter)
 
-	leveldb_iter_seek(iter, &prefix[0], 33)
-	for leveldb_iter_valid(iter) != 0 {
+	rocksdb_iter_seek(iter, &prefix[0], 33)
+	for rocksdb_iter_valid(iter) != 0 {
 		klen: c.size_t
-		kptr := leveldb_iter_key(iter, &klen)
+		kptr := rocksdb_iter_key(iter, &klen)
 		if klen != 69 { break }
 		key := kptr[:69]
 		if key[0] != ADDR_U_PREFIX || !_hash_eq(key[1:33], prefix[1:33]) { break }
 		vlen: c.size_t
-		vptr := leveldb_iter_value(iter, &vlen)
-		if vptr == nil || vlen != 12 { leveldb_iter_next(iter); continue }
+		vptr := rocksdb_iter_value(iter, &vlen)
+		if vptr == nil || vlen != 12 { rocksdb_iter_next(iter); continue }
 		val := vptr[:12]
 		e: Addr_Utxo_Entry
 		copy(e.txid[:], key[33:65])
@@ -383,7 +467,7 @@ addr_index_get_utxos :: proc(adb: ^Addr_Index_DB, scripthash: Hash256, allocator
 		e.height = _get_u32_le(val[0:4])
 		e.value = _get_i64_le(val[4:12])
 		append(&out, e)
-		leveldb_iter_next(iter)
+		rocksdb_iter_next(iter)
 	}
 	return out[:]
 }
@@ -396,7 +480,7 @@ Addr_Tx_Location :: struct {
 addr_index_get_tx :: proc(adb: ^Addr_Index_DB, txid: Hash256) -> (loc: Addr_Tx_Location, found: bool) {
 	tk: [33]byte
 	_t_key(tk[:], txid)
-	val, ok := ldb_get(adb.db, adb.read_opts, tk[:], context.temp_allocator)
+	val, ok := rdb_get(adb.db, adb.read_opts, tk[:], context.temp_allocator)
 	if !ok || len(val) != 8 {
 		return {}, false
 	}
@@ -407,7 +491,7 @@ addr_index_get_tx :: proc(adb: ^Addr_Index_DB, txid: Hash256) -> (loc: Addr_Tx_L
 
 // Last indexed block, or found=false for a fresh index.
 addr_index_best :: proc(adb: ^Addr_Index_DB) -> (hash: Hash256, height: int, found: bool) {
-	val, ok := ldb_get(adb.db, adb.read_opts, transmute([]byte)string("best"), context.temp_allocator)
+	val, ok := rdb_get(adb.db, adb.read_opts, transmute([]byte)string("best"), context.temp_allocator)
 	if !ok || len(val) != 36 {
 		return {}, -1, false
 	}
