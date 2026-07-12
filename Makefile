@@ -1,15 +1,19 @@
 .PHONY: all deps build test clean
 
 UNAME_S := $(shell uname -s)
-# RocksDB (addrindex engine) link deps: -lzstd (compression) everywhere, plus
-# -lpthread -ldl on Linux. On macOS libzstd lives under the Homebrew prefix
-# (arm64: /opt/homebrew, Intel: /usr/local), which the linker doesn't search by
-# default — add -L<brew>/lib so -lzstd resolves.
+# RocksDB (addrindex engine) link deps. zstd (RocksDB's compression backend) is
+# linked STATICALLY so the release binaries are self-contained — a dynamic
+# -lzstd would make the prebuilt binaries fail to run wherever libzstd isn't
+# installed (notably macOS without Homebrew). The static libzstd.a ships with
+# libzstd-dev (Linux) and `brew install zstd` (macOS).
 ifeq ($(UNAME_S),Darwin)
-    BREW_PREFIX := $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
-    CXX_LINK := -lc++ -L$(BREW_PREFIX)/lib -lzstd
+    # Homebrew zstd (arm64: /opt/homebrew, Intel: /usr/local) — link the archive
+    # by full path so it's pulled in statically.
+    ZSTD_PREFIX := $(shell brew --prefix zstd 2>/dev/null || brew --prefix 2>/dev/null || echo /opt/homebrew)
+    CXX_LINK := -lc++ $(ZSTD_PREFIX)/lib/libzstd.a
 else
-    CXX_LINK := -lstdc++ -lzstd -lpthread -ldl
+    # -l:libzstd.a forces the static archive (in the default lib search path).
+    CXX_LINK := -lstdc++ -l:libzstd.a -lpthread -ldl
 endif
 
 all: deps build
