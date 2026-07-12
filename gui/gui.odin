@@ -494,7 +494,13 @@ _dashboard_loop :: proc(info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: 
 				// compaction (node busy, will resume). If uptime keeps ticking but
 				// the tip is flat, it's the download side (waiting for blocks).
 				secs := int(rl.GetTime() - g_last_height_t)
-				uptime_frozen := g_last_uptime_t > 0 && rl.GetTime() - g_last_uptime_t > 3
+				// Only call it "compacting" on a SUSTAINED status-thread freeze (>10s).
+				// During fast IBD a single dense connect_block batch freezes the 1 Hz
+				// status tick for a few seconds — a normal burst, not a stall — which
+				// at a 3s threshold flickered the alarming banner. RocksDB reports 0%
+				// write-stall, so a genuine multi-second live-sync freeze is rare; the
+				// long freezes worth flagging (reindex-boot catch-up) far exceed 10s.
+				uptime_frozen := g_last_uptime_t > 0 && rl.GetTime() - g_last_uptime_t > 10
 				if uptime_frozen {
 					rl.DrawRectangle(0, 0, WIN_W, 26, rl.Color{0x8a, 0x6d, 0x1a, 0xff})
 					_text(fmt.ctprintf("INDEX COMPACTING - node busy, tip catching up (%ds) - normal, resumes when done", secs),

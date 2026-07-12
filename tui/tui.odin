@@ -210,7 +210,11 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 		now_s := time.duration_seconds(time.since(time.Time{}))
 		stall := now_s - g_last_h_t
 		if stall > 3 {
-			uptime_frozen := g_last_up_t > 0 && now_s - g_last_up_t > 3
+			// >10s SUSTAINED freeze only — a fast-IBD connect burst freezes the
+			// status tick for a few seconds (normal), which flickered the banner at
+			// 3s. RocksDB is 0%-stall, so real live freezes are rare; the ones worth
+			// flagging (reindex-boot catch-up) far exceed 10s. See gui.odin.
+			uptime_frozen := g_last_up_t > 0 && now_s - g_last_up_t > 10
 			if uptime_frozen {
 				_put(nc.stdscr, 0, 26, fmt.tprintf("[ INDEX COMPACTING - node busy, catching up %ds (resumes when done) ]", int(stall)), P_YELLOW, nc.A_BOLD)
 			} else {
