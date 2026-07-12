@@ -6,7 +6,8 @@
 
 A Bitcoin full node written from scratch in [Odin](https://odin-lang.org/) —
 consensus validation, P2P networking, mempool, storage, RPC, and dashboards,
-with only C dependencies Bitcoin Core itself uses (libsecp256k1, LevelDB).
+with only C dependencies Bitcoin Core itself uses (libsecp256k1, LevelDB),
+plus RocksDB for the optional in-node address index.
 
 **Fully synced and verified on mainnet** — tip hash and UTXO totals
 cross-checked against the public network — plus signet, testnet4, and
@@ -54,8 +55,9 @@ cd forseti && make
 ./forseti --network=mainnet --datadir=~/forseti --dbcache=4096 --prune=2000 --gui
 ```
 
-Requires the Odin compiler, LLVM 15+, and `make` — full details in
-[docs/build.md](docs/build.md).
+Requires the Odin compiler, LLVM 15+, `make`, plus `cmake` and zstd
+(`libzstd-dev` / `brew install zstd`) for the address-index engine — full
+details in [docs/build.md](docs/build.md).
 
 ### First-run setup wizard
 
