@@ -15,3 +15,6 @@ deps/ripemd160/*.o
 *.a
 *.dSYM/
 *.bin
+
+# RocksDB source (cloned + built by deps/build.sh into deps/lib/librocksdb.a)
+deps/rocksdb/

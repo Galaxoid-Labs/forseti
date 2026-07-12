@@ -184,5 +184,47 @@ make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 cp .libs/libsecp256k1.a "$LIB_DIR/libsecp256k1.a"
 echo "Built libsecp256k1.a"
 
+# RocksDB — engine for the optional --index-addresses scripthash index only
+# (chainstate/block-index/txindex stay on LevelDB). Static, PORTABLE, Zstd as the
+# sole compression backend (link stage uses system -lzstd; Debian/Ubuntu:
+# libzstd-dev, macOS: brew install zstd). Slow to compile (~minutes), so skip when
+# librocksdb.a is already present — `rm deps/lib/librocksdb.a` to force a rebuild.
+echo "=== Building RocksDB (addrindex engine, static, Zstd-only) ==="
+ROCKSDB_DIR="$SCRIPT_DIR/rocksdb"
+ROCKSDB_TAG="v9.9.3"
+if [ -f "$LIB_DIR/librocksdb.a" ]; then
+    echo "librocksdb.a already present — skipping (rm to force rebuild)"
+else
+    if [ ! -d "$ROCKSDB_DIR" ]; then
+        echo "Cloning RocksDB $ROCKSDB_TAG..."
+        git clone --depth 1 --branch "$ROCKSDB_TAG" \
+            https://github.com/facebook/rocksdb.git "$ROCKSDB_DIR"
+    fi
+    # Build with the SAME toolchain as the other deps (Homebrew LLVM on macOS),
+    # PORTABLE (no -march=native, so the binary runs on any x86_64/arm64 of that
+    # OS). On macOS also pin the deployment target and point CMake at Homebrew so
+    # it finds libzstd (arm64: /opt/homebrew, Intel: /usr/local).
+    ROCKSDB_CMAKE_ARGS=(
+        -DCMAKE_BUILD_TYPE=Release
+        -DPORTABLE=1
+        -DROCKSDB_BUILD_SHARED=OFF
+        -DWITH_ZSTD=ON -DWITH_LZ4=OFF -DWITH_SNAPPY=OFF -DWITH_GFLAGS=OFF
+        -DWITH_TESTS=OFF -DWITH_TOOLS=OFF -DWITH_CORE_TOOLS=OFF
+        -DWITH_BENCHMARK=OFF -DWITH_BENCHMARK_TOOLS=OFF
+        -DFAIL_ON_WARNINGS=OFF
+        -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX"
+    )
+    if [ "$(uname -s)" = "Darwin" ]; then
+        ROCKSDB_CMAKE_ARGS+=( -DCMAKE_OSX_DEPLOYMENT_TARGET="${MACOS_MIN:-16.0}" )
+        BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
+        ROCKSDB_CMAKE_ARGS+=( -DCMAKE_PREFIX_PATH="$BREW_PREFIX" )
+    fi
+    cmake -S "$ROCKSDB_DIR" -B "$ROCKSDB_DIR/build" "${ROCKSDB_CMAKE_ARGS[@]}"
+    cmake --build "$ROCKSDB_DIR/build" --target rocksdb \
+        -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+    cp "$ROCKSDB_DIR/build/librocksdb.a" "$LIB_DIR/librocksdb.a"
+    echo "Built librocksdb.a"
+fi
+
 echo "=== All dependencies built ==="
 ls -la "$LIB_DIR"

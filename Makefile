@@ -1,10 +1,15 @@
 .PHONY: all deps build test clean
 
 UNAME_S := $(shell uname -s)
+# RocksDB (addrindex engine) link deps: -lzstd (compression) everywhere, plus
+# -lpthread -ldl on Linux. On macOS libzstd lives under the Homebrew prefix
+# (arm64: /opt/homebrew, Intel: /usr/local), which the linker doesn't search by
+# default — add -L<brew>/lib so -lzstd resolves.
 ifeq ($(UNAME_S),Darwin)
-    CXX_LINK := -lc++
+    BREW_PREFIX := $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
+    CXX_LINK := -lc++ -L$(BREW_PREFIX)/lib -lzstd
 else
-    CXX_LINK := -lstdc++
+    CXX_LINK := -lstdc++ -lzstd -lpthread -ldl
 endif
 
 all: deps build
