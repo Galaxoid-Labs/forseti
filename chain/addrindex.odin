@@ -23,10 +23,11 @@ _addr_index_build_rows :: proc(
 	txids: []Hash256,
 	height: int,
 	spent: []Undo_Coin,
+	out_alloc := context.temp_allocator,
 ) -> (funding: []storage.Addr_Funding, spending: []storage.Addr_Spending, tx_locs: []storage.Addr_Tx_Loc) {
-	f := make([dynamic]storage.Addr_Funding, 0, 64, context.temp_allocator)
-	s := make([dynamic]storage.Addr_Spending, 0, 64, context.temp_allocator)
-	t := make([dynamic]storage.Addr_Tx_Loc, 0, len(block.txs), context.temp_allocator)
+	f := make([dynamic]storage.Addr_Funding, 0, 64, out_alloc)
+	s := make([dynamic]storage.Addr_Spending, 0, 64, out_alloc)
+	t := make([dynamic]storage.Addr_Tx_Loc, 0, len(block.txs), out_alloc)
 	h := u32(height)
 
 	cursor := 0
@@ -180,9 +181,27 @@ addr_index_catchup :: proc(cs: ^Chain_State) -> bool {
 	}
 
 	log.infof("addrindex: indexing blocks %d..%d", start, tip_height)
+
+	// Parallel build (compute across the worker pool, apply serially in order)
+	// when the pool is available — the reindex is otherwise single-thread
+	// CPU-bound. Serial fallback below when running with --par<2.
+	if len(cs.arena_pool_arenas) >= 2 {
+		ok := _addr_index_catchup_parallel(cs, start, tip_height)
+		if ok {
+			log.infof("addrindex: synced to height %d", tip_height)
+		}
+		return ok
+	}
+
 	for h in start ..= tip_height {
 		entry, found := cs.block_index.entries[cs.active_chain[h]]
 		if !found || .Has_Data not_in entry.status {
+			// Genesis has no blk*.dat record (peers never serve it via getdata)
+			// and its coinbase is unspendable / not in the UTXO set, so it has
+			// nothing to index — skip it. Any other missing block is a real error.
+			if h == 0 {
+				continue
+			}
 			log.errorf("addrindex: block %d unavailable (pruned?) — cannot build index", h)
 			return false
 		}

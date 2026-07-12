@@ -1965,3 +1965,103 @@ test_addr_index_catchup :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "best marker present after catch-up")
 	testing.expect_value(t, best_h, 5)
 }
+
+// Parallel catchup parity: reindex a >256-block chain (multiple parallel batches)
+// with a spend spanning a batch boundary, and confirm the index is correct — the
+// spent UTXO must be GONE (an out-of-order or racy apply would leave a phantom).
+// script_threads=4 forces the parallel path (arenas present).
+@(test)
+test_addr_index_parallel_catchup :: proc(t: ^testing.T) {
+	dir := make_test_dir("addrindex_par")
+	defer remove_test_dir(dir)
+
+	params := consensus.REGTEST_PARAMS
+	params.assumevalid_height = 400 // skip scripts (dummy sigs)
+
+	cs: Chain_State
+	err := chain_state_init(&cs, dir, &params, 450, 4) // script_threads=4 -> parallel catchup
+	testing.expect_value(t, err, Chain_Error.None)
+	defer chain_state_destroy(&cs)
+
+	// Mine heights 0..259 (coinbase-only), NO addrindex yet — so catchup rebuilds
+	// from disk. Block 0's coinbase matures (COINBASE_MATURITY=100).
+	prev := HASH_ZERO
+	block0 := make_chain_block(0, prev, &params)
+	testing.expect_value(t, accept_block(&cs, &block0), Chain_Error.None)
+	cb0_txid := wire.tx_id(&block0.txs[0])
+	coinbase_sh := crypto.sha256_hash(block0.txs[0].outputs[0].script_pubkey)
+	prev = wire.block_header_hash(&block0.header)
+	for i in 1 ..< 260 {
+		b := make_chain_block(i, prev, &params)
+		testing.expect_value(t, accept_block(&cs, &b), Chain_Error.None)
+		prev = wire.block_header_hash(&b.header)
+	}
+
+	// Block 260 (in the SECOND parallel batch, boundary at 256): spend block-0's
+	// coinbase (funded in batch 0) to a distinctive destination.
+	dest_spk := _addr_test_spk(0xC7)
+	dest_sh := crypto.sha256_hash(dest_spk)
+	dest_value := consensus.get_block_subsidy(0, &params)
+	cb260 := consensus.make_coinbase(260, value = consensus.get_block_subsidy(260, &params))
+	spend_inputs := make([]wire.Tx_In, 1, context.temp_allocator)
+	spend_inputs[0] = wire.Tx_In{previous_output = wire.Outpoint{hash = cb0_txid, index = 0}, script_sig = make([]byte, 0, context.temp_allocator), sequence = 0xffffffff}
+	spend_outputs := make([]wire.Tx_Out, 1, context.temp_allocator)
+	spend_outputs[0] = wire.Tx_Out{value = dest_value, script_pubkey = dest_spk}
+	spend_tx := wire.Tx{version = 1, inputs = spend_inputs, outputs = spend_outputs, locktime = 0}
+	spend_txid := wire.tx_id(&spend_tx)
+	txs := make([]wire.Tx, 2, context.temp_allocator)
+	txs[0] = cb260; txs[1] = spend_tx
+	tx_ids := make([]crypto.Hash256, 2, context.temp_allocator)
+	tx_ids[0] = wire.tx_id(&cb260); tx_ids[1] = spend_txid
+	block260 := wire.Block{
+		header = wire.Block_Header{version = 0x20000000, prev_hash = prev, merkle_root = crypto.merkle_root(tx_ids), timestamp = u32(1231006505 + 260), bits = params.pow_limit_bits},
+		txs = txs,
+	}
+	consensus.mine_block(&block260, &params)
+	testing.expect_value(t, accept_block(&cs, &block260), Chain_Error.None)
+
+	// Enable the index and run catch-up — uses the PARALLEL path (4 arenas).
+	adb := new(storage.Addr_Index_DB)
+	adb_result, adb_err := storage.addr_index_db_open(dir)
+	testing.expect_value(t, adb_err, storage.Storage_Error.None)
+	adb^ = adb_result
+	cs.addr_index = adb
+	testing.expect(t, len(cs.arena_pool_arenas) >= 2, "parallel path must be active")
+	testing.expect(t, addr_index_catchup(&cs), "parallel catch-up succeeds")
+
+	// Spent block-0 coinbase must be GONE (cross-batch fund→spend applied in order).
+	{
+		utxos := storage.addr_index_get_utxos(adb, coinbase_sh, context.temp_allocator)
+		for u in utxos {
+			testing.expect(t, u.txid != cb0_txid, "spent coinbase must not be a phantom UTXO")
+		}
+		// 261 coinbases (0..260), cb0 spent -> 260 remain.
+		testing.expect_value(t, len(utxos), 260)
+		// A spending history row at height 260 must exist.
+		hist := storage.addr_index_get_history(adb, coinbase_sh, context.temp_allocator)
+		spend_rows := 0
+		for h in hist {
+			if h.io == 1 { spend_rows += 1; testing.expect_value(t, h.height, u32(260)) }
+		}
+		testing.expect_value(t, spend_rows, 1)
+	}
+	// Destination got exactly the 10 BTC.
+	{
+		utxos := storage.addr_index_get_utxos(adb, dest_sh, context.temp_allocator)
+		testing.expect_value(t, len(utxos), 1)
+		if len(utxos) == 1 {
+			testing.expect_value(t, utxos[0].txid, spend_txid)
+			testing.expect_value(t, utxos[0].value, dest_value)
+			testing.expect_value(t, utxos[0].height, u32(260))
+		}
+	}
+	// T index + best marker.
+	{
+		loc, found := storage.addr_index_get_tx(adb, spend_txid)
+		testing.expect(t, found, "spend tx locatable")
+		testing.expect_value(t, loc.height, u32(260))
+		_, best_h, ok := storage.addr_index_best(adb)
+		testing.expect(t, ok, "best present")
+		testing.expect_value(t, best_h, 260)
+	}
+}
