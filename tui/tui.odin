@@ -209,7 +209,9 @@ _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {
 	} else if st.sync_state == .Downloading_Blocks && g_last_h_t > 0 {
 		now_s := time.duration_seconds(time.since(time.Time{}))
 		stall := now_s - g_last_h_t
-		if stall > 3 {
+		// >10s flat only — fast IBD advances the tip in bursts, so a 3s threshold
+		// flickered on normal between-burst gaps. 10s = BLOCK_STALL_TIMEOUT_DEFAULT.
+		if stall > 10 {
 			// >10s SUSTAINED freeze only — a fast-IBD connect burst freezes the
 			// status tick for a few seconds (normal), which flickered the banner at
 			// 3s. RocksDB is 0%-stall, so real live freezes are rare; the ones worth

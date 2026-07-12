@@ -488,7 +488,12 @@ _dashboard_loop :: proc(info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: 
 					_text(fmt.ctprintf("FLUSHING UTXO CACHE - committing %s entries to LevelDB (can take minutes)",
 						_commas(st.flush_total)), 16, 6, 14, rl.WHITE)
 				}
-			} else if st.sync_state == .Downloading_Blocks && g_last_height_t > 0 && rl.GetTime() - g_last_height_t > 3 {
+			} else if st.sync_state == .Downloading_Blocks && g_last_height_t > 0 && rl.GetTime() - g_last_height_t > 10 {
+				// >10s flat only — during fast IBD the tip advances in bursts (a batch
+				// connects, then a few-second gap while the next contiguous block
+				// downloads), so a 3s threshold flickered constantly. 10s matches the
+				// node's own BLOCK_STALL_TIMEOUT_DEFAULT: below it is healthy bursty
+				// flow, at/above it is a genuine stall (peer wait or a real compaction).
 				// Tip flat for >3 s while downloading. If the node's uptime also
 				// froze, its status thread is blocked in connect_block on a big
 				// compaction (node busy, will resume). If uptime keeps ticking but
