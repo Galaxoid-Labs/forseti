@@ -178,6 +178,8 @@ ps aux | grep forseti | grep -v grep | awk '{print "CPU: "$3"% MEM: "$4"% RSS: "
 | `--v2transport=<0\|1>` | BIP 324 v2 encrypted P2P transport (automatic v1 fallback) | `1` |
 | `--blockfilterindex=<0\|1>` | Build and serve BIP 157 compact block filters | `0` |
 | `--txindex=<0\|1>` | Full transaction index (historical `getrawtransaction`); incompatible with `--prune`; catch-up runs at startup when enabled on an existing datadir | `0` |
+| `--index-addresses=<0\|1>` | Scripthash (address) index for the built-in wallet backend, built during sync; incompatible with `--prune`. Catch-up runs at startup if enabled on an existing datadir | `0` |
+| `--esplora=<1\|addr:port>` | Serve the built-in [Esplora REST API](integrations.md#built-in-esplora-rest-api-recommended-no-sidecar) for BDK/wallet clients. `1` = `127.0.0.1:3000`, or an `addr:port`. Requires `--index-addresses` | off |
 | `--peerbloomfilters=<0\|1>` | Enable BIP 37 bloom filters + BIP 35 mempool message | `0` |
 | `--zmqpub<topic>=<tcp://ip:port>` | ZMQ notifications: `hashblock`, `hashtx`, `rawblock`, `rawtx`, `sequence` | off |
 | `--repairutxo` | Maintenance: sweep stale UTXO entries from local block data, report, exit | — |
@@ -250,4 +252,6 @@ Values in a network-specific section (e.g. `[regtest]`) take priority over globa
 | testnet4 | 48332 | 48333 |
 | signet | 38332 | 38333 |
 | regtest | 18443 | 18444 |
+
+The built-in **Esplora REST API** (`--esplora`) defaults to `127.0.0.1:3000` on every network — override with `--esplora=<addr:port>`.
 

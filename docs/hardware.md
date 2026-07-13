@@ -45,6 +45,9 @@ sysctl -a | grep hw.optional.armv8_2_sha
 | Machine | Backend | Config | Full mainnet IBD (genesis → tip) |
 |---------|---------|--------|----------------------------------|
 | NVIDIA DGX Spark (GB10 Grace-Blackwell, 20-core Arm64, 128 GB) | ARMv8 crypto (`arm_shani`) | `--dbcache=16384`, assumevalid on | **~5.5 hours** |
+| same machine | ARMv8 crypto (`arm_shani`) | `--dbcache=16384`, assumevalid on, `--index-addresses --esplora` | **~12–13 hours** |
 
 On a CPU this fast (hardware SHA-256 + wide parallel script verification), IBD stops being CPU-bound and becomes **I/O-bound**: the per-block profiler shows UTXO reads (prefetch + apply) dominating (~60%) while script verification drops to a minority (~40%), so a fast NVMe and a large `--dbcache` matter most. A full-validation pass (`--assumevalid=0`, every script re-verified from genesis) on the same box takes meaningfully longer.
+
+Building the [address index](integrations.md#built-in-esplora-rest-api-recommended-no-sidecar) (`--index-addresses`, for the built-in Esplora wallet backend) during the same sync roughly doubles wall-clock (~5.5 h → ~12–13 h here): the random scripthash keys make it compaction-bound on RocksDB rather than CPU- or network-bound. It's a single pass, though — the node finishes IBD with the wallet backend already built, so there's no separate multi-hour indexer run afterward.
 

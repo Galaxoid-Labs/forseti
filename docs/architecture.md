@@ -11,11 +11,11 @@ forseti/
 ├── wire/                  # Protocol types, CompactSize, tx/block serialization, message framing, compact blocks (BIP152), addrv2 (BIP155), filter messages (BIP157)
 ├── script/                # Script interpreter, opcodes, standard types, Taproot (BIP341/342)
 ├── consensus/             # Chain params, PoW, difficulty, block/tx validation, BIP325 signet
-├── storage/               # LevelDB bindings + wrapper, flat files, block DB, index DB, UTXO DB, filter DB
-├── chain/                 # UTXO cache, block index (skip list), undo data, chain state, block filter building
+├── storage/               # LevelDB bindings + wrapper, flat files, block DB, index DB, UTXO DB, filter DB, address index (RocksDB)
+├── chain/                 # UTXO cache, block index (skip list), undo data, chain state, block filter building, address index hooks
 ├── p2p/                   # Peer connections, sync manager, connection manager, address manager, BIP324 v2 transport, inbound listener
 ├── mempool/               # Fee rates, relay policy, validation pipeline, RBF, persistence, configurable limits
-├── rpc/                   # JSON-RPC server (91 methods, threaded + keep-alive + batch)
+├── rpc/                   # JSON-RPC server (91 methods, threaded + keep-alive + batch) + built-in Esplora REST API
 ├── descriptor/            # Output descriptors: checksum, BIP32 CKDpub, parser, script/address generation
 ├── drivechain/            # BIP300/301: M1-M6 + BMM codecs, D1/D2 state machine, enforce-mode validation
 ├── zmq/                   # Native ZMTP 3.0 PUB sockets (Core zmqpub* parity, no libzmq)
@@ -26,6 +26,7 @@ forseti/
 └── deps/                  # C/C++ dependencies
     ├── libsecp256k1/      # Git submodule (bitcoin-core/secp256k1 v0.7.1)
     ├── leveldb/           # Git submodule (google/leveldb 1.23)
+    ├── rocksdb/           # RocksDB (address-index engine; multi-threaded compaction, Zstd)
     ├── ripemd160/         # Vendored C implementation
     └── lib/               # Built static libraries (generated)
 ```

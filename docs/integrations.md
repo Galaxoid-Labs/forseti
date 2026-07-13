@@ -1,5 +1,36 @@
 # Wallet & Indexer Integrations
 
+## Built-in Esplora REST API (recommended, no sidecar)
+
+forseti serves the **[Esplora HTTP REST API](https://github.com/Blockstream/esplora/blob/master/API.md) natively** — the same API Blockstream's Esplora exposes — with **no electrs/Esplora sidecar and no second copy of the chain**. The scripthash (address) index is built **during initial sync**: when the node reaches the tip, the wallet backend is already there. There is no separate multi-hour indexer pass afterward — it's one pass.
+
+Point [BDK's `esplora` backend](https://docs.rs/bdk_esplora), `esplora-client`, or any Esplora-speaking wallet straight at the node.
+
+**Enable it** (or pick the toggles in `--wizard` → Advanced):
+
+```bash
+./forseti --network=mainnet --datadir=~/forseti \
+  --index-addresses --esplora        # index during sync; REST on 127.0.0.1:3000
+```
+
+- `--index-addresses` builds the scripthash index (a dedicated RocksDB store at `<datadir>/addrindex/`).
+- `--esplora` serves the REST API — `1` = `127.0.0.1:3000`, or pass `addr:port`. It implies/requires `--index-addresses`.
+- **Incompatible with `--prune`** (the index reads historical txs from full blocks). Loopback-only by default — no auth, so tunnel (`ssh -L 3000:localhost:3000`) or firewall before exposing it.
+- Enabling `--index-addresses` on an already-synced datadir runs a one-time catch-up build at startup.
+
+**Endpoints — full Esplora parity.** Blocks (`/blocks`, `/blocks/tip/{height,hash}`, `/block-height/:h`, `/block/:hash[/status|/header|/raw|/txids|/txs[/:start]|/txid/:i]`), transactions (`/tx/:txid[/hex|/raw|/status|/merkle-proof|/merkleblock-proof|/outspends|/outspend/:v]`, `POST /tx`), addresses & scripthashes (`/address/:a` and `/scripthash/:h` + their `/txs[/chain/:last|/mempool]` and `/utxo`, plus `chain_stats`/`mempool_stats` summaries), mempool (`/mempool`, `/mempool/{txids,recent}`), and `/fee-estimates`.
+
+```bash
+curl http://127.0.0.1:3000/blocks/tip/height
+curl http://127.0.0.1:3000/address/<addr>/utxo
+curl http://127.0.0.1:3000/tx/<txid>/outspends
+# BDK: EsploraClient::new("http://127.0.0.1:3000")  →  wallet.full_scan(...)
+```
+
+> **Status: verified.** A real `bdk_wallet` + `bdk_esplora` descriptor wallet does a full end-to-end `full_scan → build → sign → broadcast → confirm` against forseti on regtest (harness in `test/bdk-esplora/`). Every endpoint's output is cross-checked field-for-field against `blockstream.info/api` on mainnet — including exact-hex tx/block serialization, merkle proofs, `outspend` spender identification, and complete address histories (full pagination walk, zero missing/extra txs). Response JSON is byte-identical to Blockstream's Esplora.
+
+**When you'd still want an external indexer instead:** the built-in API does **not** (yet) speak the **Electrum protocol** (Sparrow / Electrum desktop / `bdk_electrum`) or ship the **Esplora web-explorer frontend**. For those, run electrs or Blockstream/Esplora as a sidecar — covered below.
+
 ## Electrum Wallets (BDK / Electrum / Sparrow)
 
 forseti speaks enough Bitcoin Core RPC + P2P that [electrs](https://github.com/romanz/electrs)
@@ -69,6 +100,11 @@ you must open it, use SSL (port 50002) or restrict the firewall rule to specific
 client IPs (`sudo ufw allow from <client-ip> to any port 50001`).
 
 ## Esplora (REST explorer backend)
+
+> For the **REST API alone** (BDK / wallet clients), you don't need this — use
+> forseti's [built-in Esplora API](#built-in-esplora-rest-api-recommended-no-sidecar)
+> above. Run Blockstream's Esplora as a sidecar only when you want its
+> **web block-explorer frontend** or the Electrum protocol alongside.
 
 [Esplora](https://github.com/Blockstream/electrs) is Blockstream's fork of
 electrs. It adds the **Esplora HTTP REST API** (`/address/:addr`, `/tx/:txid`,

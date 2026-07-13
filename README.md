@@ -24,6 +24,11 @@ testnet3. 378 tests across 13 packages.
 - **Bitcoin Core-compatible surface** — 87 of Core v30's 94 non-wallet RPCs
   (incl. the BIP174 PSBT family), cookie auth, `bitcoin.conf`-style config,
   Core CLI flag names, [electrs](https://github.com/romanz/electrs) runs against it unmodified
+- **Built-in wallet backend** — an [Esplora-compatible REST API](docs/integrations.md#built-in-esplora-rest-api-recommended-no-sidecar)
+  (`--esplora`) served by the node itself, backed by a scripthash address index
+  built *during* sync (`--index-addresses`) — no electrs/Esplora sidecar, no
+  second copy of the chain. Point [BDK](https://docs.rs/bdk_esplora)/`esplora-client`
+  wallets straight at it; response JSON is verified byte-identical to Blockstream's Esplora
 - **ZMQ notifications** — Core's `zmqpub*` interface via a native ZMTP 3.0
   implementation (no libzmq), LND-ready
 - **Crash-safe by construction** — chunked atomic flushes, undo-based
@@ -109,8 +114,9 @@ Full mainnet initial block download (genesis → chain tip), measured:
 | Machine | Config | Time |
 |---------|--------|------|
 | NVIDIA DGX Spark (GB10 Grace-Blackwell, 20-core Arm64, 128 GB) | `--dbcache=16384`, assumevalid on | **~5.5 hours** |
+| same machine | `--dbcache=16384`, assumevalid on, `--index-addresses --esplora` | **~12–13 hours** |
 
-On a fast CPU with hardware SHA-256, IBD is **I/O-bound** — UTXO reads dominate over script verification — so a fast NVMe and a large `--dbcache` help most. See [docs/hardware.md](docs/hardware.md) for backend details and recommendations.
+On a fast CPU with hardware SHA-256, IBD is **I/O-bound** — UTXO reads dominate over script verification — so a fast NVMe and a large `--dbcache` help most. Building the address index (`--index-addresses`) during the same pass roughly doubles wall-clock — the random scripthash writes are compaction-heavy — but it's **one pass**: the node finishes sync with the Esplora wallet backend already built, no separate multi-hour indexer run. See [docs/hardware.md](docs/hardware.md) for backend details and recommendations.
 
 ## Documentation
 
@@ -119,7 +125,7 @@ On a fast CPU with hardware SHA-256, IBD is **I/O-bound** — UTXO reads dominat
 | [docs/build.md](docs/build.md) | Dependencies, compiling, running the tests |
 | [docs/usage.md](docs/usage.md) | Syncing each network, monitoring, every CLI flag, config file, ports |
 | [docs/rpc.md](docs/rpc.md) | RPC usage and the full Bitcoin Core coverage matrix |
-| [docs/integrations.md](docs/integrations.md) | electrs (BDK/Sparrow), Esplora, mempool.space, ZMQ, + a regtest test playbook |
+| [docs/integrations.md](docs/integrations.md) | **Built-in Esplora REST API** (BDK, no sidecar), plus external electrs (BDK/Sparrow), Esplora, mempool.space, ZMQ, + a regtest test playbook |
 | [docs/dashboards.md](docs/dashboards.md) | GUI window, terminal TUI, remote client |
 | [docs/architecture.md](docs/architecture.md) | Project layout, storage design, threading, sync internals |
 | [docs/bips.md](docs/bips.md) | All 50 implemented BIPs |

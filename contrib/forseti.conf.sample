@@ -66,6 +66,18 @@
 # BIP157/158 compact block filter index (serve light clients).
 # blockfilterindex = 0
 
+# ── Wallet backend: address index + built-in Esplora REST API ───────────
+# Scripthash (address) index, built DURING sync — point BDK / esplora-client
+# wallets straight at the node, no electrs/Esplora sidecar. Incompatible with
+# prune (the index reads txs from full blocks).
+# index-addresses = 1
+
+# Serve the Esplora HTTP REST API. "1" = 127.0.0.1:3000, or set addr:port.
+# Requires index-addresses (auto-implied by the wizard). Loopback by default —
+# tunnel or firewall before exposing it.
+# esplora = 1
+# esplora = 127.0.0.1:3000
+
 # ── Mempool policy (Bitcoin Core defaults shown) ────────────────────────
 
 # maxmempool = 300            # MiB
