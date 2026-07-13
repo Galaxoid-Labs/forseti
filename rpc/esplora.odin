@@ -301,6 +301,26 @@ _esplora_route :: proc(srv: ^Esplora_Server, method: string, path: string, body:
 		return _esplora_tx_route(srv, segs[:])
 	case len(segs) >= 2 && segs[0] == "scripthash":
 		return _esplora_scripthash_route(srv, segs[:])
+	case len(segs) >= 2 && segs[0] == "address":
+		return _esplora_address_route(srv, segs[:])
+	case len(segs) == 3 && segs[0] == "block" && segs[2] == "status":
+		return _esplora_block_status(srv, segs[1])
+	case len(segs) == 3 && segs[0] == "block" && segs[2] == "txids":
+		return _esplora_block_txids(srv, segs[1])
+	case len(segs) == 3 && segs[0] == "block" && segs[2] == "raw":
+		return _esplora_block_raw(srv, segs[1])
+	case len(segs) >= 3 && segs[0] == "block" && segs[2] == "txs":
+		return _esplora_block_txs(srv, segs[:])
+	case len(segs) == 4 && segs[0] == "block" && segs[2] == "txid":
+		return _esplora_block_txid(srv, segs[1], segs[3])
+	case len(segs) == 2 && segs[0] == "block":
+		return _esplora_block_info(srv, segs[1])
+	case len(segs) == 1 && segs[0] == "mempool":
+		return _esplora_mempool_info(srv)
+	case len(segs) == 2 && segs[0] == "mempool" && segs[1] == "txids":
+		return _esplora_mempool_txids(srv)
+	case len(segs) == 2 && segs[0] == "mempool" && segs[1] == "recent":
+		return _esplora_mempool_recent(srv)
 	}
 	return _not_found()
 }
@@ -355,45 +375,7 @@ _esplora_block_summary :: proc(srv: ^Esplora_Server, height: int) -> (json.Value
 	bh := srv.chain.active_chain[height]
 	entry, found := srv.chain.block_index.entries[bh]
 	if !found { return nil, false }
-
-	merkle: Hash256
-	tx_count := int(entry.num_tx)
-	size := 0
-	weight := 0
-	if .Has_Data in entry.status {
-		loc := storage.Block_Location{file_num = entry.file_num, data_offset = entry.data_offset, data_size = entry.data_size}
-		if block, berr := storage.block_db_read(&srv.chain.block_db, loc, context.temp_allocator); berr == .None {
-			merkle = block.header.merkle_root
-			tx_count = len(block.txs)
-			size = int(entry.data_size)
-			w := 0
-			for i in 0 ..< len(block.txs) {
-				w += consensus.get_tx_weight(&block.txs[i])
-			}
-			weight = w
-		}
-	} else if height == 0 {
-		merkle = srv.chain.params.genesis_header.merkle_root
-		tx_count = 1
-	}
-
-	o := make(json.Object, 13, context.temp_allocator)
-	o["id"] = _es(_hash_to_hex(bh))
-	o["height"] = _ei(i64(height))
-	o["version"] = _ei(i64(entry.version))
-	o["timestamp"] = _ei(i64(entry.timestamp))
-	o["tx_count"] = _ei(i64(tx_count))
-	o["size"] = _ei(i64(size))
-	o["weight"] = _ei(i64(weight))
-	o["merkle_root"] = _es(_hash_to_hex(merkle))
-	if height > 0 {
-		o["previousblockhash"] = _es(_hash_to_hex(entry.prev_hash))
-	}
-	o["mediantime"] = _ei(i64(chain.get_median_time_past(entry)))
-	o["nonce"] = _ei(i64(entry.nonce))
-	o["bits"] = _ei(i64(entry.bits))
-	o["difficulty"] = _ef(1.0)
-	return json.Value(o), true
+	return _esplora_make_block_object(srv, bh, entry), true
 }
 
 _esplora_block_height :: proc(srv: ^Esplora_Server, height_str: string) -> (int, string, []byte) {
@@ -453,6 +435,15 @@ _esplora_tx_route :: proc(srv: ^Esplora_Server, segs: []string) -> (int, string,
 		return 200, "application/octet-stream", wire.writer_bytes(&w)
 	case "status":
 		return _json_ok(string(_json_bytes(_esplora_status_json(srv, meta))))
+	case "outspends":
+		return _esplora_tx_outspends(srv, &tx, txid)
+	case "outspend":
+		if len(segs) == 4 { return _esplora_tx_outspend(srv, &tx, txid, segs[3]) }
+		return _not_found()
+	case "merkle-proof":
+		return _esplora_tx_merkle_proof(srv, txid, meta)
+	case "merkleblock-proof":
+		return _esplora_tx_merkleblock_proof(srv, txid, meta)
 	}
 	return _not_found()
 }
@@ -519,8 +510,10 @@ _esplora_tx_json :: proc(srv: ^Esplora_Server, tx: ^wire.Tx, txid: Hash256, meta
 		inp["is_coinbase"] = _eb(is_cb)
 		inp["sequence"] = _ei(i64(tx.inputs[i].sequence))
 		inp["scriptsig"] = _es(_bytes_to_hex(tx.inputs[i].script_sig))
-		inp["scriptsig_asm"] = _es(script.script_to_asm(tx.inputs[i].script_sig))
+		inp["scriptsig_asm"] = _es(_esplora_script_to_asm(tx.inputs[i].script_sig))
+		witness: [][]byte
 		if len(tx.witness) > i && len(tx.witness[i]) > 0 {
+			witness = tx.witness[i]
 			wit := make(json.Array, len(tx.witness[i]), context.temp_allocator)
 			for j in 0 ..< len(tx.witness[i]) {
 				wit[j] = _es(_bytes_to_hex(tx.witness[i][j]))
@@ -531,6 +524,11 @@ _esplora_tx_json :: proc(srv: ^Esplora_Server, tx: ^wire.Tx, txid: Hash256, meta
 			if spk, value, ok := _esplora_resolve_prevout(srv, po.hash, int(po.index)); ok {
 				inp["prevout"] = _esplora_spk_json(srv, spk, value)
 				input_sum += value
+				// inner redeem/witness script asm (P2SH / P2WSH inputs)
+				if ra, hr, wa, hw := _esplora_inner_scripts(spk, tx.inputs[i].script_sig, witness); hr || hw {
+					if hr { inp["inner_redeemscript_asm"] = _es(ra) }
+					if hw { inp["inner_witnessscript_asm"] = _es(wa) }
+				}
 			} else {
 				have_all_prevouts = false
 				inp["prevout"] = json.Value(nil)
@@ -566,7 +564,7 @@ _esplora_spk_json :: proc(srv: ^Esplora_Server, spk: []byte, value: i64) -> json
 	o := make(json.Object, 6, context.temp_allocator)
 	o["value"] = _ei(value)
 	o["scriptpubkey"] = _es(_bytes_to_hex(spk))
-	o["scriptpubkey_asm"] = _es(script.script_to_asm(spk))
+	o["scriptpubkey_asm"] = _es(_esplora_script_to_asm(spk))
 	o["scriptpubkey_type"] = _es(_esplora_script_type(spk))
 	if addr, ok := _script_to_address(spk, srv.params); ok {
 		o["scriptpubkey_address"] = _es(addr)
@@ -609,6 +607,9 @@ _esplora_scripthash_route :: proc(srv: ^Esplora_Server, segs: []string) -> (int,
 	sh, ok := _hex_to_scripthash(segs[1])
 	if !ok { return 400, "text/plain", transmute([]byte)string("invalid scripthash") }
 
+	if len(segs) == 2 {
+		return _esplora_summary_response(srv, sh, "")
+	}
 	if len(segs) == 3 && segs[2] == "utxo" {
 		return _esplora_scripthash_utxo(srv, sh)
 	}
