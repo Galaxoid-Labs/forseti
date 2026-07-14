@@ -18,6 +18,7 @@ package rpc
 
 import "core:encoding/json"
 import "core:fmt"
+import "core:mem/virtual"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
@@ -31,6 +32,15 @@ import "../storage"
 import "../wire"
 
 ESPLORA_RECENT :: 10 // /mempool/recent page size (Esplora default)
+
+// Max scripthash history rows the stats summary will resolve. Each row costs a
+// tx load from disk, so above this the summary would take many seconds and tie
+// up a connection thread — refused (400, detected cheaply via an early-exit
+// count before any history is materialized). Wallet addresses are far below it;
+// only mega-reused addresses (exchanges / pools / the genesis address) hit it,
+// which is also where blockstream's Esplora rate-limits its own address endpoints.
+ESPLORA_STATS_MAX_ROWS :: 10_000
+ESPLORA_STATS_SCRATCH_RESET :: 2048 // free the per-row tx-load arena every N rows
 
 // --- address endpoints (thin wrappers over scripthash, address→spk→sha256) ---
 
@@ -62,7 +72,10 @@ _esplora_address_route :: proc(srv: ^Esplora_Server, segs: []string) -> (int, st
 // GET /scripthash/:h or /address/:a → { (scripthash|address), chain_stats, mempool_stats }.
 // address_str != "" emits an "address" field (address route); else "scripthash".
 _esplora_summary_response :: proc(srv: ^Esplora_Server, sh: Hash256, address_str: string) -> (int, string, []byte) {
-	chain_stats, mempool_stats := _esplora_scripthash_stats(srv, sh)
+	chain_stats, mempool_stats, ok := _esplora_scripthash_stats(srv, sh)
+	if !ok {
+		return 400, "text/plain", transmute([]byte)string("address history too large for a stats summary — use /txs and /utxo with pagination")
+	}
 	obj := make(json.Object, 3, context.temp_allocator)
 	if address_str != "" {
 		obj["address"] = _es(address_str)
@@ -86,30 +99,51 @@ _esplora_stats_obj :: proc(funded_count, spent_count: int, funded_sum, spent_sum
 
 // Compute confirmed (chain) and unconfirmed (mempool) touch statistics for a
 // scripthash. Confirmed values are resolved from the flat files (the H history
-// rows carry no value), so cost scales with history length — acceptable
-// on-demand, mirroring Esplora's own per-address work.
-_esplora_scripthash_stats :: proc(srv: ^Esplora_Server, sh: Hash256) -> (chain_stats: json.Value, mempool_stats: json.Value) {
-	// --- chain stats from the confirmed history ---
+// rows carry no value), so cost scales with history length: refused (ok=false)
+// above ESPLORA_STATS_MAX_ROWS, and the per-row tx loads run in a scratch arena
+// freed every ESPLORA_STATS_SCRATCH_RESET rows so RAM stays bounded regardless
+// of history size (a naive temp-allocator loop OOM-kills the node on a
+// mega-history address).
+_esplora_scripthash_stats :: proc(srv: ^Esplora_Server, sh: Hash256) -> (chain_stats: json.Value, mempool_stats: json.Value, ok: bool) {
+	// Cheap early-exit cap check BEFORE materializing the history — a
+	// mega-history scripthash otherwise blows out both scan time and memory.
+	if _, exceeded := storage.addr_index_history_count_capped(srv.chain.addr_index, sh, ESPLORA_STATS_MAX_ROWS); exceeded {
+		return nil, nil, false
+	}
 	hist := storage.addr_index_get_history(srv.chain.addr_index, sh, context.temp_allocator)
+
+	// Pass 1 — counts + unique tx_count (no disk, on the request allocator).
 	txset := make(map[Hash256]bool, len(hist), context.temp_allocator)
 	funded_count, spent_count := 0, 0
-	funded_sum, spent_sum: i64
 	for e in hist {
 		txset[e.txid] = true
-		if e.io == 0 { // funding: value = output[idx] of e.txid
-			funded_count += 1
-			if tx, _, _, _, ok := chain.addr_index_lookup_tx(srv.chain, e.txid); ok && int(e.idx) < len(tx.outputs) {
-				funded_sum += tx.outputs[e.idx].value
-			}
-		} else { // spending: value = the prevout consumed by input[idx] of e.txid
-			spent_count += 1
-			if stx, _, _, _, ok := chain.addr_index_lookup_tx(srv.chain, e.txid); ok && int(e.idx) < len(stx.inputs) {
-				po := stx.inputs[e.idx].previous_output
-				if _, val, ok2 := _esplora_resolve_prevout(srv, po.hash, int(po.index)); ok2 {
-					spent_sum += val
+		if e.io == 0 { funded_count += 1 } else { spent_count += 1 }
+	}
+
+	// Pass 2 — value sums. Each row loads a tx from disk; do it in a scratch
+	// arena reset periodically so memory can't grow with history length.
+	funded_sum, spent_sum: i64
+	scratch: virtual.Arena
+	if virtual.arena_init_growing(&scratch, 16 * 1024 * 1024) == nil {
+		defer virtual.arena_destroy(&scratch)
+		saved := context.temp_allocator
+		context.temp_allocator = virtual.arena_allocator(&scratch)
+		for e, i in hist {
+			if e.io == 0 { // funding: value = output[idx] of e.txid
+				if tx, _, _, _, found := chain.addr_index_lookup_tx(srv.chain, e.txid); found && int(e.idx) < len(tx.outputs) {
+					funded_sum += tx.outputs[e.idx].value
+				}
+			} else { // spending: value = the prevout consumed by input[idx] of e.txid
+				if stx, _, _, _, found := chain.addr_index_lookup_tx(srv.chain, e.txid); found && int(e.idx) < len(stx.inputs) {
+					po := stx.inputs[e.idx].previous_output
+					if _, val, ok2 := _esplora_resolve_prevout(srv, po.hash, int(po.index)); ok2 {
+						spent_sum += val
+					}
 				}
 			}
+			if (i + 1) % ESPLORA_STATS_SCRATCH_RESET == 0 { free_all(context.temp_allocator) }
 		}
+		context.temp_allocator = saved
 	}
 	chain_stats = _esplora_stats_obj(funded_count, spent_count, funded_sum, spent_sum, len(txset))
 
@@ -131,6 +165,7 @@ _esplora_scripthash_stats :: proc(srv: ^Esplora_Server, sh: Hash256) -> (chain_s
 		}
 	}
 	mempool_stats = _esplora_stats_obj(mfc, msc, mfs, mss, mtx)
+	ok = true
 	return
 }
 

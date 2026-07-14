@@ -29,6 +29,8 @@ curl http://127.0.0.1:3000/tx/<txid>/outspends
 
 > **Status: verified.** A real `bdk_wallet` + `bdk_esplora` descriptor wallet does a full end-to-end `full_scan → build → sign → broadcast → confirm` against forseti on regtest (harness in `test/bdk-esplora/`). Every endpoint's output is cross-checked field-for-field against `blockstream.info/api` on mainnet — including exact-hex tx/block serialization, merkle proofs, `outspend` spender identification, and complete address histories (full pagination walk, zero missing/extra txs). Response JSON is byte-identical to Blockstream's Esplora.
 
+> **One limit:** the `/address/:a` and `/scripthash/:h` **stats summaries** (`chain_stats`/`mempool_stats`) are computed on demand from the flat files, so they're refused with `400` for scripthashes above ~10k history rows (mega-reused exchange/pool/genesis addresses). Everything else — `/txs`, `/utxo`, per-tx endpoints — still works on those addresses via pagination; only the aggregate-sum summary is capped. Normal wallet addresses are unaffected.
+
 **When you'd still want an external indexer instead:** the built-in API does **not** (yet) speak the **Electrum protocol** (Sparrow / Electrum desktop / `bdk_electrum`) or ship the **Esplora web-explorer frontend**. For those, run electrs or Blockstream/Esplora as a sidecar — covered below.
 
 ## Electrum Wallets (BDK / Electrum / Sparrow)

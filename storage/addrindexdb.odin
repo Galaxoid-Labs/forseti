@@ -439,6 +439,33 @@ addr_index_get_history :: proc(adb: ^Addr_Index_DB, scripthash: Hash256, allocat
 	return out[:]
 }
 
+// Count a scripthash's history rows, stopping early once `cap` is exceeded.
+// O(min(rows, cap)) — no per-row allocation — so callers can cheaply refuse
+// mega-history addresses before materializing/resolving the whole history.
+// `exceeded` is true iff the scripthash has strictly more than `cap` rows.
+addr_index_history_count_capped :: proc(adb: ^Addr_Index_DB, scripthash: Hash256, cap: int) -> (count: int, exceeded: bool) {
+	prefix: [33]byte
+	sh := scripthash
+	prefix[0] = ADDR_H_PREFIX
+	copy(prefix[1:33], sh[:])
+
+	iter := rocksdb_create_iterator(adb.db, adb.read_opts)
+	defer rocksdb_iter_destroy(iter)
+
+	rocksdb_iter_seek(iter, &prefix[0], 33)
+	for rocksdb_iter_valid(iter) != 0 {
+		klen: c.size_t
+		kptr := rocksdb_iter_key(iter, &klen)
+		if klen != 74 { break }
+		key := kptr[:74]
+		if key[0] != ADDR_H_PREFIX || !_hash_eq(key[1:33], prefix[1:33]) { break }
+		count += 1
+		if count > cap { return count, true }
+		rocksdb_iter_next(iter)
+	}
+	return count, false
+}
+
 // All unspent outputs owned by a scripthash. Allocated on `allocator`.
 addr_index_get_utxos :: proc(adb: ^Addr_Index_DB, scripthash: Hash256, allocator := context.allocator) -> []Addr_Utxo_Entry {
 	prefix: [33]byte
