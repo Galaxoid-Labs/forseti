@@ -600,7 +600,7 @@ _load_config_file :: proc(path: string, cfg: ^CLI_Config, cli_seen: map[string]b
 	}
 	if "esplora" not_in cli_seen {
 		if val, found := _ini_get(&m, cfg.network, "esplora"); found {
-			cfg.esplora = val
+			cfg.esplora = strings.clone(val)
 		}
 	}
 
