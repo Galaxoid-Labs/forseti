@@ -126,6 +126,7 @@ On a fast CPU with hardware SHA-256, IBD is **I/O-bound** — UTXO reads dominat
 | [docs/usage.md](docs/usage.md) | Syncing each network, monitoring, every CLI flag, config file, ports |
 | [docs/rpc.md](docs/rpc.md) | RPC usage and the full Bitcoin Core coverage matrix |
 | [docs/integrations.md](docs/integrations.md) | **Built-in Esplora REST API** (BDK, no sidecar), plus external electrs (BDK/Sparrow), Esplora, mempool.space, ZMQ, + a regtest test playbook |
+| [docs/deployment.md](docs/deployment.md) | Running a mainnet server with a **public** Esplora endpoint — conf, systemd, firewall, reverse proxy |
 | [docs/dashboards.md](docs/dashboards.md) | GUI window, terminal TUI, remote client |
 | [docs/architecture.md](docs/architecture.md) | Project layout, storage design, threading, sync internals |
 | [docs/bips.md](docs/bips.md) | All 50 implemented BIPs |
