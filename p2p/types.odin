@@ -193,4 +193,18 @@ Node_Status :: struct {
 	flushing:          bool,
 	flush_total:       int,
 	flush_progress:    int,
+
+	// Boot / warmup progress. Only populated by the getnodestatus warmup path
+	// (the node is still recovering / connecting pending blocks / building an
+	// index) so a REMOTE dashboard can show what it is doing instead of a blank
+	// spinner. `starting_up` gates the boot screen in the gui/tui renderers.
+	// The in-process --gui/--tui use gui.run_boot + chain.Boot_* directly and
+	// never set these. All zero once the node is ready.
+	starting_up:       bool,
+	boot_stage:        [64]byte, // human phase label, fixed buf (copied)
+	boot_stage_len:    int,
+	boot_height:       int,      // block height the boot phase is at
+	boot_target:       int,      // frontier it is climbing toward (0 = unknown)
+	rollback_done:     int,      // crash-recovery rollback progress
+	rollback_total:    int,
 }

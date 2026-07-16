@@ -360,6 +360,61 @@ _draw_boot :: proc(boot: ^Boot, frame: int) {
 	}
 }
 
+// Boot/recovery screen for the REMOTE dashboard (forseti-gui). Driven by the
+// st.boot_* fields the node reports from getnodestatus during warmup — the
+// remote client can't read the node's chain.Boot_* globals. Mirrors the
+// in-process _draw_boot look but shows a determinate bar when a target is known.
+_draw_boot_remote :: proc(st: ^p2p.Node_Status, info: Static_Info) {
+	t := rl.GetTime()
+	cy := i32(WIN_H/2 - 70)
+	_text_centered("Forseti", cy, 26, COL_TEXT)
+	_text_centered(fmt.ctprintf("network: %s - node starting up", info.network), cy + 34, 15, COL_DIM)
+
+	stage := string(st.boot_stage[:st.boot_stage_len])
+	if stage == "" {
+		stage = "Starting"
+	}
+	stage_c := fmt.ctprintf("%s", stage)
+	sw: f32 = g_fonts_ok ? rl.MeasureTextEx(_font_for(17)^, stage_c, 17, 0).x : f32(rl.MeasureText(stage_c, 17))
+	sx := i32((f32(WIN_W) - sw) / 2)
+	_text(stage_c, sx, cy + 66, 17, COL_ORANGE)
+	ellipsis := "..."
+	dots := int(t * 2) % 4
+	_text(fmt.ctprintf("%s", ellipsis[:dots]), sx + i32(sw), cy + 66, 17, COL_ORANGE)
+
+	// Pick the meaningful progress pair: rollback while recovering, else the
+	// pending-connect height climbing toward the on-disk frontier.
+	done, total := 0, 0
+	if st.rollback_total > 0 {
+		done, total = st.rollback_done, st.rollback_total
+		_text_centered(fmt.ctprintf("rolled back %s / %s blocks (at height %s)",
+			_commas(done), _commas(total), _commas(st.boot_height)), cy + 92, 14, COL_DIM)
+	} else if st.boot_target > st.boot_height {
+		done, total = st.boot_height, st.boot_target
+		_text_centered(fmt.ctprintf("%s / %s blocks", _commas(st.boot_height), _commas(st.boot_target)), cy + 92, 14, COL_DIM)
+	} else if st.boot_height > 0 {
+		_text_centered(fmt.ctprintf("at height %s", _commas(st.boot_height)), cy + 92, 14, COL_DIM)
+	}
+
+	bar_w := i32(340)
+	bx := i32(WIN_W/2 - 170)
+	by := cy + 120
+	rl.DrawRectangle(bx, by, bar_w, 8, COL_PANEL)
+	if total > 0 {
+		frac := clamp(f32(done) / f32(total), 0, 1)
+		rl.DrawRectangle(bx, by, i32(f32(bar_w) * frac), 8, COL_GREEN)
+	} else {
+		// Indeterminate sweep when there's no target yet.
+		sweep_w := i32(70)
+		span := int(bar_w - sweep_w)
+		pos := int(t * 180) % (span * 2)
+		if pos > span { pos = 2*span - pos }
+		rl.DrawRectangle(bx + i32(pos), by, sweep_w, 8, COL_ORANGE)
+	}
+
+	_text_centered("The node is not ready for RPC yet. This screen updates as it recovers.", cy + 152, 13, COL_DIM)
+}
+
 _window_open :: proc(title: cstring) -> bool {
 	rl.SetConfigFlags({.WINDOW_HIGHDPI})
 	rl.SetTraceLogLevel(.WARNING)
@@ -472,6 +527,10 @@ _dashboard_loop :: proc(info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: 
 
 		if fetch == nil {
 			_draw_no_p2p(cs, info)
+		} else if have_status && st.starting_up {
+			// Node is still booting (crash recovery / connecting pending blocks /
+			// index catch-up). Show what it's doing instead of a broken dashboard.
+			_draw_boot_remote(&st, info)
 		} else if have_status {
 			_draw_dashboard(&st, info)
 			if st.halt_height > 0 {
@@ -520,7 +579,13 @@ _dashboard_loop :: proc(info: Static_Info, fetch: Status_Fetch, ud: rawptr, cs: 
 				_text("CONNECTION LOST - retrying...", 16, 6, 14, rl.WHITE)
 			}
 		} else {
-			_text(connected ? "Loading..." : "Connecting...", 16, 16, 18, COL_DIM)
+			if connected {
+				_text("Loading...", 16, 16, 18, COL_DIM)
+			} else {
+				_text("Connecting to node...", 16, 16, 18, COL_DIM)
+				_text("Node not responding yet - it may be starting up, recovering, or stopped. Retrying every second.",
+					16, 40, 13, COL_DIM)
+			}
 		}
 
 		rl.EndDrawing()

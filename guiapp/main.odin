@@ -203,6 +203,21 @@ _fetch_status :: proc(c: ^Client) -> (st: p2p.Node_Status, ok: bool) {
 		c.have_info = true
 	}
 
+	// Warmup response: the node is still booting and only reports boot progress
+	// (no chain/peer/mempool fields yet). Populate just the boot fields and
+	// return — the renderers show a boot screen while starting_up is set.
+	if _jbool(result, "starting_up") {
+		st.starting_up = true
+		stage := _jstr(result, "boot_stage")
+		st.boot_stage_len = min(len(stage), len(st.boot_stage))
+		copy(st.boot_stage[:st.boot_stage_len], stage[:st.boot_stage_len])
+		st.boot_height = int(_jint(result, "boot_height"))
+		st.boot_target = int(_jint(result, "boot_target"))
+		st.rollback_done = int(_jint(result, "rollback_done"))
+		st.rollback_total = int(_jint(result, "rollback_total"))
+		return st, true
+	}
+
 	st.chain_height = int(_jint(result, "chain_height"))
 	st.best_header = int(_jint(result, "best_header"))
 	st.sync_state = p2p.Sync_State(_jint(result, "sync_state"))

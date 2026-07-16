@@ -225,6 +225,64 @@ test_getblockcount :: proc(t: ^testing.T) {
 	testing.expect_value(t, int(result), 9) // 10 blocks = height 9
 }
 
+// The RPC warmup gate (Bitcoin Core's RPC_IN_WARMUP): while the node is booting,
+// every method returns In_Warmup (-28) except the boot-status whitelist, and
+// getnodestatus answers from the chain.Boot_* globals. Cleared by set_ready.
+@(test)
+test_rpc_warmup_gate :: proc(t: ^testing.T) {
+	srv, cs, mp, params, dir := _make_test_rpc_server(t, "warmup_gate", 3)
+	defer _cleanup_test(srv, cs, mp, params, dir)
+
+	srv.warmup = true
+	srv.dbcache_mb = 450
+	srv._current_id = json.Value(json.Integer(1))
+
+	// A normal method is gated with In_Warmup (-28) during warmup.
+	{
+		resp := _dispatch(srv, RPC_Request{method = "getblockcount", params = json.Value(nil), id = json.Value(json.Integer(1))})
+		err_val, has_err := resp.error.?
+		testing.expect(t, has_err, "getblockcount must be gated during warmup")
+		testing.expect_value(t, err_val.code, RPC_Error_Code.In_Warmup)
+	}
+
+	// getnodestatus is whitelisted and reports boot progress from the globals.
+	chain.Boot_Stage = "Recovering from unclean shutdown (rolling back blocks)"
+	chain.Boot_Height = 123
+	chain.Boot_Target = 456
+	chain.Boot_Rollback_Done = 5
+	chain.Boot_Rollback_Total = 10
+	{
+		resp := _dispatch(srv, RPC_Request{method = "getnodestatus", params = json.Value(nil), id = json.Value(json.Integer(1))})
+		_, has_err := resp.error.?
+		testing.expect(t, !has_err, "getnodestatus must be allowed during warmup")
+		obj, ok := resp.result.(json.Object)
+		testing.expect(t, ok, "getnodestatus result should be an object")
+		su, su_ok := obj["starting_up"].(json.Boolean)
+		testing.expect(t, su_ok && bool(su), "starting_up should be true")
+		bh, bh_ok := obj["boot_height"].(json.Integer)
+		testing.expect(t, bh_ok && int(bh) == 123, "boot_height should be 123")
+		rt, rt_ok := obj["rollback_total"].(json.Integer)
+		testing.expect(t, rt_ok && int(rt) == 10, "rollback_total should be 10")
+	}
+
+	// After set_ready the gate is gone and normal dispatch resumes.
+	rpc_server_set_ready(srv)
+	{
+		resp := _dispatch(srv, RPC_Request{method = "getblockcount", params = json.Value(nil), id = json.Value(json.Integer(1))})
+		err_val, has_err := resp.error.?
+		testing.expect(t, !has_err, fmt.tprintf("getblockcount should work after ready: %v", err_val))
+		result, ok := resp.result.(json.Integer)
+		testing.expect(t, ok && int(result) == 2, "height should be 2 (3 blocks)")
+	}
+
+	// Reset globals so other serial tests see a clean slate.
+	chain.Boot_Stage = ""
+	chain.Boot_Height = 0
+	chain.Boot_Target = 0
+	chain.Boot_Rollback_Done = 0
+	chain.Boot_Rollback_Total = 0
+}
+
 @(test)
 test_getblockhash :: proc(t: ^testing.T) {
 	srv, cs, mp, params, dir := _make_test_rpc_server(t, "blkhash", 5)

@@ -978,12 +978,72 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 
 	// Initialize chain state.
 	cs := new(chain.Chain_State)
+
+	// Start the RPC server EARLY, in warmup mode, BEFORE the (potentially long)
+	// chain_state_init. Crash recovery + connecting pending blocks can take many
+	// minutes; without this a remote dashboard (forseti-gui, --tui over RPC) only
+	// sees a blank "connecting…" the entire time. In warmup the server binds the
+	// port and answers getnodestatus from the chain.Boot_* progress globals, while
+	// every other method returns In_Warmup (-28) until rpc_server_set_ready below.
+	// cs is handed over now but the warmup path never reads it (Boot_* are package
+	// globals), so it is safe that chain_state_init is still populating it, and the
+	// node thread stays the sole chainstate mutator throughout recovery.
+	srv: ^rpc.RPC_Server
+	rpc_thread: ^thread.Thread
+	// Maintenance modes (--repairutxo, --check-utxo) load the chain then exit;
+	// they never served RPC before, so don't open the port for them.
+	start_rpc := cfg.server && !cfg.repair_utxo && !cfg.check_utxo
+	if start_rpc {
+		srv = new(rpc.RPC_Server)
+		rpc.rpc_server_init(srv, cs, nil, params, rpc_port, data_dir = cfg.data_dir, rpc_user = cfg.rpc_user, rpc_password = cfg.rpc_password, warmup = true, dbcache_mb = cfg.db_cache_mb, prune_mb = cfg.prune_mb)
+
+		if !rpc.rpc_server_configure_network(srv, cfg.rpc_bind, cfg.rpc_allow_ips[:]) {
+			return
+		}
+		if !rpc.rpc_server_start(srv) {
+			log.errorf("Failed to start RPC server on port %d", rpc_port)
+			return
+		}
+
+		log.infof("RPC listening on %s:%d (node starting up)", cfg.rpc_bind != "" ? cfg.rpc_bind : "127.0.0.1", rpc_port)
+
+		_g_rpc_server = srv
+
+		rpc_data := new(_Rpc_Thread_Data)
+		rpc_data.srv = srv
+		rpc_data.log_level = log_level
+		rpc_thread = thread.create_and_start_with_data(
+			rawptr(rpc_data),
+			proc(data: rawptr) {
+				td := cast(^_Rpc_Thread_Data)data
+				context.logger = _make_logger(td.log_level)
+				rpc.rpc_server_run(td.srv)
+				free(td)
+			},
+		)
+	} else if !cfg.server {
+		log.info("RPC server disabled (--server=0)")
+	}
+
 	cs_err := chain.chain_state_init(cs, cfg.data_dir, params, cfg.db_cache_mb, script_threads, cfg.prune_mb * 1024 * 1024, dc_mode, prevout_fetch_threads)
 	if cs_err != .None {
 		log.errorf("Failed to initialize chain state: %v", cs_err)
+		// RPC is already running (warmup) — stop it before bailing.
+		if srv != nil {
+			rpc.rpc_server_stop(srv)
+		}
 		return
 	}
 	defer chain.chain_state_destroy(cs)
+	// Registered AFTER chain_state_destroy so LIFO stops the RPC server BEFORE the
+	// chainstate is torn down — an RPC connection thread must never read cs after
+	// it's freed. (The normal shutdown path stops+joins RPC explicitly before any
+	// defer runs; this covers the index-open early-returns below.)
+	defer {
+		if srv != nil {
+			rpc.rpc_server_stop(srv)
+		}
+	}
 
 	// Open BIP 158 filter index if enabled.
 	if bool(cfg.block_filter_index) {
@@ -1104,47 +1164,12 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 		mempool.mempool_load(mp, cfg.data_dir)
 	}
 
-	// Start RPC server (cm wired below after P2P init).
-	srv: ^rpc.RPC_Server
-	rpc_thread: ^thread.Thread
-
-	if cfg.server {
-		srv = new(rpc.RPC_Server)
-		rpc.rpc_server_init(srv, cs, mp, params, rpc_port, data_dir = cfg.data_dir, rpc_user = cfg.rpc_user, rpc_password = cfg.rpc_password)
-
-		if !rpc.rpc_server_configure_network(srv, cfg.rpc_bind, cfg.rpc_allow_ips[:]) {
-			return
-		}
-		if !rpc.rpc_server_start(srv) {
-			log.errorf("Failed to start RPC server on port %d", rpc_port)
-			return
-		}
-
-		log.infof("RPC listening on %s:%d", cfg.rpc_bind != "" ? cfg.rpc_bind : "127.0.0.1", rpc_port)
-
-		// Set global pointer for signal handler.
-		_g_rpc_server = srv
-
-		// Run RPC server on a background thread.
-		rpc_data := new(_Rpc_Thread_Data)
-		rpc_data.srv = srv
-		rpc_data.log_level = log_level
-		rpc_thread = thread.create_and_start_with_data(
-			rawptr(rpc_data),
-			proc(data: rawptr) {
-				td := cast(^_Rpc_Thread_Data)data
-				context.logger = _make_logger(td.log_level)
-				rpc.rpc_server_run(td.srv)
-				free(td)
-			},
-		)
-	} else {
-		log.info("RPC server disabled (--server=0)")
-	}
-	defer {
-		if srv != nil {
-			rpc.rpc_server_stop(srv)
-		}
+	// The RPC server was started early in warmup mode (before chain_state_init).
+	// Wire the mempool into it now that it exists — mempool methods stayed gated
+	// behind the warmup whitelist until here. cs was passed at init; cm is wired
+	// after P2P init below; the warmup gate is cleared once everything is live.
+	if srv != nil {
+		rpc.rpc_server_set_mempool(srv, mp)
 	}
 
 	// Initialize P2P connection manager (unless --no-p2p).
@@ -1241,9 +1266,10 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 			// nodes reporting an all-zero status. The map walk is cheap.
 			cm.status_enabled = true
 
-			// Wire connection manager into RPC server.
+			// Wire connection manager into the (warmup) RPC server. Atomic — a
+			// warmup-phase getnodestatus poll may be refreshing cm concurrently.
 			if srv != nil {
-				srv.cm = cm
+				rpc.rpc_server_set_cm(srv, cm)
 			}
 
 			// Run P2P on a background thread.
@@ -1316,6 +1342,14 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 		if esrv != nil {
 			rpc.esplora_server_stop(esrv)
 		}
+	}
+
+	// Boot complete: chainstate is loaded and recovered, mempool + connection
+	// manager + indexes are wired. Clear the RPC warmup gate so the full method
+	// set is served. MUST be last — after this any RPC may read the now-stable
+	// chainstate (the normal RPC-reads-while-P2P-mutates model resumes).
+	if srv != nil {
+		rpc.rpc_server_set_ready(srv)
 	}
 
 	// Register signal handlers for graceful shutdown.

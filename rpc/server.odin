@@ -1,5 +1,6 @@
 package rpc
 
+import "base:intrinsics"
 import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
@@ -36,6 +37,16 @@ RPC_Server :: struct {
 	bind_addr:    tcp.IP4_Address,   // --rpcbind (default loopback)
 	bind_set:     bool,              // 0.0.0.0 is a valid bind — can't use the zero value as "unset"
 	allow_nets:   [dynamic]Allow_Net, // --rpcallowip CIDRs (loopback always allowed)
+	// Warmup gate. While set, the server is up and bound but the node is still
+	// booting (crash recovery, connecting pending blocks, index catch-up): every
+	// method returns In_Warmup (-28) EXCEPT the boot-status whitelist, and
+	// getnodestatus answers from the chain.Boot_* globals without touching the
+	// still-mutating chainstate. Written by the node thread (set at init, cleared
+	// by rpc_server_set_ready once fully initialized); read atomically by the
+	// per-connection dispatchers via the canonical `shared` server.
+	warmup:       bool,
+	dbcache_mb:   int, // shown in the warmup status (chainstate budget not read yet)
+	prune_mb:     int, // shown in the warmup status (chain.prune_target not read yet)
 }
 
 Allow_Net :: struct {
@@ -85,7 +96,7 @@ _addr_allowed :: proc(srv: ^RPC_Server, addr: tcp.Address) -> bool {
 MAX_RPC_CONNECTIONS :: 32
 
 // Initialize the RPC server with references to chain state and mempool.
-rpc_server_init :: proc(srv: ^RPC_Server, cs: ^chain.Chain_State, mp: ^mempool.Mempool, params: ^consensus.Chain_Params, port: int, cm: ^p2p.Conn_Manager = nil, data_dir: string = "", rpc_user: string = "", rpc_password: string = "") {
+rpc_server_init :: proc(srv: ^RPC_Server, cs: ^chain.Chain_State, mp: ^mempool.Mempool, params: ^consensus.Chain_Params, port: int, cm: ^p2p.Conn_Manager = nil, data_dir: string = "", rpc_user: string = "", rpc_password: string = "", warmup: bool = false, dbcache_mb: int = 0, prune_mb: int = 0) {
 	srv.chain = cs
 	srv.mp = mp
 	srv.params = params
@@ -99,6 +110,38 @@ rpc_server_init :: proc(srv: ^RPC_Server, cs: ^chain.Chain_State, mp: ^mempool.M
 	srv.logger = context.logger
 	srv.conns = make(map[tcp.TCP_Socket]bool)
 	srv.shared = nil
+	srv.warmup = warmup
+	srv.dbcache_mb = dbcache_mb
+	srv.prune_mb = prune_mb
+}
+
+// Wire the mempool pointer in after it is initialized (the server can be started
+// in warmup mode before the mempool exists; mempool methods stay gated by the
+// warmup whitelist until then). Publish it before clearing warmup.
+rpc_server_set_mempool :: proc(srv: ^RPC_Server, mp: ^mempool.Mempool) {
+	intrinsics.atomic_store(&srv.mp, mp)
+}
+
+// Wire the connection manager in after P2P init (the server can start before it
+// exists). Atomic so warmup-phase getnodestatus polls that refresh cm from the
+// canonical server don't race the plain store.
+rpc_server_set_cm :: proc(srv: ^RPC_Server, cm: ^p2p.Conn_Manager) {
+	intrinsics.atomic_store(&srv.cm, cm)
+}
+
+// Clear the warmup gate: the node is fully initialized (recovery done, pending
+// blocks connected, indexes caught up, P2P wired). After this the normal
+// dispatch path serves every method. Call LAST, once cs/mp/cm are all live.
+rpc_server_set_ready :: proc(srv: ^RPC_Server) {
+	intrinsics.atomic_store(&srv.warmup, false)
+}
+
+// True while the node is still booting. Read the canonical server (per-connection
+// copies snapshot the struct at accept time, so a flip mid-connection would be
+// missed) with an atomic load.
+_in_warmup :: proc(srv: ^RPC_Server) -> bool {
+	target := srv.shared != nil ? srv.shared : srv
+	return intrinsics.atomic_load(&target.warmup)
 }
 
 // Apply --rpcbind/--rpcallowip. Refuses a non-loopback bind without an
@@ -502,6 +545,37 @@ _send_http_response :: proc(socket: tcp.TCP_Socket, body: []byte, want_close := 
 
 // Route a request to the appropriate handler.
 _dispatch :: proc(srv: ^RPC_Server, req: RPC_Request) -> RPC_Response {
+	// Read the warmup flag FIRST, then refresh the late-wired pointers. Ordering
+	// is load-bearing: the node thread stores mp then cm (set_mempool/set_cm) and
+	// LAST clears warmup (set_ready). With seq_cst atomics, observing warmup==false
+	// here guarantees those pointer stores are already visible to the loads below,
+	// so a non-whitelisted handler can NEVER be handed a stale nil mp/cm. Loading
+	// mp/cm first would let a thread preempted mid-refresh read nil mp, resume to
+	// see warmup cleared, pass the gate, and nil-deref in a mempool handler.
+	in_warmup := _in_warmup(srv)
+
+	// Refresh pointers wired into the canonical server after this connection was
+	// accepted (local := shared^ snapshots them, nil during warmup). Without this,
+	// a connection opened during warmup would keep using nil mp/cm once ready.
+	if srv.shared != nil {
+		srv.mp = intrinsics.atomic_load(&srv.shared.mp)
+		srv.cm = intrinsics.atomic_load(&srv.shared.cm)
+	}
+
+	// Warmup gate (Bitcoin Core's RPC_IN_WARMUP): while the node is still booting
+	// — crash recovery, connecting pending blocks, index catch-up — only the
+	// boot-status whitelist runs. Everything else returns In_Warmup (-28). This
+	// keeps chainstate-reading handlers off the chain state the node thread is
+	// still mutating; getnodestatus answers from the chain.Boot_* globals only.
+	if in_warmup {
+		switch req.method {
+		case "getnodestatus", "help", "stop", "uptime":
+		// fall through to normal dispatch
+		case:
+			return _make_error(.In_Warmup, "Forseti is starting up — the node is not ready yet", srv._current_id)
+		}
+	}
+
 	switch req.method {
 	case "getblockchaininfo":
 		return _handle_getblockchaininfo(srv, req.params)

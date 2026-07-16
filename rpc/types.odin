@@ -17,6 +17,7 @@ RPC_Error_Code :: enum i32 {
 	Internal_Error   = -32603,
 	// Bitcoin-specific
 	Misc_Error       = -1,
+	In_Warmup        = -28, // RPC_IN_WARMUP: node still starting up (Core parity)
 	Block_Not_Found  = -5,
 	Tx_Deser_Error   = -22,
 	Verify_Error     = -25,

@@ -130,11 +130,15 @@ run_with_source :: proc(info: Static_Info, fetch: Status_Fetch, ud: rawptr, loca
 			}
 		}
 
-		if have {
+		if have && st.starting_up {
+			_draw_boot(&st, info)
+		} else if have {
 			_draw(&st, info, connected)
 		} else {
 			nc.erase()
-			_put(nc.stdscr, 1, 2, "Connecting...", P_DIM)
+			_put(nc.stdscr, 1, 2, "Connecting to node...", P_DIM, nc.A_BOLD)
+			_put(nc.stdscr, 3, 2, "Node not responding yet - it may be starting up, recovering, or stopped.", P_DIM)
+			_put(nc.stdscr, 4, 2, "Retrying every second.", P_DIM)
 			nc.refresh()
 		}
 		free_all(context.temp_allocator)
@@ -180,6 +184,49 @@ _bar :: proc(win: ^nc.WINDOW, y, x, w: int, frac: f64, pair: int) {
 	nc.wattroff(win, nc.color_pair(i32(pair)) | nc.A_REVERSE)
 	dots := strings.repeat(".", w - filled, context.temp_allocator)
 	_put(win, y, x + filled, dots, P_DIM)
+}
+
+// Boot/recovery screen for the remote/RPC TUI. Driven by the st.boot_* fields
+// the node reports during warmup, so a long crash-recovery shows real progress
+// instead of a bare "Connecting...".
+_draw_boot :: proc(st: ^p2p.Node_Status, info: Static_Info) {
+	w := int(nc.getmaxx(nc.stdscr))
+	nc.erase()
+
+	_put(nc.stdscr, 0, 1, fmt.tprintf("Forseti — %s", info.network), P_TEXT, nc.A_BOLD)
+	_put(nc.stdscr, 0, w - len("STARTING UP") - 2, "STARTING UP", P_YELLOW, nc.A_BOLD)
+
+	stage := string(st.boot_stage[:st.boot_stage_len])
+	if stage == "" { stage = "Starting" }
+	_put(nc.stdscr, 2, 2, stage, P_YELLOW, nc.A_BOLD)
+
+	done, total := 0, 0
+	detail := ""
+	if st.rollback_total > 0 {
+		done, total = st.rollback_done, st.rollback_total
+		detail = fmt.tprintf("rolled back %s / %s blocks (at height %s)",
+			commas(done), commas(total), commas(st.boot_height))
+	} else if st.boot_target > st.boot_height {
+		done, total = st.boot_height, st.boot_target
+		detail = fmt.tprintf("%s / %s blocks", commas(st.boot_height), commas(st.boot_target))
+	} else if st.boot_height > 0 {
+		detail = fmt.tprintf("at height %s", commas(st.boot_height))
+	}
+	if detail != "" {
+		_put(nc.stdscr, 4, 2, detail, P_DIM)
+	}
+	if total > 0 {
+		frac := clamp(f64(done) / f64(total), 0, 1)
+		bar_w := min(w - 4, 50)
+		if bar_w > 0 { // guard: _bar with w<=0 would strings.repeat a negative count
+			_bar(nc.stdscr, 5, 2, bar_w, frac, P_GREEN)
+			_put(nc.stdscr, 5, 2 + bar_w + 1, fmt.tprintf("%.1f%%", frac * 100), P_DIM)
+		}
+	}
+
+	_put(nc.stdscr, 7, 2, "The node is not ready for RPC yet. This screen updates as it recovers.", P_DIM)
+	nc.wnoutrefresh(nc.stdscr)
+	nc.doupdate()
 }
 
 _draw :: proc(st: ^p2p.Node_Status, info: Static_Info, connected: bool) {

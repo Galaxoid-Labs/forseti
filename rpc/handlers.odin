@@ -3063,6 +3063,26 @@ _handle_verifymessage :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Respo
 // Dashboard status snapshot — everything the GUI renders, for remote
 // dashboards. Mirrors p2p.Node_Status plus the node's static config.
 _handle_getnodestatus :: proc(srv: ^RPC_Server, params: json.Value) -> RPC_Response {
+	// Warmup path: the node is still booting (crash recovery / connecting pending
+	// blocks / index catch-up) and the chainstate + connection manager are not
+	// safe to read. Report boot progress from the chain.Boot_* globals ONLY, so a
+	// remote dashboard shows "recovering 5,000 / 13,153" instead of a blank
+	// spinner. `starting_up` tells the client to render the boot screen.
+	if _in_warmup(srv) {
+		obj := make(json.Object, 12, context.temp_allocator)
+		obj["starting_up"] = json.Value(json.Boolean(true))
+		obj["network"] = json.Value(json.String(srv.params.name))
+		obj["data_dir"] = json.Value(json.String(srv.data_dir))
+		obj["dbcache_mb"] = json.Value(json.Integer(i64(srv.dbcache_mb)))
+		obj["prune_mb"] = json.Value(json.Integer(i64(srv.prune_mb)))
+		obj["boot_stage"] = json.Value(json.String(string(chain.Boot_Stage)))
+		obj["boot_height"] = json.Value(json.Integer(i64(chain.Boot_Height)))
+		obj["boot_target"] = json.Value(json.Integer(i64(chain.Boot_Target)))
+		obj["rollback_done"] = json.Value(json.Integer(i64(chain.Boot_Rollback_Done)))
+		obj["rollback_total"] = json.Value(json.Integer(i64(chain.Boot_Rollback_Total)))
+		return _make_result(json.Value(obj), srv._current_id)
+	}
+
 	if srv.cm == nil {
 		return _make_error(.Internal_Error, "P2P not running", srv._current_id)
 	}

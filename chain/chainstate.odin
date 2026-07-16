@@ -100,6 +100,24 @@ Boot_Stage: cstring = ""
 Boot_Rollback_Done: int
 Boot_Rollback_Total: int
 
+// Current block height the boot phase is working at (rollback cursor or
+// pending-connect tip), and the target frontier it is climbing toward. Read
+// lock-free by the GUI/TUI and the warmup getnodestatus RPC to show a real
+// progress bar during a long recovery. Single writer (the node thread during
+// init), aligned int stores — same torn-read-free rationale as above.
+Boot_Height: int
+Boot_Target: int
+
+// Coins-cache budget ceiling during startup recovery (undo rollback AND the
+// pending-block reconnect drain). Both walk thousands of blocks cold and would
+// otherwise grow the cache to the full (possibly huge) --dbcache before the
+// budget-flush fires — on a box whose RAM is smaller than --dbcache that spills
+// into swap and thrashes indefinitely (24 GiB dbcache on a 31 GiB box wedged the
+// startup drain for 20+ min, 2026-07-16). Capping forces periodic flush+evict so
+// recovery memory stays bounded regardless of --dbcache. min() so a smaller
+// configured budget is left untouched. Restored to --dbcache once recovery ends.
+RECOVERY_COINS_BUDGET_CAP :: 2 * 1024 * 1024 * 1024 // 2 GiB
+
 chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.Chain_Params, db_cache_mb: int = 450, script_threads: int = 0, prune_target: int = 0, dc_mode: drivechain.Mode = .Off, prevout_fetch_threads: int = 0) -> Chain_Error {
 	cs.params = params
 	cs.prune_target = prune_target
@@ -268,10 +286,53 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	// would re-trigger connect and the node would wedge below its own on-disk tip.
 	Boot_Stage = "Connecting pending blocks"
 	log.infof("Connecting pending blocks (if any)...")
+
+	// Find the on-disk frontier the drain is climbing toward, so the log line
+	// and the remote dashboard can show a real "H / target (pct%)" bar instead
+	// of a bare height. Cheap forward pointer-chase over the by_prev index from
+	// the current tip while the next block has data (on disk or staged in RAM).
+	start_tip_hash, start_tip_height := chain_tip(cs)
+	Boot_Height = start_tip_height
+	{
+		frontier := start_tip_height
+		h := start_tip_hash
+		for {
+			nxt := cs.block_index.by_prev[h]
+			if nxt == nil || !(.Has_Data in nxt.status || nxt.buffered) {
+				break
+			}
+			frontier = nxt.height
+			h = nxt.hash
+		}
+		Boot_Target = frontier
+	}
+
+	// Bound the coins cache during the reconnect. After a crash-recovery rollback
+	// there can be thousands of on-disk blocks to re-connect here; at the full
+	// --dbcache that cold reconnect grows the cache past physical RAM and thrashes
+	// into swap (2026-07-16). Cap it so flush+evict fires periodically. Restored
+	// via defer (runs at function exit — the only work after the drain is pruning,
+	// which doesn't grow the cache) so a future early return inside the loop can't
+	// leave normal operation pinned at the cap. See RECOVERY_COINS_BUDGET_CAP.
+	saved_drain_budget := cs.coins.budget
+	cs.coins.budget = min(cs.coins.budget, RECOVERY_COINS_BUDGET_CAP)
+	defer cs.coins.budget = saved_drain_budget
+
 	pending_connected := 0
+	last_logged := start_tip_height
 	for {
 		n, cerr := connect_pending_blocks(cs)
 		pending_connected += n
+		_, tip_height := chain_tip(cs)
+		Boot_Height = tip_height
+		// Progress every ~2000 blocks — the drain can be tens of thousands of
+		// blocks after a crash-recovery rollback and is otherwise silent between
+		// the 1000-block PROFILE lines (no target/percentage there).
+		if Boot_Target > start_tip_height && tip_height-last_logged >= 2000 {
+			last_logged = tip_height
+			pct := f64(tip_height-start_tip_height) / f64(Boot_Target-start_tip_height) * 100.0
+			log.infof("Connecting pending blocks: %d / %d (%.1f%%)", tip_height, Boot_Target, pct)
+		}
 		if n == 0 || cerr != .None {
 			break
 		}
@@ -1512,13 +1573,15 @@ _recover_from_meta :: proc(cs: ^Chain_State) {
 		// the whole rollback completes, so an interrupted recovery just re-runs
 		// the full range and reconverges. Cap the cache low so eviction fires.
 		saved_budget := cs.coins.budget
-		cs.coins.budget = min(cs.coins.budget, 2 * 1024 * 1024 * 1024) // 2 GiB during rollback
+		cs.coins.budget = min(cs.coins.budget, RECOVERY_COINS_BUDGET_CAP) // bound rollback memory
 		defer cs.coins.budget = saved_budget
 
 		Boot_Rollback_Total = best_valid.height - meta_height
 		Boot_Rollback_Done = 0
+		Boot_Target = meta_height // rolling back DOWN toward the meta tip
 		for entry := best_valid; entry != nil && entry.height > meta_height; entry = entry.prev {
 			Boot_Rollback_Done += 1
+			Boot_Height = entry.height
 			if Boot_Rollback_Done % 5000 == 0 {
 				log.infof("Crash recovery: rolled back %d / %d blocks (at height %d)",
 					Boot_Rollback_Done, Boot_Rollback_Total, entry.height)
