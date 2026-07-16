@@ -96,3 +96,4 @@ covered: the assumeutxo quartet (`dumptxoutset`/`loadtxoutset`/`getchainstates`/
 - **assumeutxo** — `dumptxoutset`/`loadtxoutset`/`getchainstates`/`importmempool` fast bootstrap
 - **Signing descriptor engine** — private-key descriptors would unlock `descriptorprocesspsbt` (PSBT signing); `fundrawtransaction` needs a wallet
 - **REST interface** (`-rest`), `-reindex`
+- **Docker deployment** — multi-stage slim image (headless, no raylib/X11) + a `docker-compose.yml` bundling the node with the address index + Esplora API and Caddy for auto-TLS on `:3000`; multi-arch (amd64/arm64) published to GHCR from release CI. Open calls: default to signet (fast) vs mainnet; CLI-flags/mounted-conf vs full `FORSETI_*` env-var config. The ~1 TB data must be a host bind mount; RPC 8332 never published. Pairs with [deployment.md](deployment.md).
