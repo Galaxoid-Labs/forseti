@@ -105,6 +105,23 @@ test_bar_rows :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_bar_rows_fills_width :: proc(t: ^testing.T) {
+	// Regression (2026-07-17): a short history must STRETCH to fill a wide chart,
+	// not right-align and leave a blank left gutter. 3 nonzero samples across an
+	// 8-wide chart must fill all 8 columns.
+	ring: [4]f32
+	ring[0] = 8192
+	ring[1] = 8192
+	ring[2] = 8192 // ring[3] stays 0
+	rows := bar_rows(ring[:], 3, 3, 8, 1) // idx=3, count=3, width=8, 1 row
+	testing.expect_value(t, len(rows), 1)
+	testing.expect_value(t, len(rows[0]), 8)
+	for c in 0 ..< 8 {
+		testing.expect_value(t, rows[0][c], '#') // no blank left gutter
+	}
+}
+
+@(test)
 test_bar_rows_shared_scale :: proc(t: ^testing.T) {
 	// OUT-style ring: tiny values against a huge external peak. Without the
 	// floor these would all round to level 0; with it, nonzero samples fill

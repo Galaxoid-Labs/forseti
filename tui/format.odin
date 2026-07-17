@@ -41,20 +41,29 @@ sparkline :: proc(ring: []f32, idx, count, width: int, allocator := context.temp
 // direction stays visible instead of flatlining.
 bar_rows :: proc(ring: []f32, idx, count, width, rows: int, scale_peak: f32 = 0, allocator := context.temp_allocator) -> []string {
 	out := make([]string, rows, allocator)
-	n := min(count, width)
 	peak := max(scale_peak, 1024)
 	if scale_peak <= 0 {
 		for i in 0 ..< count {
 			peak = max(peak, ring[i])
 		}
 	}
+	// Stretch the `avail` most-recent samples across ALL `width` columns (newest
+	// at the right) so the chart fills the panel on wide terminals instead of
+	// right-aligning a short history and leaving a blank left gutter. When
+	// avail == width this is an exact 1:1 map (unchanged); avail < width repeats
+	// samples (blockier), avail > width subsamples. avail == 0 leaves it blank.
+	avail := min(count, len(ring))
 	levels := make([]int, width, context.temp_allocator)
-	for i in 0 ..< n {
-		pos := (idx - n + i + 2 * len(ring)) % len(ring)
-		col := width - n + i
-		levels[col] = int((ring[pos] / peak) * f32(rows) + 0.5)
-		if levels[col] == 0 && ring[pos] > 0 {
-			levels[col] = 1
+	if avail > 0 {
+		for c in 0 ..< width {
+			// frac: 0 at the left (oldest available) .. 1 at the right (newest).
+			frac: f32 = width > 1 ? f32(c) / f32(width - 1) : 1
+			off := int(frac * f32(avail - 1) + 0.5) // 0 .. avail-1 from the oldest
+			pos := (idx - avail + off + 2 * len(ring)) % len(ring)
+			levels[c] = int((ring[pos] / peak) * f32(rows) + 0.5)
+			if levels[c] == 0 && ring[pos] > 0 {
+				levels[c] = 1
+			}
 		}
 	}
 	for r in 0 ..< rows {
