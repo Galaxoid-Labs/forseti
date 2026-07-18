@@ -958,6 +958,20 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 	log.infof("Network: %s", params.name)
 	log.infof("Data directory: %s", cfg.data_dir)
 	log.infof("DB cache: %d MiB", cfg.db_cache_mb)
+	// Guard against a dbcache too large for this machine's RAM. dbcache is NOT a
+	// hard memory ceiling: during sync the coins cache is allowed to overshoot to
+	// ~1.5x its budget before backpressure blocks (p2p/sync.odin), and RocksDB +
+	// OS page cache add more — so PEAK RSS ≈ 1.5x dbcache + ~2 GB. 16 GB dbcache on
+	// a 32 GB box peaks ~25 GB and gets OOM-killed (2026-07-18). Warn loudly with a
+	// safe suggestion; don't refuse (the operator may know their box better).
+	if ram := tui.total_ram_bytes(); ram > 0 {
+		ram_mb := int(ram / (1024 * 1024))
+		peak_mb := cfg.db_cache_mb * 3 / 2 + 2048 // ~1.5x + ~2 GB overhead
+		if peak_mb > ram_mb * 65 / 100 {
+			safe := max((ram_mb * 65 / 100 - 2048) * 2 / 3, 450)
+			log.warnf("dbcache=%d MiB is large for %d MiB RAM: during sync the coins cache peaks ~%d MiB (~1.5x + overhead) and the process may be OOM-killed. Recommend --dbcache<=%d.", cfg.db_cache_mb, ram_mb, peak_mb, safe)
+		}
+	}
 	if script_threads >= 2 {
 		log.infof("Script verification: %d threads", script_threads)
 	} else {

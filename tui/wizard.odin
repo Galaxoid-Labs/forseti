@@ -271,22 +271,32 @@ _step_disk :: proc(st: ^Wiz_State, step, total: int) -> Wiz_Action {
 _step_dbcache :: proc(st: ^Wiz_State, step, total: int) -> Wiz_Action {
 	ram := total_ram_bytes()
 	balanced := 2048
-	fast := 8192
+	fast := 4096
+	safe_max := 0 // 0 = RAM unknown → no recommended ceiling
 	ram_note := "RAM: unknown"
 	if ram > 0 {
 		gb := f64(ram) / (1024 * 1024 * 1024)
-		balanced = clamp(int(gb * 1024 / 4), 450, 8192) // ~25% of RAM
-		fast = clamp(int(gb * 1024 / 2), balanced, 16384)
-		ram_note = fmt.tprintf("Detected RAM: %.1f GB", gb)
+		ram_mb := int(gb * 1024)
+		// dbcache is NOT a hard memory ceiling. During sync the coins cache is
+		// allowed to overshoot to ~1.5x its budget before backpressure blocks
+		// (p2p/sync.odin), and RocksDB + OS page cache add more on top — so PEAK
+		// RSS ≈ 1.5x dbcache + ~2 GB. 16 GB dbcache on a 32 GB box peaks ~25 GB
+		// and gets OOM-killed (2026-07-18). Size tiers by that PEAK, not the
+		// budget: Balanced peaks ~40% of RAM, Fast ~55%.
+		balanced = clamp(ram_mb / 4, 450, 8192)   // ~25% RAM (peak ~40%)
+		fast = clamp(ram_mb / 3, balanced, 16384)  // ~33% RAM (peak ~55%)
+		// Highest dbcache whose ~1.5x peak (+2 GB) stays under 65% of RAM.
+		safe_max = clamp((ram_mb * 65 / 100 - 2048) * 2 / 3, 450, 16384)
+		ram_note = fmt.tprintf("Detected RAM: %.1f GB (dbcache peaks ~1.5x its size)", gb)
 	}
 	opts := []string{
 		"Low — 450 MB",
-		fmt.tprintf("Balanced — %d MB (~25%% of RAM)", balanced),
-		fmt.tprintf("Fast initial sync — %d MB", fast),
+		fmt.tprintf("Balanced — %d MB", balanced),
+		fmt.tprintf("Fast — %d MB", fast),
 		"Custom…",
 	}
 	idx, act := _menu(step, total, "Performance (dbcache)",
-		fmt.tprintf("%s. More cache = faster sync, more memory.", ram_note), opts, 1)
+		fmt.tprintf("%s. More = faster sync but higher peak RAM.", ram_note), opts, 1)
 	if act != .Next { return act }
 	switch idx {
 	case 0: st.dbcache_mb = 450
@@ -294,15 +304,24 @@ _step_dbcache :: proc(st: ^Wiz_State, step, total: int) -> Wiz_Action {
 	case 2: st.dbcache_mb = fast
 	case 3:
 		initial := fmt.tprintf("%d", st.dbcache_mb)
+		prompt := "Database cache in MB (minimum 4):"
+		if safe_max > 0 {
+			prompt = fmt.tprintf("Database cache in MB (min 4; recommended <= %d for this RAM):", safe_max)
+		}
 		for {
-			text, fact := _field(step, total, "Custom dbcache",
-				"Database cache in MB (minimum 4):", initial, false, "")
+			text, fact := _field(step, total, "Custom dbcache", prompt, initial, false, "")
 			if fact != .Next { return fact }
 			mb, ok := strconv.parse_int(strings.trim_space(text))
 			if !ok || mb < 4 {
 				initial = text
 				_err_flash("Enter at least 4")
 				continue
+			}
+			// Warn (don't block — it's an expert override) if the ~1.5x peak
+			// would risk OOM for the detected RAM. The startup guard repeats this
+			// in the log every boot.
+			if safe_max > 0 && mb > safe_max {
+				_err_flash(fmt.tprintf("Warning: peaks ~%d GB — risks OOM on this RAM (recommend <= %d)", (mb * 3 / 2 + 2048) / 1024, safe_max))
 			}
 			st.dbcache_mb = mb
 			return .Next
