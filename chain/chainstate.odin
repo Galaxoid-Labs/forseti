@@ -331,8 +331,28 @@ chain_state_init :: proc(cs: ^Chain_State, data_dir: string, params: ^consensus.
 	for {
 		n, cerr := connect_pending_blocks(cs)
 		pending_connected += n
-		_, tip_height := chain_tip(cs)
+		tip_hash, tip_height := chain_tip(cs)
 		Boot_Height = tip_height
+
+		// Flush+evict when over the (capped) budget. CRITICAL: connect_block does
+		// NOT auto-flush — normal IBD flushes from the P2P sync loop, which is not
+		// running yet during this startup drain. Without this the coins cache grows
+		// UNBOUNDED across a large post-recovery reconnect and the process is
+		// OOM-killed (2026-07-18: 25.8 GB on a 31 GB box). The 2 GiB budget cap
+		// above is inert on its own — nothing enforced it here — this is what makes
+		// it real. Synchronous flush (single-threaded, pre-P2P); it also advances
+		// the durable tip, shortening any recovery if we crash mid-drain. The check
+		// runs once per <=256-block batch, so peak overshoot is one batch (~hundreds
+		// of MB), not gigabytes.
+		if coins_cache_should_flush(&cs.coins) {
+			dc_blob := dc_flush_blob(cs, context.temp_allocator)
+			if ferr := coins_cache_flush(&cs.coins, tip_hash, tip_height, dc_blob); ferr != .None {
+				log.errorf("Pending-block drain: flush failed at height %d (%v) — stopping drain; the next start resumes it", tip_height, ferr)
+				break
+			}
+			cs.last_flush_height = tip_height
+		}
+
 		// Progress every ~2000 blocks — the drain can be tens of thousands of
 		// blocks after a crash-recovery rollback and is otherwise silent between
 		// the 1000-block PROFILE lines (no target/percentage there).
