@@ -129,10 +129,21 @@ addr_index_db_open :: proc(data_dir: string) -> (adb: Addr_Index_DB, err: Storag
 
 	// Block-based table: cache + bloom + block size live here in RocksDB.
 	bbt := rocksdb_block_based_options_create()
-	adb.cache = rocksdb_cache_create_lru(512 * 1024 * 1024)
+	// 1 GB LRU. It now also holds index + filter blocks (below), so give it more
+	// than the old 512 MB. Total addrindex RAM is bounded ≈ this cache + memtables
+	// (4 × 512 MB) ≈ 3 GB, independent of --dbcache and of the index's on-disk size.
+	adb.cache = rocksdb_cache_create_lru(1024 * 1024 * 1024)
 	rocksdb_block_based_options_set_block_cache(bbt, adb.cache)
 	rocksdb_block_based_options_set_filter_policy(bbt, adb.bloom)
 	rocksdb_block_based_options_set_block_size(bbt, 16 * 1024)
+	// CRITICAL: keep index + bloom-filter blocks IN the bounded block cache.
+	// Default RocksDB holds them in table-reader memory outside the cache, growing
+	// unbounded with DB size — a 139 GB addrindex reached ~17 GB of filters in RAM
+	// and OOM-killed the node (2026-07-18), regardless of --dbcache. High priority
+	// + pinning L0's keeps the hot ones resident so reads don't thrash the cache.
+	rocksdb_block_based_options_set_cache_index_and_filter_blocks(bbt, 1)
+	rocksdb_block_based_options_set_cache_index_and_filter_blocks_with_high_priority(bbt, 1)
+	rocksdb_block_based_options_set_pin_l0_filter_and_index_blocks_in_cache(bbt, 1)
 	rocksdb_options_set_block_based_table_factory(opts, bbt)
 
 	path_buf: [512]byte

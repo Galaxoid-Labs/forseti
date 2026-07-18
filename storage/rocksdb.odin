@@ -85,6 +85,13 @@ foreign rocksdb_lib {
 	rocksdb_block_based_options_set_block_cache   :: proc(o: RDB_BBTOptions, cache: RDB_Cache) ---
 	rocksdb_block_based_options_set_filter_policy :: proc(o: RDB_BBTOptions, fp: RDB_FilterPolicy) ---
 	rocksdb_block_based_options_set_block_size    :: proc(o: RDB_BBTOptions, size: c.size_t) ---
+	// Bound RAM: by default RocksDB keeps every open SST's index + bloom-filter
+	// blocks in table-reader memory OUTSIDE the block cache, growing UNBOUNDED
+	// with the DB size (a 139 GB addrindex → ~17 GB of filters in RAM → OOM,
+	// 2026-07-18). These move them INTO the (bounded) block cache.
+	rocksdb_block_based_options_set_cache_index_and_filter_blocks :: proc(o: RDB_BBTOptions, v: c.uchar) ---
+	rocksdb_block_based_options_set_cache_index_and_filter_blocks_with_high_priority :: proc(o: RDB_BBTOptions, v: c.uchar) ---
+	rocksdb_block_based_options_set_pin_l0_filter_and_index_blocks_in_cache :: proc(o: RDB_BBTOptions, v: c.uchar) ---
 
 	// Read/Write options
 	rocksdb_readoptions_create    :: proc() -> RDB_ReadOptions ---
