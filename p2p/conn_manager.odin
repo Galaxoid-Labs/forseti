@@ -426,6 +426,38 @@ _on_periodic_timer :: proc(op: ^nbio.Operation, cm: ^Conn_Manager) {
 		}
 	}
 
+	// App-level socket timeouts (dial / recv-inactivity / stuck-send). These were
+	// nbio per-op timeouts, but on Linux/io_uring nbio implements them as LINKED
+	// timeouts whose completion errno is kernel-dependent; a bleeding-edge kernel
+	// (7.0.0, Ubuntu 26.06) returns an errno nbio's link_timeout_callback panics
+	// on, crashing the node under load (2026-07-17). Enforcing the deadlines here
+	// sidesteps the fragile linked-timeout path entirely — works on any kernel.
+	// Cancellation reuses peer_destroy → nbio.remove (a cancel op, not a linked
+	// timeout). See DIAL_TIMEOUT_SECS / PEER_INACTIVITY_TIMEOUT_SECS / SEND_TIMEOUT_SECS.
+	{
+		timeout_peers := make([dynamic]Peer_Id, 0, 4, context.temp_allocator)
+		for id, peer in cm.peers {
+			switch {
+			case peer.connect_op != nil && now - peer.connected_at > DIAL_TIMEOUT_SECS:
+				// Dial never completed.
+				append(&timeout_peers, id)
+			case peer.last_recv > 0 && now - peer.last_recv > PEER_INACTIVITY_TIMEOUT_SECS:
+				// Established peer gone silent (last_recv == 0 = still dialing/handshaking).
+				append(&timeout_peers, id)
+			case peer.send_op != nil && now - peer.send_started_at > SEND_TIMEOUT_SECS:
+				// A send has been in-flight too long — peer isn't draining.
+				append(&timeout_peers, id)
+			}
+		}
+		for id in timeout_peers {
+			if _, found := cm.peers[id]; found {
+				log.debugf("Peer %d: socket timeout, disconnecting", id)
+				sync_handle_disconnect(&cm.sync_mgr, id, &cm.peers)
+				conn_manager_remove_peer(cm, id)
+			}
+		}
+	}
+
 	// Force-check header sync completion after every tick.
 	if cm.sync_mgr.state == .Syncing_Headers {
 		_check_header_sync_complete(&cm.sync_mgr, &cm.peers)

@@ -66,6 +66,16 @@ DEFAULT_PORT_SIGNET   :: 38333
 MAX_OUTBOUND_FULL_RELAY     :: 8
 DEFAULT_MAX_CONNECTIONS     :: 125
 INBOUND_HANDSHAKE_TIMEOUT   :: 60  // seconds before disconnecting inbound peers stuck in handshake
+// App-level socket deadlines, enforced in the 1 Hz conn_manager tick instead of
+// via nbio's per-op timeouts. nbio implements those as io_uring LINKED timeouts,
+// whose completion errno is kernel-dependent — a bleeding-edge kernel (7.0.0,
+// Ubuntu 26.06) returns an errno nbio's link_timeout_callback panics on, crashing
+// the node under load (2026-07-17). Enforcing the deadlines ourselves avoids the
+// fragile linked-timeout path entirely (works on any kernel). Values match the
+// former nbio timeouts / Bitcoin Core.
+DIAL_TIMEOUT_SECS           :: 5     // give up on a connect that never completes
+PEER_INACTIVITY_TIMEOUT_SECS:: 1200  // drop a peer silent this long (Core TIMEOUT_INTERVAL, 20 min)
+SEND_TIMEOUT_SECS           :: 30    // drop a peer with a send stuck in-flight this long
 MAX_HEADERS_PER_MSG         :: 2000
 MAX_BLOCKS_PER_PEER         :: 16   // Bitcoin Core: 16 per peer max
 // Never request a block whose height is more than this far ahead of the

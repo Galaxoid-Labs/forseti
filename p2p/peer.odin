@@ -55,6 +55,7 @@ Peer :: struct {
 	connect_op:     ^nbio.Operation, // pending async dial (for cancel on destroy)
 	recv_op:        ^nbio.Operation, // pending recv operation (for cancel on destroy)
 	send_op:        ^nbio.Operation, // pending send operation (for cancel on destroy)
+	send_started_at: i64,   // unix ts a send went in-flight; drives SEND_TIMEOUT_SECS in the tick
 	send_queue:     [dynamic][]byte, // queued outbound messages (owned bytes)
 	sending:        bool,  // whether an async send is in-flight
 	sending_msg:    []byte, // the message currently being sent (for freeing in callback)
@@ -112,7 +113,12 @@ peer_start_connect :: proc(cm: ^Conn_Manager, address: string, port: int, peer_i
 	// destroyed while still dialing (shutdown, eviction) would otherwise fire
 	// _on_connect on freed memory (io_uring completes the dial regardless of
 	// close; kqueue doesn't, so macOS never saw it).
-	peer.connect_op = nbio.dial_poly(endpoint, peer, _on_connect, timeout = 5 * time.Second)
+	//
+	// No nbio timeout: the DIAL_TIMEOUT_SECS deadline is enforced app-side in the
+	// conn_manager tick (connect_op != nil && now - connected_at > DIAL_TIMEOUT_SECS
+	// → destroy). nbio's per-op timeout is an io_uring linked timeout whose
+	// kernel-dependent errno panics nbio on newer kernels — see DIAL_TIMEOUT_SECS.
+	peer.connect_op = nbio.dial_poly(endpoint, peer, _on_connect)
 }
 
 // Callback when async dial completes.
@@ -160,11 +166,19 @@ _peer_start_recv :: proc(peer: ^Peer) {
 		return
 	}
 	bufs := [1][]byte{peer.read_buf[:]}
-	// Inactivity timeout — Core's TIMEOUT_INTERVAL (20 min), NOT the ping
-	// cadence. With timeout == PING_INTERVAL a peer that never initiates
-	// traffic (electrs only ever replies) races our ping round and gets
-	// dropped the moment the phases misalign.
-	peer.recv_op = nbio.recv_poly(peer.socket, bufs[:], peer, _on_recv, timeout = 1200 * time.Second)
+	// Start the inactivity clock the first time we post a recv (both inbound and
+	// outbound reach here). last_recv then only advances on real data (_on_recv),
+	// so the PEER_INACTIVITY_TIMEOUT_SECS check in the tick measures true silence.
+	// Init-once: a fresh peer has last_recv == 0, which would otherwise read as
+	// "silent forever" and get dropped on the next tick.
+	if peer.last_recv == 0 {
+		peer.last_recv = time.to_unix_seconds(time.now())
+	}
+	// No nbio timeout: the inactivity deadline (Core's TIMEOUT_INTERVAL, 20 min)
+	// is enforced app-side in the conn_manager tick, not as an io_uring linked
+	// timeout (kernel-dependent errno panics nbio on newer kernels). See
+	// PEER_INACTIVITY_TIMEOUT_SECS.
+	peer.recv_op = nbio.recv_poly(peer.socket, bufs[:], peer, _on_recv)
 }
 
 // Callback when async recv completes.
@@ -503,18 +517,25 @@ _peer_flush_send_queue :: proc(peer: ^Peer) {
 
 	peer.sending = true
 	peer.sending_msg = msg
+	peer.send_started_at = time.to_unix_seconds(time.now())
 	bufs := [1][]byte{msg}
 	// Track the send op so peer_destroy can cancel it. On io_uring a submitted
 	// send completes on its own schedule regardless of socket close, so without
 	// cancelling it the _on_send callback fires on an already-freed peer
 	// (use-after-free → heap corruption; kqueue closes synchronously so macOS
 	// never saw this).
-	peer.send_op = nbio.send_poly(peer.socket, bufs[:], peer, _on_send, all = true, timeout = 30 * time.Second)
+	//
+	// No nbio timeout: the SEND_TIMEOUT_SECS deadline is enforced app-side in the
+	// conn_manager tick (send_op != nil && now - send_started_at > SEND_TIMEOUT_SECS
+	// → destroy). nbio's per-op timeout is an io_uring linked timeout whose
+	// kernel-dependent errno panics nbio on newer kernels — see SEND_TIMEOUT_SECS.
+	peer.send_op = nbio.send_poly(peer.socket, bufs[:], peer, _on_send, all = true)
 }
 
 // Callback when async send completes.
 _on_send :: proc(op: ^nbio.Operation, peer: ^Peer) {
 	peer.send_op = nil // this op is completing; nothing to cancel anymore
+	peer.send_started_at = 0 // clear the send deadline — nothing in-flight now
 	// If peer was destroyed, sending_msg was already freed — bail out.
 	if peer.state == .Disconnected {
 		return
