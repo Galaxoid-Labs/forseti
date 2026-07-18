@@ -108,6 +108,14 @@ Boot_Rollback_Total: int
 Boot_Height: int
 Boot_Target: int
 
+// Set true when the FINAL UTXO flush in chain_state_destroy fails (LevelDB
+// corruption, disk full, EIO). The on-disk UTXO set is then behind the chain
+// tip and the next startup runs crash recovery to reconcile — so the shutdown
+// was NOT clean, and main.odin reports it as such instead of "Shutdown complete."
+// Data stays safe: the flush writes the tip marker LAST, so a failed flush never
+// advances meta_tip past unwritten data (recovery rolls back to the old tip).
+Shutdown_Flush_Failed: bool
+
 // Coins-cache budget ceiling during startup recovery (undo rollback AND the
 // pending-block reconnect drain). Both walk thousands of blocks cold and would
 // otherwise grow the cache to the full (possibly huge) --dbcache before the
@@ -376,7 +384,22 @@ chain_state_destroy :: proc(cs: ^Chain_State) {
 
 	tip_hash, tip_height := chain_tip(cs)
 	dc_blob := dc_flush_blob(cs, context.temp_allocator)
-	coins_cache_flush(&cs.coins, tip_hash, tip_height, dc_blob)
+	// Final flush. DON'T swallow the error: a failed final flush leaves the
+	// on-disk UTXO set behind the tip, and reporting "Shutdown complete." anyway
+	// hides that the next start must run crash recovery (the 2026-07-16 incident —
+	// a LevelDB torn-SST failed this flush, yet shutdown looked clean). Retry once:
+	// the flush is idempotent (absolute-value puts, tip marker written LAST), so a
+	// transient failure (disk full, EIO) may clear and save an unnecessary
+	// recovery; a hard failure (corruption) fails again and we flag it loudly.
+	ferr := coins_cache_flush(&cs.coins, tip_hash, tip_height, dc_blob)
+	if ferr != .None {
+		log.errorf("Final UTXO flush failed at height %d (%v) — retrying once...", tip_height, ferr)
+		ferr = coins_cache_flush(&cs.coins, tip_hash, tip_height, dc_blob)
+	}
+	if ferr != .None {
+		Shutdown_Flush_Failed = true
+		log.errorf("Final UTXO flush FAILED (%v). The on-disk UTXO set is behind the chain tip (height %d); this is NOT a clean shutdown. Data is intact (the tip marker was not advanced past unwritten data) — the next startup will run crash recovery to reconcile. If this repeats, check disk health (LevelDB corruption / I/O errors).", ferr, tip_height)
+	}
 	coins_cache_destroy(&cs.coins)
 	drivechain.state_destroy(&cs.dc_state)
 	// LevelDB close can trigger compaction after a large flush — log so a slow

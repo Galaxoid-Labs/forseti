@@ -723,8 +723,17 @@ main :: proc() {
 	log_level: log.Level = cfg.debug ? .Debug : .Info
 	context.logger = log.create_console_logger(log_level, {.Level, .Time, .Terminal_Color})
 	// Registered before all other defers so it runs last, after every
-	// deferred destroy/flush has finished.
-	defer log.info("Shutdown complete.")
+	// deferred destroy/flush has finished. Report honestly: if the final UTXO
+	// flush failed (chain_state_destroy sets the flag), do NOT claim a clean
+	// shutdown — the next start will run crash recovery. (Root cause of the
+	// 2026-07-16 recovery: a failed final flush that still logged "complete".)
+	defer {
+		if chain.Shutdown_Flush_Failed {
+			log.error("Shutdown finished WITH ERRORS: the final UTXO flush failed — the next startup will run crash recovery to reconcile. This was NOT a clean shutdown.")
+		} else {
+			log.info("Shutdown complete.")
+		}
+	}
 
 
 	// Load config file (CLI flags take precedence).
