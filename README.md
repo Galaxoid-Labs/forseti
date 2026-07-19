@@ -118,6 +118,13 @@ Full mainnet initial block download (genesis → chain tip), measured:
 
 On a fast CPU with hardware SHA-256, IBD is **I/O-bound** — UTXO reads dominate over script verification — so a fast NVMe and a large `--dbcache` help most. Building the address index (`--index-addresses`) during the same pass roughly doubles wall-clock — the random scripthash writes are compaction-heavy — but it's **one pass**: the node finishes sync with the Esplora wallet backend already built, no separate multi-hour indexer run. See [docs/hardware.md](docs/hardware.md) for backend details and recommendations.
 
+> [!IMPORTANT]
+> **Two limits to set before a large sync — especially with `--index-addresses`:**
+> - **Open files** — the address index is thousands of RocksDB files and exhausts the default `ulimit -n` of 1024 (*"Too many open files"*). Raise it to `1048576`: `/etc/security/limits.conf` (shell, then re-login) or `LimitNOFILE=1048576` (systemd). forseti raises the soft limit to the hard limit at startup, but the **hard** limit must allow it.
+> - **`--dbcache` vs RAM** — dbcache is not a hard ceiling; the coins cache peaks at ~1.5× it during flushes, so keep dbcache **≲ RAM/4** (e.g. `8000` on 32 GB) or the node can be OOM-killed. The `--wizard` and startup logs warn if it's set too high.
+>
+> See [docs/deployment.md](docs/deployment.md) for a ready-to-use systemd unit with both set.
+
 ## Documentation
 
 | Doc | Contents |

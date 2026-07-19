@@ -152,13 +152,30 @@ _print_next_steps :: proc(st: ^Wiz_State, conf_path: string) {
 		fmt.println()
 	}
 	if st.adv_indexaddr || st.adv_esplora {
-		fmt.println("  OPEN-FILE LIMIT: the address index is thousands of files — raise the")
-		fmt.println("  open-file limit or the node hits 'Too many open files' (default is 1024):")
-		fmt.println("      systemd:  add   LimitNOFILE=1048576   under [Service]")
-		fmt.println("      shell:    add to /etc/security/limits.conf, then log out/in:")
-		fmt.println("                  <youruser>  soft  nofile  1048576")
-		fmt.println("                  <youruser>  hard  nofile  1048576")
-		fmt.println()
+		// The address index opens thousands of RocksDB SST files. Detect this
+		// machine's HARD limit and only nag (with a paste-ready fix) if it's too
+		// low — forseti raises soft->hard at startup, but can't exceed the hard
+		// limit, so a low hard limit must be raised at the OS level (root).
+		hard: u64 = 0
+		lim: posix.rlimit
+		if posix.getrlimit(.NOFILE, &lim) == .OK {
+			hard = u64(lim.rlim_max)
+		}
+		if hard >= 65536 {
+			fmt.printfln("  Open-file limit: %d — fine for the address index. ✓", hard)
+			fmt.println()
+		} else {
+			fmt.printfln("  OPEN-FILE LIMIT: only %d here — the address index opens thousands of", hard)
+			fmt.println("  files and WILL hit 'Too many open files'. Raise it (needs root, once):")
+			fmt.println()
+			fmt.println("      sudo tee /etc/security/limits.d/forseti.conf >/dev/null <<EOF")
+			fmt.println("      $USER  soft  nofile  1048576")
+			fmt.println("      $USER  hard  nofile  1048576")
+			fmt.println("      EOF")
+			fmt.println("      # then log OUT and back in (ulimit -n should read 1048576)")
+			fmt.println("  Running under systemd/--daemon instead? Put LimitNOFILE=1048576 in the unit.")
+			fmt.println()
+		}
 	}
 	fmt.println("  WATCH IT ON THIS MACHINE (build the client once with `make gui`):")
 	fmt.printfln("      ./forseti-gui --connect=127.0.0.1:%d %s", port, auth)
