@@ -955,6 +955,26 @@ _node_main :: proc(cfg: ^CLI_Config, log_level: log.Level, boot: ^gui.Boot) {
 	script_threads := _resolve_par_threads(cfg.par_threads)
 	prevout_fetch_threads := _resolve_prevout_threads(cfg.prevout_fetch_threads)
 
+	// Raise the open-file limit (soft -> hard). A large RocksDB address index is
+	// thousands of SST files; the default 1024 soft limit exhausts with "Too many
+	// open files" and indexing fails (2026-07-19). Bitcoin Core does the same. We
+	// can only raise soft UP TO the hard limit — if the hard limit is also low,
+	// it must be raised at the OS level (systemd LimitNOFILE / limits.conf).
+	when ODIN_OS == .Linux || ODIN_OS == .Darwin {
+		lim: posix.rlimit
+		if posix.getrlimit(.NOFILE, &lim) == .OK {
+			if lim.rlim_cur < lim.rlim_max {
+				lim.rlim_cur = lim.rlim_max
+				posix.setrlimit(.NOFILE, &lim)
+				posix.getrlimit(.NOFILE, &lim) // re-read the effective soft limit
+			}
+			log.infof("Open-file limit: %d (hard %d)", u64(lim.rlim_cur), u64(lim.rlim_max))
+			if u64(lim.rlim_cur) < 65536 && bool(cfg.index_addresses) {
+				log.warnf("Open-file limit is only %d — the RocksDB address index (--index-addresses) opens thousands of SST files and WILL hit 'Too many open files'. Raise the hard limit at the OS level: systemd LimitNOFILE=1048576 or /etc/security/limits.conf.", u64(lim.rlim_cur))
+			}
+		}
+	}
+
 	log.infof("Network: %s", params.name)
 	log.infof("Data directory: %s", cfg.data_dir)
 	log.infof("DB cache: %d MiB", cfg.db_cache_mb)
