@@ -151,6 +151,15 @@ _print_next_steps :: proc(st: ^Wiz_State, conf_path: string) {
 		fmt.println("  REST wallet backend (http://127.0.0.1:3000) for BDK / wallet clients.")
 		fmt.println()
 	}
+	if st.adv_indexaddr || st.adv_esplora {
+		fmt.println("  OPEN-FILE LIMIT: the address index is thousands of files — raise the")
+		fmt.println("  open-file limit or the node hits 'Too many open files' (default is 1024):")
+		fmt.println("      systemd:  add   LimitNOFILE=1048576   under [Service]")
+		fmt.println("      shell:    add to /etc/security/limits.conf, then log out/in:")
+		fmt.println("                  <youruser>  soft  nofile  1048576")
+		fmt.println("                  <youruser>  hard  nofile  1048576")
+		fmt.println()
+	}
 	fmt.println("  WATCH IT ON THIS MACHINE (build the client once with `make gui`):")
 	fmt.printfln("      ./forseti-gui --connect=127.0.0.1:%d %s", port, auth)
 	fmt.println("      (add --tui for a terminal dashboard instead of a window)")

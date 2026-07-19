@@ -93,8 +93,11 @@ Restart=on-failure
 RestartSec=10
 # A flush at scale can take minutes — give shutdown room, never kill mid-flush.
 TimeoutStopSec=600
-# Node + RocksDB + many peers open a lot of files.
-LimitNOFILE=65536
+# REQUIRED with --index-addresses: the RocksDB address index is thousands of SST
+# files and exhausts the default 1024 limit ("Too many open files"). Systemd sets
+# this for the service; if you instead run from a shell, raise it via
+# /etc/security/limits.conf (`<user> soft/hard nofile 1048576`) and re-login.
+LimitNOFILE=1048576
 # Hardening (optional but recommended)
 NoNewPrivileges=true
 ProtectSystem=strict
