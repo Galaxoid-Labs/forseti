@@ -181,6 +181,9 @@ addr_index_catchup :: proc(cs: ^Chain_State) -> bool {
 	}
 
 	log.infof("addrindex: indexing blocks %d..%d", start, tip_height)
+	// Live progress for the warmup boot screen (this catch-up can be 100k+ blocks).
+	Boot_Height = start
+	Boot_Target = tip_height
 
 	// Parallel build (compute across the worker pool, apply serially in order)
 	// when the pool is available — the reindex is otherwise single-thread
@@ -194,6 +197,7 @@ addr_index_catchup :: proc(cs: ^Chain_State) -> bool {
 	}
 
 	for h in start ..= tip_height {
+		Boot_Height = h // live progress for the warmup boot screen
 		entry, found := cs.block_index.entries[cs.active_chain[h]]
 		if !found || .Has_Data not_in entry.status {
 			// Genesis has no blk*.dat record (peers never serve it via getdata)

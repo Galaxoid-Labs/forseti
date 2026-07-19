@@ -96,6 +96,11 @@ _addr_index_catchup_parallel :: proc(cs: ^Chain_State, start, tip_height: int) -
 	num_workers := len(cs.arena_pool_arenas)
 	heap := context.allocator
 
+	// Publish progress for the warmup boot screen / getnodestatus (this phase can
+	// be a 100k+ block catch-up and otherwise shows a static height, looking hung).
+	Boot_Height = start
+	Boot_Target = tip_height
+
 	for batch_start := start; batch_start <= tip_height; batch_start += ADDR_PARALLEL_BATCH {
 		batch_end := min(batch_start + ADDR_PARALLEL_BATCH - 1, tip_height)
 		count := batch_end - batch_start + 1
@@ -159,6 +164,7 @@ _addr_index_catchup_parallel :: proc(cs: ^Chain_State, start, tip_height: int) -
 			}
 		}
 
+		Boot_Height = batch_end // live progress for the warmup boot screen
 		if batch_end % 10_000 < ADDR_PARALLEL_BATCH && batch_end > 0 {
 			log.infof("addrindex: %d / %d", batch_end, tip_height)
 		}
